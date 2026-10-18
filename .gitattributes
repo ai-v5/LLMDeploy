@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# Unified diff blank context lines must retain their leading space.
+*.patch -whitespace

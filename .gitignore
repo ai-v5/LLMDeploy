@@ -1,0 +1,16 @@
+.codex/worktrees/
+__pycache__/
+*.py[cod]
+.venv/
+local/
+artifacts/
+models/
+downloads/
+*.safetensors
+*.whl
+*.tar
+*.tar.gz
+*.run
+.env
+*.pem
+*.key

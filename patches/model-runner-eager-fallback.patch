@@ -1,0 +1,16 @@
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -1974,6 +1974,13 @@
+                 num_active_loras=batch_desc.num_active_loras,
+             )
+ 
++            # Honor model-declared eager fallback after graph dispatch.
++            # The FULL replay branch above remains unchanged.
++            skip_compiled = skip_compiled or (
++                batch_desc.cg_mode == CUDAGraphMode.NONE
++                and getattr(self.model, "requires_uncompiled_fallback", False)
++            )
++
+             with set_forward_context(
+                 attn_metadata,
+                 self.vllm_config,

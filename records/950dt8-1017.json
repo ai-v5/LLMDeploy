@@ -1,0 +1,20 @@
+{
+  "verified_at": "2026-10-19",
+  "evidence": "Live running image/version/commit/argv inspected; curated existing deployment records",
+  "hardware": "single OS, eight Ascend950DT",
+  "features": [
+    "text",
+    "up to4 images including history",
+    "native prefix caching",
+    "bounded SWA replay configured",
+    "FULL_DECODE_ONLY Graph[1,2,4]",
+    "Engram CPU offload with DP shared memory",
+    "prompt token details reporting"
+  ],
+  "disabled": [
+    "CPU KV offload",
+    "CPU/NUMA binding",
+    "optional decoder prefill trimming"
+  ],
+  "verification_boundary": "Existing host: API/SSE, tools, image input and dsh cache accounting passed. This repository extraction does not redeploy or validate a new host. Full-window checks are historical prior-instance records; no measurements are imported."
+}

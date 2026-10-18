@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "patches": [
+    {
+      "id": "model-runner-eager-fallback",
+      "tree": "vllm",
+      "path": "vllm/v1/worker/gpu/model_runner.py",
+      "before_sha256": "725c47114e148ade3a26b4cc9c5f7295588fdd387afc3cb5fdb2d16513a1bb5c",
+      "after_sha256": "869f79eb1032f3310d2f5f79ad4bbf5d5d324b3b6363adf1915ea7b1a39d9565",
+      "patch": "model-runner-eager-fallback.patch",
+      "patch_sha256": "d8f37bd07bf82f794c516e990ed4606c1282f5cd1ae3898432d6d014f5e4d613"
+    },
+    {
+      "id": "decoder-prefill-no-trimming",
+      "tree": "vllm-ascend",
+      "path": "vllm_ascend/models/deepseek_v41/decoder_replay_layers.py",
+      "before_sha256": "4c8a8459e8b751c5486d07f65bc19a58776c3a312c36d6273cc2165d121760a0",
+      "after_sha256": "f2fa32b93f9e7b76c483a26cf8fa0128ce1a72b32d02be9d5c720f2f22d8fd1a",
+      "patch": "decoder-prefill-no-trimming.patch",
+      "patch_sha256": "8eb72278e3fa2421ba023a1a67a38986c581bb0ed63a35e43370cc1918e18c2f"
+    }
+  ],
+  "license": "Original LLMDeploy contributions: AGPL-3.0-only. Upstream code portions retained in patches: Apache-2.0. See THIRD_PARTY_NOTICES.md and licenses/Apache-2.0.txt."
+}

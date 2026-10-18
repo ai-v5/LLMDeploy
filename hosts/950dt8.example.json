@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "container_name": "llmdeploy-dsv41flash1017",
+  "model_dir": "/srv/models/DeepSeek-V4.1-Flash-1017",
+  "runtime_dir": "/srv/llmdeploy/runtime",
+  "artifacts_dir": "/srv/llmdeploy/artifacts",
+  "cann_root": "/usr/local/Ascend/cann-9.2.0",
+  "port": 8900,
+  "devices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "image_id": "sha256:f9bb675777595e2b3783c4b1cc6e683e4e9db2c39cc562d2be93d1b5e21cccdd"
+}

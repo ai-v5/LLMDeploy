@@ -1,0 +1,16 @@
+{
+  "source_repo": "https://gitcode.com/cann/cannbot-dsl",
+  "source_revision": "4025ade4a1000053fe38bba192d70ce5fdba835b",
+  "raw_archive": "cannbot-dsl-4025ade4-raw.tar",
+  "raw_archive_sha256": "6af85d7799c6c17a236f6cf29bf3078e239ce4b6abb0ee84350b4d22cd32c7a6",
+  "framework_wheel": "cannbot_dsl-0.7.1-cp312-cp312-manylinux_2_28_aarch64.whl",
+  "framework_wheel_sha256": "58343723b2b1caa4c77686b3e725bfe6a1779a1d085885891f2df4f2281e46bf",
+  "operators": [
+    "mqsmla",
+    "qli",
+    "qsli"
+  ],
+  "target": "dav-3510",
+  "generated_operator_wheel_reference_sha256": "269ca309f75d3409ce548b1ca032e25a450b8ff3bb92d6e361cc1ddb9e0dfd0a",
+  "note": "Generated wheel hash is a historical identity, not a bit-reproducible build promise."
+}
