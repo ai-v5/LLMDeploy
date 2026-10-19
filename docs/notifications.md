@@ -1,0 +1,39 @@
+# 可选部署通知
+
+`deploy_notify` 独立读取双后端网关的健康快照，默认关闭，目前仅实现小鲁班发送后端。它不调用模型，也不改变 vLLM、容器、网关或隧道。
+
+## 配置与启动
+
+将 [示例](../hosts/notifications.example.json) 复制到被忽略的 `local/notifications/config.json`。启用时将 `backend` 设为对象，填写 `type: "xiaoluban"`、`endpoint`、`receiver`、`token_file`；凭据由服务提供方签发，单独保存在受限本地 JSON 文件的 `token` 字段。群 ID、内部地址、实际路径、凭据及运行收据均不得进入 Git。通知配置禁止内联 token。
+
+`nodes` 配置两个后端端口和显示标签；`backend_state` 指向现有健康快照，其格式为 `{"epoch": <Unix秒>, "active_port": <端口>, "backends": [{"port": <端口>, "healthy": <布尔值>}, ...]}`。
+
+群查询可另外启用 `incoming`：字段为 `type: "welink-cli"`、`executable`（官方 CLI 绝对路径）、`bot_name`、`bot_uid`。接收依赖已有 WeLink PC 和 CLI 登录，仅轮询 `receiver` 指定群最近 100 条消息，每约 10 秒一次。首次安装从最新消息开始，不回复历史查询。
+
+```powershell
+python -m deploy_notify --config local/notifications/config.json --check
+python -m deploy_notify --config local/notifications/config.json --send-test
+./scripts/install_notifications.ps1 -Config <local-config-path> -RuntimeDir <new-private-runtime-dir> -Python <pythonw.exe-path>
+```
+
+`--check` 只验证配置；`--send-test` 会实际发送一条标注为接入测试的消息。安装器只接受新的目录和任务名，导出绝对路径后建立独立 Windows 计划任务，首次安装立即启动。之后登录延迟 1 小时启动看护进程，并按分钟重复检查；观察进程退出约 10 秒后由看护重新拉起。查看 `alert-state.json` 和 `watchdog-state.json` 判断实际运行状态。停用时停止并禁用该通知任务，保留状态文件以维持去重。
+
+## 通知与证据边界
+
+| 情况 | 行为 |
+| --- | --- |
+| 单台持续不可用 60 秒 | 单台告警；双台持续不可用则升级告警 |
+| 后端稳定恢复 10 秒 | 部分恢复或冗余恢复通知；两台均稳定后才称冗余恢复 |
+| 重复、过期或缺失快照 | 重复快照不累计稳定时间；过期或缺失时状态未知，不推断机器故障或恢复 |
+| 群内 `@机器人 状态` | 回复配置部署数与当前健康状态；同一消息只处理一次 |
+| 查询等待重试 | 发送前重新读取状态，查询超过 120 秒不再补发 |
+
+故障指后端探测不可用，不能据此认定物理机器宕机。IPv4 在入队及发送前脱敏，仅保留最后一段；IPv6 标签整体隐藏。发送内容还会移除当前发送 token；原始消息、响应正文和含凭据的异常文本不写日志。
+
+故障状态与消息游标持久化去重。连接前失败和明确拒绝会退避重试；服务器错误、矛盾回执、发送结果不明或发送途中退出均不自动重发。服务接收与实际投递分开记录，只有在指定群读回匹配的机器人消息才标为 `DELIVERED_GROUP_RECEIPT`。结果不明应人工核对，不能保证网络故障下恰好投递一次。
+
+故障与恢复事件延迟超过快照有效期才发出时，标注为历史事件补发，描述的是事件发生时的状态。查询回复则使用发送前的快照，不沿用排队时的旧健康状态。
+
+群消息超过轮询窗口时可能漏掉查询；缺凭据为 `WAITING_CREDENTIALS`。本机断电、断网或观察中断需要外部探测覆盖。不要删除去重状态或用旧配置的验收替代新版本验证。
+
+验证使用 `python -m unittest discover -s tests -v`；故障阈值、重复消息、冻结快照、延迟查询和脱敏均可离线验证，无需中断正在运行的模型。

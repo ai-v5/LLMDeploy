@@ -38,7 +38,7 @@ class Xiaoluban:
         url = urlsplit(self.settings['endpoint'])
         connection_type = http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection
         connection = connection_type(url.hostname, url.port, timeout=10)
-        payload = json.dumps({'content': redact(content), 'receiver': self.settings['receiver'],
+        payload = json.dumps({'content': redact(content.replace(token, '[REDACTED]')), 'receiver': self.settings['receiver'],
                               'auth': token}, ensure_ascii=False).encode('utf-8')
         try:
             try:
@@ -61,13 +61,21 @@ class Xiaoluban:
                 if not isinstance(result, dict):
                     raise Uncertain('HTTP_ACCEPTED_UNVERIFIED')
                 acknowledged = result.get('success') is True
-                if result.get('success') is False:
-                    raise Rejected('APPLICATION_REJECTED')
+                rejected = result.get('success') is False
+                unknown = False
                 for key in ('code', 'errcode'):
                     if key in result:
-                        if str(result[key]).lower() not in ('0', '200', 'ok', 'success'):
-                            raise Rejected('APPLICATION_REJECTED')
-                        acknowledged = True
+                        code = str(result[key]).lower()
+                        if code in ('0', '200', 'ok', 'success'):
+                            acknowledged = True
+                        elif code in ('400', '401', '403', '404', '405', '422', '429'):
+                            rejected = True
+                        else:
+                            unknown = True
+                if unknown or (acknowledged and rejected):
+                    raise Uncertain('APPLICATION_OUTCOME_UNCERTAIN')
+                if rejected:
+                    raise Rejected('APPLICATION_REJECTED')
                 if not acknowledged:
                     raise Uncertain('HTTP_ACCEPTED_UNVERIFIED')
                 return 'SERVICE_ACCEPTED'

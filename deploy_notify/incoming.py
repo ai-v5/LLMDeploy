@@ -50,7 +50,7 @@ def consume(tracker, messages, settings, snapshot, now):
         tracker.state['incoming'] = 'READY'
         return
     for row in rows:
-        if row['msgId'] <= cursor:
+        if row['msgId'] <= tracker.state['message_cursor']:
             continue
         tracker.state['message_cursor'] = row['msgId']
         if row.get('sender') == settings['bot_uid']:
@@ -76,5 +76,6 @@ def consume(tracker, messages, settings, snapshot, now):
         stamp /= 1000
         if not 0 <= now - stamp <= 120:
             continue
-        tracker.enqueue('STATUS_REPLY', status_text(tracker.config, snapshot, now), now)
+        event = tracker.enqueue('STATUS_REPLY', status_text(tracker.config, snapshot, now), now)
+        event['expires_epoch'] = stamp + 120
     tracker.state['incoming'] = 'READY'
