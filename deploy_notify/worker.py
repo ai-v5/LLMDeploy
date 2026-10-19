@@ -102,13 +102,13 @@ def recover_sending(state):
             item.update(status='uncertain', result='INTERRUPTED_DELIVERY_NO_RESEND')
 
 
-def singleton(root):
+def singleton(root, role='worker'):
     if os.name != 'nt':
         raise ValueError('WINDOWS_WORKER_REQUIRED')
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateMutexW.restype = wintypes.HANDLE
-    name = 'Local\\LLMDeployNotify_' + hashlib.sha256(str(root).lower().encode()).hexdigest()[:20]
+    name = 'Local\\LLMDeployNotify_' + role + '_' + hashlib.sha256(str(root).lower().encode()).hexdigest()[:20]
     handle = kernel.CreateMutexW(None, False, name)
     if not handle:
         raise OSError('MUTEX_CREATE_FAILED')

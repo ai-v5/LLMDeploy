@@ -91,7 +91,7 @@ python -m deploy_notify --config local/notifications/config.json --send-test
 ./scripts/install_notifications.ps1 -Config <local-config-path> -RuntimeDir <new-private-runtime-dir> -Python <pythonw.exe-path>
 ```
 
-安装器只接受新的运行目录和任务名，已有目标先停止并检查，避免覆盖其它工作。任务使用当前登录用户运行，登录后延迟 1 小时启动，随后每分钟检查，运行中不重复启动；首次安装显式立即启动。独立运行目录内的 `alert-state.json` 保存事件和群消息游标，读取此文件判断实际状态；缺凭据为 `WAITING_CREDENTIALS`，配置通过不等于投递成功。停用时停止并禁用该通知计划任务，保留状态文件以维持去重；不会影响推理服务。
+安装器只接受新的运行目录和任务名，已有目标先停止并检查，避免覆盖其它工作。任务使用当前登录用户运行，登录后延迟 1 小时启动看护进程，随后每分钟检查，运行中不重复启动；首次安装显式立即启动。看护进程在观察程序退出约 10 秒后重新启动它，`watchdog-state.json` 记录退出码及重启次数。独立运行目录内的 `alert-state.json` 保存事件和群消息游标，读取此文件判断实际状态；缺凭据为 `WAITING_CREDENTIALS`，配置通过不等于投递成功。停用时停止并禁用该通知计划任务，保留状态文件以维持去重；不会影响推理服务。
 
 同一故障通过持久状态去重。连接前失败和明确拒绝会退避重试；发送结果不明或发送途中退出时不自动重发，避免重复通知。HTTP 成功、服务接收与群历史中读回机器人消息分开记录；只有读回匹配消息才标记 `DELIVERED_GROUP_RECEIPT`，结果不明需人工核对。状态和未完成事件必须保留，删除状态会丢失去重依据。本机断电、断网或观察程序停止无法由自身通知，需要另设外部探测。
 

@@ -37,7 +37,7 @@ try {
     # Resolve application-virtualized executable paths before Task Scheduler starts outside that app.
     & $consolePython -m deploy_notify --config $configPath --export-config $runtimeConfig
     if ($LASTEXITCODE -ne 0) { throw 'Runtime configuration export failed' }
-    $action = New-ScheduledTaskAction -Execute $pythonPath -Argument ('-m deploy_notify --config "' + $runtimeConfig + '"') -WorkingDirectory $runtimePath
+    $action = New-ScheduledTaskAction -Execute $pythonPath -Argument ('-m deploy_notify.watchdog --config "' + $runtimeConfig + '"') -WorkingDirectory $runtimePath
     $logon = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
     $logon.Delay = 'PT1H'
     $logon.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)).Repetition
