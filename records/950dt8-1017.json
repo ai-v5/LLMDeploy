@@ -4,7 +4,7 @@
   "hardware": "single OS, eight Ascend950DT",
   "features": [
     "text",
-    "up to4 images including history",
+    "image limit configured to 16 including history",
     "native prefix caching",
     "bounded SWA replay configured",
     "FULL_DECODE_ONLY Graph[1,2,4]",

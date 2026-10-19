@@ -28,6 +28,10 @@ class RecipeTests(unittest.TestCase):
         for token in ['--max-model-len 524288','--data-parallel-size 8','--tensor-parallel-size 1','--enable-expert-parallel','--enable-prefix-caching','--swa-bounded-replay','--enable-prompt-tokens-details','apply_patches.py']:
             self.assertIn(token,script)
         self.assertEqual(self.recipe['client_limits']['maxTokens'],32768)
+        limit_index=self.recipe['vllm_args'].index('--limit-mm-per-prompt')+1
+        self.assertEqual(json.loads(self.recipe['vllm_args'][limit_index]),{'image':16})
+        self.assertIn('--limit-mm-per-prompt',script)
+        self.assertIn('{"image":16}',script)
 
     def test_machine_path_and_port_reconfiguration(self):
         self.host.update(cann_root='/opt/Ascend/cann-9.2.0',port=9890,model_dir='/data/model')

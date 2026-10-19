@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from .backends import build_backend, Unavailable, Rejected, Uncertain
 from .incoming import WelinkHistory, consume
-from .tracker import Tracker, status_text
+from .tracker import Tracker, event_content, status_text
 
 
 def load_config(path):
@@ -70,10 +70,27 @@ def write_json(path, value):
     tmp.replace(path)
 
 
+def read_snapshot(config):
+    try:
+        return json.loads(Path(config['backend_state']).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
 def dispatch(tracker, save, backend, now):
     for item in tracker.state['outbox']:
         if item['status'] != 'pending' or item['next_try'] > now:
             continue
+        if item['kind'] == 'STATUS_REPLY':
+            if now >= item.get('expires_epoch', item['epoch'] + 120):
+                item.update(status='expired', completed_epoch=now)
+                save()
+                continue
+            item['content'] = event_content(status_text(tracker.config, read_snapshot(tracker.config), now), item['epoch'])
+        elif (item['kind'] in ('NODE_DOWN', 'BOTH_DOWN', 'NODE_RECOVERED', 'SERVICE_RECOVERED')
+              and now - item['epoch'] > tracker.config['freshness_seconds'] and not item.get('delayed')):
+            item['content'] = '【历史事件补发，以下为事件发生时的状态】\n' + item['content']
+            item['delayed'] = True
         try:
             backend.token()
         except Unavailable:
@@ -128,10 +145,7 @@ def run(config, root, once=False, send_test=False):
     recover_sending(tracker.state)
     save = lambda: write_json(path, tracker.state)
     if send_test:
-        try:
-            snapshot = json.loads(Path(config['backend_state']).read_text(encoding='utf-8-sig'))
-        except (OSError, ValueError):
-            snapshot = {}
+        snapshot = read_snapshot(config)
         now = time.time()
         tracker.enqueue('ACTIVATION_TEST', '【部署通知接入测试，不代表真实故障】\n' +
                         status_text(config, snapshot, now), now)
@@ -145,10 +159,7 @@ def run(config, root, once=False, send_test=False):
     try:
         while True:
             now = time.time()
-            try:
-                snapshot = json.loads(Path(config['backend_state']).read_text(encoding='utf-8-sig'))
-            except (OSError, ValueError):
-                snapshot = {}
+            snapshot = read_snapshot(config)
             tracker.observe(snapshot, now)
             tracker.state.update(worker_pid=os.getpid(), worker_epoch=now)
             try:
@@ -174,7 +185,7 @@ def run(config, root, once=False, send_test=False):
                 future = pool.submit(reader.fetch)
                 next_read = now + 10
             tracker.state['outbox'] = [x for x in tracker.state['outbox']
-                if x['status'] not in ('accepted', 'delivered') or now - x.get('completed_epoch', now) < 30 * 86400]
+                if x['status'] not in ('accepted', 'delivered', 'expired') or now - x.get('completed_epoch', now) < 30 * 86400]
             save()
             dispatch(tracker, save, backend, now)
             if once:
