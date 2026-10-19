@@ -1,10 +1,10 @@
 {
-  "verified_at": "2026-10-19",
-  "evidence": "Live running image/version/commit/argv inspected; curated existing deployment records",
+  "verified_at": "2026-10-20",
+  "evidence": "Live runtime identity inspected; standby API checked with indexed synthetic images, real multi-turn history and concurrent requests; curated existing deployment records",
   "hardware": "single OS, eight Ascend950DT",
   "features": [
     "text",
-    "image limit configured to 16 including history",
+    "image admission limit 640 including history; indexed-image functional checks passed",
     "native prefix caching",
     "bounded SWA replay configured",
     "FULL_DECODE_ONLY Graph[1,2,4]",
@@ -16,5 +16,5 @@
     "CPU/NUMA binding",
     "optional decoder prefill trimming"
   ],
-  "verification_boundary": "Existing host: API/SSE, tools, image input and dsh cache accounting passed. This repository extraction does not redeploy or validate a new host. Full-window checks are historical prior-instance records; no measurements are imported."
+  "verification_boundary": "Standby API: indexed 640-image requests, four-turn cumulative history, same/multiple-DP four-request concurrency, count/context rejection and post-load text checks passed. Unindexed positional lookup failed; this is not an arbitrary-image quality guarantee or a full client/gateway acceptance. The existing primary instance was unchanged. Full-window/output and client checks remain historical prior-instance records; no measurements are imported."
 }

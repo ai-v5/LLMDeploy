@@ -29,9 +29,9 @@ class RecipeTests(unittest.TestCase):
             self.assertIn(token,script)
         self.assertEqual(self.recipe['client_limits']['maxTokens'],32768)
         limit_index=self.recipe['vllm_args'].index('--limit-mm-per-prompt')+1
-        self.assertEqual(json.loads(self.recipe['vllm_args'][limit_index]),{'image':16})
+        self.assertEqual(json.loads(self.recipe['vllm_args'][limit_index]),{'image':640})
         self.assertIn('--limit-mm-per-prompt',script)
-        self.assertIn('{"image":16}',script)
+        self.assertIn('{"image":640}',script)
 
     def test_machine_path_and_port_reconfiguration(self):
         self.host.update(cann_root='/opt/Ascend/cann-9.2.0',port=9890,model_dir='/data/model')

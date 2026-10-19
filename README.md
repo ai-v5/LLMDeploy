@@ -15,7 +15,7 @@
 | 并行 | TP1 / DP8 / EP8 / PP1 / CP1，单机单 OS |
 | 总上下文 / 客户端输出上限 | 524288 / 32768 tokens；输入与输出合计不超过总上下文 |
 | 调度 / Graph | 每 DP 最多 4 条序列；FULL_DECODE_ONLY，捕获 `[1,2,4]` |
-| 图片 | 每次请求连同历史最多 16 张；客户端声明 `input: [text, image]` |
+| 图片 | 每次请求连同历史最多 640 张，仍受上下文限制；客户端声明 `input: [text, image]` |
 | 缓存 | Prefix Cache、SWA bounded replay 配置开启，缓存用量明细开启 |
 | 主存 | Engram CPU offload + DP 共享；CPU KV offload 关闭 |
 | API | 容器使用 host 网络，仅绑定主机 `127.0.0.1:8900` |
