@@ -16,7 +16,9 @@ python -m deploy_notify --config local/notifications/config.json --send-test
 ./scripts/install_notifications.ps1 -Config <local-config-path> -RuntimeDir <new-private-runtime-dir> -Python <pythonw.exe-path>
 ```
 
-`--check` 只验证配置；`--send-test` 会实际发送一条标注为接入测试的消息。安装器只接受新的目录和任务名，导出绝对路径后建立独立 Windows 计划任务，首次安装立即启动。之后登录延迟 1 小时启动看护进程，并按分钟重复检查；观察进程退出约 10 秒后由看护重新拉起。查看 `alert-state.json` 和 `watchdog-state.json` 判断实际运行状态。停用时停止并禁用该通知任务，保留状态文件以维持去重。
+`--check` 只验证配置；`--send-test` 会实际发送一条标注为接入测试的消息。安装器只接受新的目录和任务名，导出绝对路径后建立独立 Windows 计划任务，首次安装立即启动。之后登录延迟 1 小时启动看护进程，并按分钟重复检查；观察进程退出约 10 秒后由看护重新拉起。查看 `alert-state.json` 和 `watchdog-state.json` 判断实际运行状态。
+
+停用时先禁用并停止通知任务，再核对上述状态文件中的 PID 与完整命令行，停止仍存活的本通知进程；停止任务不保证子进程退出。不要按 `python` 进程名批量停止，保留状态文件以维持去重。
 
 ## 通知与证据边界
 
