@@ -69,6 +69,32 @@
 
 参考：[vLLM Ascend 官方模型部署文档](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html)。官方 `latest` 页面会变化；本仓固定配方来自实际部署，不自动跟随该页面升级。
 
+## 可选部署通知
+
+`deploy_notify` 是独立的 Windows 本地观察程序，读取现有双后端网关的健康快照，不重启模型或网关。通知默认关闭，当前仅实现 `xiaoluban` 后端；发送与状态跟踪分开，后续新增其它后端时不需要改变故障判定。
+
+将 [通知示例](hosts/notifications.example.json) 复制到被忽略的 `local/notifications/config.json`。只有本地配置填写实际群 ID、内部 API 地址、机器标签、凭据文件和接收程序路径；这些值和运行收据不进入 Git。示例地址使用文档专用网段。
+
+启用时把 `backend: null` 改为对象，字段为 `type: "xiaoluban"`、`endpoint`、`receiver`、`token_file`。凭据文件是仅保存在本机的 JSON 对象，包含 `token` 字段；配置和命令行不接受内联 token。填写服务方提供的发送接口地址，不将真实配置提交到仓库。
+
+发送凭据由通知服务提供方签发，按服务当前帮助申请。不要把 token 粘贴到聊天、终端命令、日志或 Git；直接保存到本地受限文件。
+
+健康快照格式为 `{"epoch": <Unix秒>, "active_port": <端口>, "backends": [{"port": <端口>, "healthy": <布尔值>}, ...]}`。`nodes` 配置两个端口及显示标签。默认持续不可用 60 秒才告警，恢复稳定 10 秒后通知；支持单台故障、双台不可用升级、部分恢复和冗余恢复。IP 在发送前统一只保留最后一段。丢失或过期的快照显示未知，不能当作机器故障或恢复，监测空档也不计入持续故障时间。
+
+群内状态查询需要另外启用 `incoming` 对象：`type: "welink-cli"`、`executable`（已安装的官方 CLI 绝对路径）、`bot_name`（显示名称）、`bot_uid`（机器人账号）。它只读取 `receiver` 指定群最近 100 条消息，每约 10 秒轮询；严格匹配“@机器人 状态”，不调用模型。新安装从最新消息开始，不回复旧消息；状态回复分别显示配置部署数与当前健康状况。读取依赖已有 WeLink PC 和 CLI 登录，不自动登录、不修改其它应用。高消息量超出轮询窗口时可能漏掉查询。
+
+```powershell
+python -m deploy_notify --config local/notifications/config.json --check
+# This command really sends one clearly labelled activation test.
+python -m deploy_notify --config local/notifications/config.json --send-test
+# Hidden Windows task; use absolute local paths in the installed configuration.
+./scripts/install_notifications.ps1 -Config <local-config-path> -RuntimeDir <new-private-runtime-dir> -Python <pythonw.exe-path>
+```
+
+安装器只接受新的运行目录和任务名，已有目标先停止并检查，避免覆盖其它工作。任务使用当前登录用户运行，登录后延迟 1 小时启动，随后每分钟检查，运行中不重复启动；首次安装显式立即启动。独立运行目录内的 `alert-state.json` 保存事件和群消息游标，读取此文件判断实际状态；缺凭据为 `WAITING_CREDENTIALS`，配置通过不等于投递成功。停用时停止并禁用该通知计划任务，保留状态文件以维持去重；不会影响推理服务。
+
+同一故障通过持久状态去重。连接前失败和明确拒绝会退避重试；发送结果不明或发送途中退出时不自动重发，避免重复通知。HTTP 成功、服务接收与群历史中读回机器人消息分开记录；只有读回匹配消息才标记 `DELIVERED_GROUP_RECEIPT`，结果不明需人工核对。状态和未完成事件必须保留，删除状态会丢失去重依据。本机断电、断网或观察程序停止无法由自身通知，需要另设外部探测。
+
 ## 本地检查
 
 ```sh
