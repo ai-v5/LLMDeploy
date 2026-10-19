@@ -65,6 +65,7 @@ class UsageTests(unittest.TestCase):
         a.record((10, 3, 5, 1, 2, 1), self.midnight + 5)
         a.fail()
         value = report(self.root, self.midnight + 10)
+        value.update(received_epoch=self.midnight + 10, clock_skew_seconds=0)
         self.assertEqual(value['errors'], 1)
         self.assertEqual(value['windows']['total']['covered_seconds'], 0)
         self.assertIn('统计不完整', '\n'.join(usage.lines(value, self.midnight + 10)))
@@ -90,6 +91,7 @@ class UsageTests(unittest.TestCase):
         a.record((100, 20, 40, 1, 19, 2), self.midnight + 10)
         now = self.midnight + 20
         value = report(self.root, now)
+        value.update(received_epoch=now, clock_skew_seconds=0)
         config = {'nodes': {'19001': '192.0.2.106', '19002': '198.51.100.47'},
                   'freshness_seconds': 15, 'usage': {'enabled': True},
                   '_usage_snapshot': {'19001': value, '19002': value}}
@@ -111,6 +113,21 @@ class UsageTests(unittest.TestCase):
         for key, value in [('target', '-oProxyCommand=bad'), ('target', 'host;id'), ('code_dir', '/opt/x;id'), ('data_dir', '/var/../etc')]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 usage.validate({'1': {**base, key: value}}, {'1': 'node'})
+
+    def test_remote_clock_skew_does_not_make_fresh_received_data_unavailable(self):
+        a = self.store()
+        a.record((100, 20, 40, 1, 19, 2), self.midnight + 10)
+        settings = {'target': 'fixture-host', 'code_dir': '/opt/usage', 'data_dir': '/var/lib/usage'}
+        for skew in (-40, 40):
+            local = self.midnight + 100
+            remote = report(self.root, local + skew)
+            with patch('deploy_notify.usage.time.time', side_effect=[local - 1, local]), patch(
+                    'deploy_notify.usage.subprocess.run', return_value=Mock(returncode=0, stdout=json.dumps(remote).encode())):
+                fetched = usage._fetch(settings)
+            text = '\n'.join(usage.lines(fetched, local + 2))
+            self.assertIn('今天：', text)
+            self.assertIn('主机时钟', text)
+            self.assertIn('不能视为 0', '\n'.join(usage.lines(fetched, local + 91)))
 
     def test_plugin_deltas_match_engine_and_storage_failure_is_fail_open(self):
         fake = ModuleType('vllm.v1.metrics.loggers')

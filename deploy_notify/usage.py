@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 import re
 import shlex
 import subprocess
+import time
 
 NAMES = (('today', '今天'), ('24h', '近24小时'), ('3d', '近3天'), ('7d', '近7天'), ('total', '累计'))
 TZ = timezone(timedelta(hours=8))
@@ -30,12 +31,14 @@ def validate(settings, nodes):
 def _fetch(settings):
     command = shlex.join(['env', 'PYTHONPATH=' + settings['code_dir'], 'python3',
         '-m', 'deploy_usage.report', '--root', settings['data_dir']])
+    started = time.time()
     result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
         '-o', 'ConnectTimeout=5', settings['target'], command],
         capture_output=True, stdin=subprocess.DEVNULL, timeout=15,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode or len(result.stdout) > 65536:
         raise ValueError('USAGE_UNAVAILABLE')
+    received = time.time()
     value = json.loads(result.stdout)
     # Never carry remote text into the group. Reconstruct from bounded numbers only.
     assert value['schema'] == 1
@@ -57,6 +60,8 @@ def _fetch(settings):
             safe['windows'][name][key] = n
         assert row['cached'] <= row['input'] and row['covered_seconds'] <= row['seconds'] + 1
         assert row['hit_rate'] is None or row['hit_rate'] <= 1
+    safe['received_epoch'] = received
+    safe['clock_skew_seconds'] = safe['as_of'] - (started + received) / 2
     return safe
 
 
@@ -73,7 +78,7 @@ def fetch_all(settings):
 
 def lines(value, now):
     try:
-        if value is None or not 0 <= now - value['as_of'] <= 90 or value['since'] is None:
+        if value is None or not 0 <= now - value['received_epoch'] <= 90 or value['since'] is None:
             return ['统计暂不可用，不能视为 0。']
         stamp = lambda epoch: datetime.fromtimestamp(epoch, TZ).strftime('%m-%d %H:%M:%S')
         output = ['统计自 ' + stamp(value['since']) + '，截止 ' + stamp(value['as_of']) + '（北京时间）']
@@ -89,6 +94,9 @@ def lines(value, now):
                 f"（{hit}）；均{row['output_tps']:.2f} tok/s；生成{rate} tok/s{note}")
         if value['errors']:
             output.append('记账异常：以上为已保存数量，统计不完整。')
+        skew = value['clock_skew_seconds']
+        if abs(skew) > 5:
+            output.append(f'主机时钟相对通知机约{skew:+.0f}秒；窗口按主机时间。')
         return output
     except (KeyError, TypeError, ValueError, OverflowError, OSError):
         return ['统计暂不可用，不能视为 0。']
