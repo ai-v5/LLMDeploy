@@ -4,6 +4,8 @@ import re
 import time
 import uuid
 
+from .usage import lines as usage_lines
+
 IPV4 = re.compile(r'(?<!\d)(?:\d{1,3}\.){3}(\d{1,3})(?!\d)')
 IPV6 = re.compile(r'(?<![0-9A-Fa-f:])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]+(?:%[\w.-]+)?')
 
@@ -147,4 +149,12 @@ def status_text(config, snapshot, now):
         ('可用' if health[p] else '不可用') if fresh else '状态未知') + '）'
         for p, label in labels.items())
     note = '' if fresh else '\n健康快照缺失或过期，不能确认当前可用性。'
-    return redact(f'{len(labels)} 个 vLLM 实例已配置部署，分别是 {instances}。{note}')
+    text = f'{len(labels)} 个 vLLM 实例已配置部署，分别是 {instances}。{note}'
+    if config.get('usage'):
+        usage = config.get('_usage_snapshot', {})
+        for port, label in labels.items():
+            text += '\n\n' + label + '\n' + '\n'.join(usage_lines(usage.get(port), now))
+        text += ('\n\n入含历史与图片 token；缓已计入入。均=窗口输出/窗口秒数；'
+                 '生成=已结束请求的解码 token/解码秒数之和。近3/7天为滚动72/168小时。'
+                 '\n按引擎前端观测记账（含中止前已观测输出），秒级归属；异常退出尾部可能缺失。')
+    return redact(text)

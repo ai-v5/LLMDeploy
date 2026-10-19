@@ -16,13 +16,14 @@ from urllib.parse import urlsplit
 from .backends import build_backend, Unavailable, Rejected, Uncertain
 from .incoming import WelinkHistory, consume
 from .tracker import Tracker, event_content, status_text
+from .usage import fetch_all as fetch_usage, validate as validate_usage
 
 
 def load_config(path):
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding='utf-8-sig'))
     allowed = {'backend', 'backend_state', 'nodes', 'down_seconds', 'recovery_seconds',
-               'freshness_seconds', 'poll_seconds', 'incoming'}
+               'freshness_seconds', 'poll_seconds', 'incoming', 'usage'}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError('INVALID_CONFIG_FIELDS')
     if config.get('backend') is None:
@@ -49,6 +50,8 @@ def load_config(path):
             raise ValueError('INVALID_TIMING')
     if config['poll_seconds'] >= config['freshness_seconds']:
         raise ValueError('POLL_MUST_BE_FASTER_THAN_FRESHNESS')
+    if config.get('usage') is not None:
+        validate_usage(config['usage'], nodes)
     for obj, key in [(config, 'backend_state'), (backend, 'token_file')]:
         value = Path(obj[key])
         obj[key] = str((value if value.is_absolute() else path.parent / value).resolve())
@@ -154,13 +157,25 @@ def run(config, root, once=False, send_test=False):
         return tracker.state.get('delivery', 'NO_DELIVERY')
     incoming = config.get('incoming')
     reader = WelinkHistory(incoming, config['backend']['receiver']) if incoming else None
-    pool = ThreadPoolExecutor(max_workers=1) if reader else None
+    usage_settings = config.get('usage')
+    pool = ThreadPoolExecutor(max_workers=2) if reader or usage_settings else None
     future, next_read = None, 0
+    usage_future, next_usage = None, 0
     try:
         while True:
             now = time.time()
             snapshot = read_snapshot(config)
             tracker.observe(snapshot, now)
+            if usage_future is not None and usage_future.done():
+                try:
+                    config['_usage_snapshot'] = usage_future.result()
+                except Exception:
+                    config['_usage_snapshot'] = {}
+                tracker.state['usage'] = config['_usage_snapshot']
+                usage_future = None
+            if usage_settings and usage_future is None and now >= next_usage:
+                usage_future = pool.submit(fetch_usage, usage_settings)
+                next_usage = now + 30
             tracker.state.update(worker_pid=os.getpid(), worker_epoch=now)
             try:
                 backend.token()
