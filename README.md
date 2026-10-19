@@ -65,8 +65,7 @@
 - [部署过程记录](docs/deployment-record.md)：当前方案如何收敛，以及已知边界；不包含性能结果。
 - [机器可读记录](records/950dt8-1017.json)：已运行部署的配置来源和功能验收范围。
 - [可选部署通知](docs/notifications.md)：本地通知与群内状态查询。
-
-本仓部署配方整理只做静态检查、单元测试与离线补丁应用验证，没有在新机器重建镜像或重新部署，也不改变正在运行的服务。
+- [本机 token 统计](docs/usage.md)：持久用量与群内汇总。
 
 参考：[vLLM Ascend 官方模型部署文档](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html)。官方 `latest` 页面会变化；本仓固定配方来自实际部署，不自动跟随该页面升级。
 

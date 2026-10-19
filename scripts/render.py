@@ -25,12 +25,15 @@ def validate(host,recipe):
     dirs=[PurePosixPath(host[k]) for k in ['model_dir','runtime_dir','artifacts_dir']]
     assert len(set(dirs))==3 and not any(a.is_relative_to(b) for a in dirs for b in dirs if a!=b),'HOST_DIRS_OVERLAP'
 
-def command(host,recipe,repo_path=None,optional_devices=None,optional_mounts=None):
+def command(host,recipe,repo_path=None,optional_devices=None,optional_mounts=None,usage=False):
     validate(host,recipe)
     root=str(repo_path or REPO.resolve())
     assert root.startswith('/') and ':' not in root and '\n' not in root and '\r' not in root,'RENDER_ON_TARGET_LINUX_HOST'
     env={**recipe['env'],'ASCEND_RT_VISIBLE_DEVICES':','.join(map(str,host['devices'])),
          'HF_HOME':'/runtime/huggingface','XDG_CACHE_HOME':'/runtime/cache','TORCHINDUCTOR_CACHE_DIR':'/runtime/torchinductor','VLLM_NO_USAGE_STATS':'1','DO_NOT_TRACK':'1'}
+    if usage:
+        env.update(PYTHONPATH='/deployment:/runtime/usage-plugin',
+            LLMDEPLOY_USAGE_DIR='/artifacts/usage', LLMDEPLOY_USAGE_WRITERS='8')
     old=env['ASCEND_TOOLKIT_HOME']
     for k in ['ASCEND_TOOLKIT_HOME','ASCEND_HOME_PATH','ASCEND_OPP_PATH','LD_LIBRARY_PATH']:
         env[k]=env[k].replace(old,host['cann_root'])
@@ -48,11 +51,16 @@ def command(host,recipe,repo_path=None,optional_devices=None,optional_mounts=Non
     for p in devices+sorted(optional_devices):args+=['--device',p]
     vllm=recipe['vllm_args'].copy();vllm[vllm.index('--port')+1]=str(host['port'])
     script='source "$ASCEND_TOOLKIT_HOME/set_env.sh" && python3 /deployment/scripts/apply_patches.py && exec '+shlex.join(['vllm',*vllm])
+    if usage:
+        setup=('python3 /deployment/scripts/register_usage.py --target /runtime/usage-plugin && '
+               'export LLMDEPLOY_USAGE_RUN=$(python3 -c "import uuid; print(uuid.uuid4().hex)") && ')
+        script=setup+script
     return args+[host['image_id'],'--noprofile','--norc','-c',script]
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--host',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
-    a=p.parse_args();host=load(a.host);cmd=command(host,load(RECIPE))
+    p.add_argument('--usage',action='store_true',help='Persist local token accounting through the bundled stat logger')
+    a=p.parse_args();host=load(a.host);cmd=command(host,load(RECIPE),usage=a.usage)
     a.output.parent.mkdir(parents=True,exist_ok=True)
     with a.output.open('x',encoding='utf-8',newline='\n') as f:
         f.write('#!/usr/bin/env bash\nset -eo pipefail\n# Explicit operator action: this starts a new container; it never stops an existing one.\n')

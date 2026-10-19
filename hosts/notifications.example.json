@@ -9,5 +9,6 @@
   "recovery_seconds": 10,
   "freshness_seconds": 15,
   "poll_seconds": 2,
-  "incoming": null
+  "incoming": null,
+  "usage": null
 }
