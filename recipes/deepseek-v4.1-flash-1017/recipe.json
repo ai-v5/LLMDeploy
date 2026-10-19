@@ -90,7 +90,7 @@
     "--enable-prefix-caching",
     "--swa-bounded-replay",
     "--limit-mm-per-prompt",
-    "{\"image\":16}",
+    "{\"image\":640}",
     "--engram-config",
     "{\"cpu_offload\":true,\"dp_shared_memory\":true}",
     "--model-loader-extra-config",
