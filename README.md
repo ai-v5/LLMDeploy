@@ -66,6 +66,7 @@
 - [机器可读记录](records/950dt8-1017.json)：已运行部署的配置来源和功能验收范围。
 - [可选部署通知](docs/notifications.md)：本地通知与群内状态查询。
 - [本机 token 统计](docs/usage.md)：持久用量与群内汇总。
+- [双后端会话路由](docs/gateway.md)：会话保持、均衡与故障切换。
 
 参考：[vLLM Ascend 官方模型部署文档](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html)。官方 `latest` 页面会变化；本仓固定配方来自实际部署，不自动跟随该页面升级。
 
