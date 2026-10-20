@@ -35,7 +35,7 @@
     "CP": 1
   },
   "client_limits": {
-    "contextWindow": 524288,
+    "contextWindow": 1048576,
     "maxTokens": 32768,
     "input": [
       "text",
@@ -80,7 +80,7 @@
     "--quantization",
     "deepseek_v4_fp8",
     "--max-model-len",
-    "524288",
+    "1048576",
     "--max-num-batched-tokens",
     "2048",
     "--max-num-seqs",
