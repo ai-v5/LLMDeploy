@@ -1,0 +1,12 @@
+[Unit]
+Description=Check the pinned vLLM container every ten minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1s
+Persistent=true
+Unit=llmdeploy-vllm-recovery.service
+
+[Install]
+WantedBy=timers.target
