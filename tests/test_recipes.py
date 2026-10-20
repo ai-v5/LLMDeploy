@@ -25,8 +25,10 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(args.count('--device'),12)
         self.assertIn('ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7',args)
         script=args[-1]
-        for token in ['--max-model-len 524288','--data-parallel-size 8','--tensor-parallel-size 1','--enable-expert-parallel','--enable-prefix-caching','--swa-bounded-replay','--enable-prompt-tokens-details','apply_patches.py']:
+        for token in ['--max-model-len 1048576','--data-parallel-size 8','--tensor-parallel-size 1','--enable-expert-parallel','--enable-prefix-caching','--swa-bounded-replay','--enable-prompt-tokens-details','apply_patches.py']:
             self.assertIn(token,script)
+        context_index=self.recipe['vllm_args'].index('--max-model-len')+1
+        self.assertEqual(self.recipe['client_limits']['contextWindow'],int(self.recipe['vllm_args'][context_index]))
         self.assertEqual(self.recipe['client_limits']['maxTokens'],32768)
         limit_index=self.recipe['vllm_args'].index('--limit-mm-per-prompt')+1
         self.assertEqual(json.loads(self.recipe['vllm_args'][limit_index]),{'image':640})

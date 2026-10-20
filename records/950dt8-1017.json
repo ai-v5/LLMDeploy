@@ -1,9 +1,10 @@
 {
   "verified_at": "2026-10-20",
-  "evidence": "Live runtime identity inspected; standby API checked with indexed synthetic images, real multi-turn history and concurrent requests; curated existing deployment records",
+  "evidence": "Primary and backup runtime identities inspected separately; synthetic near-window retrieval, actual multi-turn history, cache, concurrency and image regression checked; raw receipts remain private",
   "hardware": "single OS, eight Ascend950DT",
   "features": [
     "text",
+    "1048576-token total context; client output cap 32768",
     "image admission limit 640 including history; indexed-image functional checks passed",
     "native prefix caching",
     "bounded SWA replay configured",
@@ -16,5 +17,5 @@
     "CPU/NUMA binding",
     "optional decoder prefill trimming"
   ],
-  "verification_boundary": "Standby API: indexed 640-image requests, four-turn cumulative history, same/multiple-DP four-request concurrency, count/context rejection and post-load text checks passed. Unindexed positional lookup failed; this is not an arbitrary-image quality guarantee or a full client/gateway acceptance. The existing primary instance was unchanged. Full-window/output and client checks remain historical prior-instance records; no measurements are imported."
+  "verification_boundary": "Both 1M instances passed near-window five-needle retrieval, actual assistant history with a corrected middle needle, cache reuse, in-flight long-request concurrency including queueing, eight-DP checks and 16-image regression. This does not prove simultaneous full-window decode, arbitrary-image quality or maximum 32K output. Earlier 512K instances passed indexed 640-image and cumulative-history checks; the 640-image plus near-1M-text combination was not tested. Original gateway routing was checked separately. No performance measurements are imported."
 }
