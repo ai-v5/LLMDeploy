@@ -27,6 +27,15 @@ def event_content(message, now):
     return redact(message) + '\n事件时间：' + stamp
 
 
+def routing_text(labels, snapshot, health):
+    if snapshot.get('routing_mode') == 'session_affinity':
+        available = [labels[p] for p in labels if health.get(p) is True]
+        return '会话均衡（' + '、'.join(available) + '）' if available else '无可用后端'
+    active_port = str(snapshot.get('active_port'))
+    return labels[active_port] if health.get(active_port) else (
+        '等待切换至健康后端' if any(health.values()) else '无可用后端')
+
+
 class Tracker:
     def __init__(self, config, state=None):
         self.config = config
@@ -98,9 +107,7 @@ class Tracker:
                             and sample_time - n['good_since'] >= recovery
                             for p, n in self.state['nodes'].items())
         labels = self.config['nodes']
-        active_port = str(snapshot.get('active_port'))
-        active = labels[active_port] if observed.get(active_port) else (
-            '等待切换至健康后端' if any(observed.values()) else '无可用后端')
+        active = routing_text(labels, snapshot, observed)
         events = []
         if all_down and not both.get('alerted') and sample_time - both['bad_since'] >= down:
             both['alerted'] = True
@@ -150,6 +157,8 @@ def status_text(config, snapshot, now):
         for p, label in labels.items())
     note = '' if fresh else '\n健康快照缺失或过期，不能确认当前可用性。'
     text = f'{len(labels)} 个 vLLM 实例已配置部署，分别是 {instances}。{note}'
+    if fresh and snapshot.get('routing_mode') == 'session_affinity':
+        text += '\n当前承载：' + routing_text(labels, snapshot, health) + '；故障迁移后不自动回迁。'
     if config.get('usage'):
         usage = config.get('_usage_snapshot', {})
         for port, label in labels.items():

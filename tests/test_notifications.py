@@ -99,6 +99,22 @@ class AlertTests(unittest.TestCase):
         event = self.tracker.enqueue('EXAMPLE', text, 100)
         self.assertNotIn('192.0.2.', event['content'])
 
+    def test_balanced_status_and_recovery_describe_both_nodes(self):
+        snapshot = {'epoch': 100, 'active_port': 19001, 'routing_mode': 'session_affinity',
+                    'backends': [{'port': 19001, 'healthy': True}, {'port': 19002, 'healthy': True}]}
+        text = n.status_text(self.config, snapshot, 100)
+        self.assertIn('会话均衡（*.*.*.106、*.*.*.47）', text)
+        self.assertIn('不自动回迁', text)
+        self.interval(100, 160, False, True)
+        events = []
+        for now in range(162, 174, 2):
+            snapshot['epoch'] = now
+            events.extend(self.tracker.observe(snapshot, now))
+        self.assertEqual([e['kind'] for e in events], ['NODE_RECOVERED'])
+        self.assertIn('会话均衡（*.*.*.106、*.*.*.47）', events[0]['content'])
+        snapshot['epoch'] = 100
+        self.assertNotIn('会话均衡', n.status_text(self.config, snapshot, 200))
+
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
