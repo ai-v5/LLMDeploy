@@ -14,4 +14,4 @@ python -m deploy_gateway --key-store local/gateway-keys.json --bindings-file loc
 
 连接失败或后端 5xx 时，仅在尚未向客户端发送响应头前尝试另一台。开始返回 SSE 后发生故障会结束该流，客户端可重新发起完整请求；无法搬迁正在生成的 KV 状态。网关不记录请求、响应或认证材料。慢请求的上游读取等待默认为 10800 秒，可用 `--upstream-timeout` 调整；它不是模型端的执行时限。
 
-两台模型版本、图片和上下文限制应保持一致；不一致时入口能力按两台共同支持的下限声明，不能把单台实验配置当作整个入口的能力。`backend-state.json` 的 `active_ports` 表示可用池，`active_port` 仅保留一个代表端口供旧消费者使用，不代表所有请求只在该端口执行。
+两台模型版本、图片和上下文限制应保持一致；上下文不一致时用 `--model-context-limit` 指定共同支持的下限。它保守收紧 `/v1/models` 的 `max_model_len` 声明，故障切换时也不把单台实验配置当作整个入口的能力。请求 token 校验仍由模型执行，不会静默截断输入。`backend-state.json` 的 `active_ports` 表示可用池，`active_port` 仅保留一个代表端口供旧消费者使用，不代表所有请求只在该端口执行。

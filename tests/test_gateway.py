@@ -1,9 +1,10 @@
 import hashlib
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
+import socketserver
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,13 @@ class Model(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == '/v1/models' and self.server.up:
+            body = json.dumps({'data': [{'id': 'example', 'max_model_len': self.server.context}]}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body) + (100 if getattr(self.server, 'metadata_truncate', False) else 0)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(200 if self.server.up else 503)
         self.send_header('Content-Length', '0')
         self.end_headers()
@@ -63,6 +71,7 @@ class GatewayTests(unittest.TestCase):
             server = ThreadingHTTPServer(('127.0.0.1', 0), Model)
             server.daemon_threads = True
             server.up, server.mode, server.calls = True, 'normal', []
+            server.context = 1048576
             self.start(server)
             self.models.append(server)
         self.ports = [m.server_port for m in self.models]
@@ -85,7 +94,7 @@ class GatewayTests(unittest.TestCase):
         self.start(server)
         return server
 
-    def request(self, session=None, body=None, token=None, method='POST', gateway=None):
+    def request(self, session=None, body=None, token=None, method='POST', gateway=None, path='/v1/chat/completions'):
         server = gateway or self.gateway
         connection = HTTPConnection('127.0.0.1', server.server_port, timeout=5)
         headers = {'Authorization': 'Bearer ' + (self.key if token is None else token),
@@ -94,7 +103,7 @@ class GatewayTests(unittest.TestCase):
             headers['x-deepseek-harness-session-id'] = session
         payload = json.dumps(body if body is not None else {'messages': [{'role': 'user', 'content': 'example'}]}).encode()
         try:
-            connection.request(method, '/v1/chat/completions', payload, headers)
+            connection.request(method, path, payload, headers)
             response = connection.getresponse()
             return response.status, response.getheader('X-DSH-Backend-Port'), response.read()
         finally:
@@ -190,6 +199,45 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual([a[0], b[0]], [200, 200])
         self.assertNotEqual(a[1], b[1])
         self.assertEqual(len(self.gateway.backends.bindings), 2)
+
+    def test_common_model_limit_stays_conservative_after_failover(self):
+        self.gateway.model_context_limit = 524288
+        for primary_up in (True, False, True):
+            self.models[0].up = primary_up
+            self.gateway.backends.probe()
+            self.gateway.backends.probe()
+            status, _, body = self.request(method='GET', path='/v1/models')
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)['data'][0]['max_model_len'], 524288)
+        self.models[0].context = 131072
+        self.assertEqual(json.loads(self.request(method='GET', path='/v1/models')[2])['data'][0]['max_model_len'], 131072)
+
+    def test_truncated_metadata_retries_before_headers(self):
+        self.gateway.model_context_limit = 524288
+        self.models[0].metadata_truncate = True
+        status, port, body = self.request(method='GET', path='/v1/models')
+        self.assertEqual((status, port), (200, str(self.ports[1])))
+        self.assertEqual(json.loads(body)['data'][0]['max_model_len'], 524288)
+        self.assertFalse(self.gateway.backends.healthy[self.ports[0]])
+
+    def test_client_cancellation_never_marks_healthy_model_down(self):
+        self.gateway.model_context_limit = 524288
+        original = socketserver._SocketWriter.write
+        for target in ('metadata', 'headers'):
+            def disconnect(writer, data):
+                front = writer._sock.getsockname()[1] == self.gateway.server_port
+                matched = data.startswith(b'{"data":') if target == 'metadata' else data.startswith(b'HTTP/1.1')
+                if front and matched:
+                    raise BrokenPipeError('synthetic client cancellation')
+                return original(writer, data)
+            with patch.object(socketserver._SocketWriter, 'write', disconnect):
+                if target == 'metadata':
+                    self.assertEqual(self.request(method='GET', path='/v1/models')[::2], (200, b''))
+                else:
+                    with self.assertRaises(HTTPException):
+                        self.request('cancelled')
+            self.assertTrue(all(self.gateway.backends.healthy.values()))
+        self.assertEqual(self.request('cancelled')[1], str(self.ports[0]))
 
 
 class BindingTests(unittest.TestCase):

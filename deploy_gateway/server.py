@@ -76,7 +76,7 @@ class Gateway(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800):
+    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
         if state_path and Path(state_path).resolve() in (Path(key_store).resolve(), Path(bindings_file).resolve()):
@@ -89,6 +89,9 @@ class Gateway(ThreadingHTTPServer):
         if not math.isfinite(upstream_timeout) or upstream_timeout <= 0:
             raise ValueError('Invalid upstream timeout')
         self.upstream_timeout = upstream_timeout
+        if model_context_limit is not None and (type(model_context_limit) is not int or model_context_limit <= 0):
+            raise ValueError('Invalid common model context limit')
+        self.model_context_limit = model_context_limit
         self.key_store = Path(key_store)
         self.upstream_port = upstream_port
         self.authorized('startup-validation-placeholder')
@@ -225,18 +228,44 @@ class Handler(BaseHTTPRequestHandler):
                 if response.status >= 500:
                     self.server.backends.failed(port)
                     continue
+                model_body = None
+                if self.command == 'GET' and url.path == '/v1/models' and response.status == 200 and self.server.model_context_limit is not None:
+                    raw = response.read(1024 * 1024 + 1)
+                    if response.length:
+                        raise IncompleteRead(b'', response.length)
+                    try:
+                        if len(raw) > 1024 * 1024:
+                            raise ValueError('Oversized model metadata')
+                        models = json.loads(raw)
+                        for model in models['data']:
+                            limit = model.get('max_model_len')
+                            if type(limit) is int and limit > 0:
+                                model['max_model_len'] = min(limit, self.server.model_context_limit)
+                        model_body = json.dumps(models, separators=(',', ':')).encode()
+                    except (ValueError, KeyError, TypeError, AttributeError) as error:
+                        raise HTTPException('Invalid model metadata') from error
                 if balanced and port != ports[0]:
                     self.server.backends.bind(key, port, generation)
-                self.send_response(response.status)
-                dynamic = {x.strip().lower() for x in (response.getheader('Connection') or '').split(',')}
-                for name, value in response.getheaders():
-                    if name.lower() not in HOP_HEADERS | dynamic | {'server', 'date', 'content-length', 'x-dsh-backend-port'}:
-                        self.send_header(name, value)
-                self.send_header('X-DSH-Backend-Port', str(port))
-                self.send_header('Connection', 'close')
-                self.end_headers()
+                try:
+                    self.send_response(response.status)
+                    dynamic = {x.strip().lower() for x in (response.getheader('Connection') or '').split(',')}
+                    for name, value in response.getheaders():
+                        if name.lower() not in HOP_HEADERS | dynamic | {'server', 'date', 'content-length', 'x-dsh-backend-port'}:
+                            self.send_header(name, value)
+                    self.send_header('X-DSH-Backend-Port', str(port))
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                except OSError:
+                    self.close_connection = True
+                    return
                 sent_headers = True
                 self.close_connection = True
+                if model_body is not None:
+                    try:
+                        self.wfile.write(model_body)
+                    except OSError:
+                        self.close_connection = True
+                    return
                 if self.command != 'HEAD':
                     while True:
                         chunk = response.read1(65536)
@@ -277,8 +306,9 @@ def main():
     parser.add_argument('--bindings-file', type=Path, required=True)
     parser.add_argument('--key-store', type=Path, required=True)
     parser.add_argument('--upstream-timeout', type=float, default=10800)
+    parser.add_argument('--model-context-limit', type=int)
     args = parser.parse_args()
-    server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout)
+    server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit)
     print(json.dumps({'state': 'LISTENING', 'listen': args.listen, 'port': args.port}), flush=True)
     server.serve_forever()
 
