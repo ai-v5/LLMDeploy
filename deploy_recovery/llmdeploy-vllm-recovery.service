@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the pinned vLLM container after one hour of sampled NPU idleness
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/llmdeploy-vllm-recovery
+ExecStart=/usr/bin/python3 -B -m deploy_recovery --config /etc/llmdeploy-vllm-recovery.json
+TimeoutStartSec=180
+UMask=0077

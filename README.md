@@ -67,6 +67,7 @@
 - [可选部署通知](docs/notifications.md)：本地通知与群内状态查询。
 - [本机 token 统计](docs/usage.md)：持久用量与群内汇总。
 - [双后端会话路由](docs/gateway.md)：会话保持、均衡与故障切换。
+- [停止后的空闲恢复](docs/recovery.md)：每十分钟检查，空闲一小时后启动原容器。
 
 参考：[vLLM Ascend 官方模型部署文档](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html)。官方 `latest` 页面会变化；本仓固定配方来自实际部署，不自动跟随该页面升级。
 
