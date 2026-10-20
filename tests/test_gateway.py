@@ -94,13 +94,14 @@ class GatewayTests(unittest.TestCase):
         self.start(server)
         return server
 
-    def request(self, session=None, body=None, token=None, method='POST', gateway=None, path='/v1/chat/completions'):
+    def request(self, session=None, body=None, token=None, method='POST', gateway=None, path='/v1/chat/completions', extra_headers=None):
         server = gateway or self.gateway
         connection = HTTPConnection('127.0.0.1', server.server_port, timeout=5)
         headers = {'Authorization': 'Bearer ' + (self.key if token is None else token),
                    'Content-Type': 'application/json'}
         if session is not None:
             headers['x-deepseek-harness-session-id'] = session
+        headers.update(extra_headers or {})
         payload = json.dumps(body if body is not None else {'messages': [{'role': 'user', 'content': 'example'}]}).encode()
         try:
             connection.request(method, path, payload, headers)
@@ -238,6 +239,45 @@ class GatewayTests(unittest.TestCase):
                         self.request('cancelled')
             self.assertTrue(all(self.gateway.backends.healthy.values()))
         self.assertEqual(self.request('cancelled')[1], str(self.ports[0]))
+
+    def configure_contexts(self):
+        self.gateway.model_context_limit = 524288
+        self.gateway.backend_context_limits = dict(zip(self.ports, [524288, 1048576]))
+        self.models[0].context = 524288
+
+    def test_context_eligibility_migrates_and_never_falls_back_to_short_node(self):
+        self.configure_contexts()
+        self.assertEqual(self.request('context-session')[1], str(self.ports[0]))
+        header = {'x-model-context-window': '1048576'}
+        self.assertEqual(self.request('context-session', extra_headers=header)[1], str(self.ports[1]))
+        self.assertEqual(self.request('context-session')[1], str(self.ports[1]))
+        self.models[1].up = False
+        self.gateway.backends.probe()
+        count = len(self.models[0].calls)
+        self.assertEqual(self.request('context-session', extra_headers=header)[0], 503)
+        self.assertEqual(len(self.models[0].calls), count)
+        self.assertEqual(self.request('ordinary')[1], str(self.ports[0]))
+
+    def test_context_header_controls_metadata_without_expanding_normal_catalog(self):
+        self.configure_contexts()
+        ordinary = self.request(method='GET', path='/v1/models')
+        long = self.request(method='GET', path='/v1/models', extra_headers={'x-model-context-window': '1048576'})
+        self.assertEqual(json.loads(ordinary[2])['data'][0]['max_model_len'], 524288)
+        self.assertEqual((long[0], long[1]), (200, str(self.ports[1])))
+        self.assertEqual(json.loads(long[2])['data'][0]['max_model_len'], 1048576)
+
+    def test_invalid_or_unsupported_context_does_not_reach_models(self):
+        self.configure_contexts()
+        for value, expected in [('1M', 400), ('0', 400), ('999999999999999', 400), ('1048577', 503)]:
+            self.assertEqual(self.request('bad-context', extra_headers={'x-model-context-window': value})[0], expected)
+        self.assertEqual(sum(len(m.calls) for m in self.models), 0)
+
+    def test_context_config_rejects_partial_or_overstated_capabilities(self):
+        for limits, common in [({self.ports[0]:1048576}, 524288), (dict(zip(self.ports,[524288,-1])),524288),
+                               (dict(zip(self.ports,[524288,1048576])),1048576)]:
+            with self.assertRaises(ValueError):
+                Gateway(('127.0.0.1',0), self.store, *self.ports, self.root/'other-state.json',self.root/'other-bindings.json',
+                        model_context_limit=common, backend_context_limits=limits)
 
 
 class BindingTests(unittest.TestCase):
