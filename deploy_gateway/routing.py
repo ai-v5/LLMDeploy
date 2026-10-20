@@ -84,9 +84,9 @@ class SessionRouter:
         self.bindings = candidate
         self.generations[key] = self.generations.get(key, 0) + 1
 
-    def order(self, key=None, balanced=True):
+    def order(self, key=None, balanced=True, eligible_ports=None):
         with self.lock:
-            good = [p for p in self.ports if self.healthy[p]]
+            good = [p for p in self.ports if self.healthy[p] and (eligible_ports is None or p in eligible_ports)]
             if not good:
                 raise Unavailable('NO_HEALTHY_BACKEND')
             if not balanced:

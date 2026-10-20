@@ -76,7 +76,7 @@ class Gateway(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None):
+    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
         if state_path and Path(state_path).resolve() in (Path(key_store).resolve(), Path(bindings_file).resolve()):
@@ -92,6 +92,12 @@ class Gateway(ThreadingHTTPServer):
         if model_context_limit is not None and (type(model_context_limit) is not int or model_context_limit <= 0):
             raise ValueError('Invalid common model context limit')
         self.model_context_limit = model_context_limit
+        self.backend_context_limits = dict(backend_context_limits or {})
+        if self.backend_context_limits and (set(self.backend_context_limits) != {upstream_port, backup_port}
+                or any(type(p) is not int or type(limit) is not int or not 0 < limit <= 10**9 for p, limit in self.backend_context_limits.items())):
+            raise ValueError('Context limits must cover every configured backend')
+        if model_context_limit is not None and self.backend_context_limits and min(self.backend_context_limits.values()) < model_context_limit:
+            raise ValueError('Common model context exceeds a backend limit')
         self.key_store = Path(key_store)
         self.upstream_port = upstream_port
         self.authorized('startup-validation-placeholder')
@@ -122,6 +128,20 @@ class Gateway(ThreadingHTTPServer):
             matches = hmac.compare_digest(digest, expected)
             accepted = accepted or (matches and record['active'])
         return accepted
+
+    def context_route(self, headers):
+        values = headers.get_all('x-model-context-window', [])
+        if not values:
+            return None, self.model_context_limit
+        if len(values) != 1 or not re.fullmatch(r'[0-9]{1,10}', values[0]) or int(values[0]) <= 0:
+            raise ValueError('Invalid context window')
+        requested = int(values[0])
+        if not self.backend_context_limits:
+            raise ValueError('Context routing is not configured')
+        eligible = {port for port, limit in self.backend_context_limits.items() if limit >= requested}
+        if not eligible:
+            raise Unavailable('No backend supports this context window')
+        return eligible, requested
 
     def handle_error(self, request, client_address):
         # The client can disconnect during a long stream. Avoid traceback noise.
@@ -204,10 +224,11 @@ class Handler(BaseHTTPRequestHandler):
                 headers[name] = value
         balanced = self.command == 'POST'
         try:
+            eligible, context_limit = self.server.context_route(self.headers)
             key = affinity_key(self.headers, body, hashlib.sha256(fields[1].encode()).hexdigest()) if balanced else None
-            ports, generation = self.server.backends.order(key, balanced)
+            ports, generation = self.server.backends.order(key, balanced, eligible)
         except ValueError:
-            self.error(400, 'Invalid session identifier')
+            self.error(400, 'Invalid session identifier or context window')
             return
         except (Unavailable, OSError):
             self.error(503, 'Session routing is unavailable')
@@ -229,7 +250,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.server.backends.failed(port)
                     continue
                 model_body = None
-                if self.command == 'GET' and url.path == '/v1/models' and response.status == 200 and self.server.model_context_limit is not None:
+                if self.command == 'GET' and url.path == '/v1/models' and response.status == 200 and context_limit is not None:
                     raw = response.read(1024 * 1024 + 1)
                     if response.length:
                         raise IncompleteRead(b'', response.length)
@@ -240,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                         for model in models['data']:
                             limit = model.get('max_model_len')
                             if type(limit) is int and limit > 0:
-                                model['max_model_len'] = min(limit, self.server.model_context_limit)
+                                model['max_model_len'] = min(limit, context_limit)
                         model_body = json.dumps(models, separators=(',', ':')).encode()
                     except (ValueError, KeyError, TypeError, AttributeError) as error:
                         raise HTTPException('Invalid model metadata') from error
@@ -307,8 +328,17 @@ def main():
     parser.add_argument('--key-store', type=Path, required=True)
     parser.add_argument('--upstream-timeout', type=float, default=10800)
     parser.add_argument('--model-context-limit', type=int)
+    parser.add_argument('--backend-context-limit', action='append', default=[], metavar='PORT=TOKENS')
     args = parser.parse_args()
-    server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit)
+    limits = {}
+    for item in args.backend_context_limit:
+        if not re.fullmatch(r'[0-9]{1,5}=[0-9]{1,10}', item):
+            parser.error('Backend context limits must use PORT=TOKENS')
+        port, limit = map(int, item.split('='))
+        if port in limits:
+            parser.error('Duplicate backend context limit')
+        limits[port] = limit
+    server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit, limits)
     print(json.dumps({'state': 'LISTENING', 'listen': args.listen, 'port': args.port}), flush=True)
     server.serve_forever()
 
