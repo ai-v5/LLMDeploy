@@ -48,6 +48,22 @@ class AdversarialTests(unittest.TestCase):
         incoming.consume(self.tracker, [message, dict(message)], self.incoming, self.snapshot(100), 100)
         self.assertEqual(len(self.tracker.state['outbox']), 1)
 
+    def test_one_group_echo_confirms_only_one_identical_pending_event(self):
+        self.tracker.state['message_cursor'] = 1
+        first = self.tracker.enqueue('STATUS_REPLY', 'same status', 100)
+        second = self.tracker.enqueue('STATUS_REPLY', 'same status', 100)
+        first['status'], second['status'] = 'uncertain', 'accepted'
+        self.assertEqual(first['content'], second['content'])
+        message = {'msgId': 2, 'groupId': 'example-group', 'sender': 'example-bot',
+                   'content': first['content'] + '\nattribution'}
+        incoming.consume(self.tracker, [message, dict(message)], self.incoming, {}, 101)
+        self.assertEqual(first['status'], 'delivered')
+        self.assertEqual(second['status'], 'accepted')
+        self.assertNotIn('receipt_message_id', second)
+        incoming.consume(self.tracker, [{**message, 'msgId': 3}], self.incoming, {}, 102)
+        self.assertEqual(second['status'], 'delivered')
+        self.assertEqual([first['receipt_message_id'], second['receipt_message_id']], [2, 3])
+
     def test_expired_pending_status_is_not_sent_after_credentials_return(self):
         event = self.tracker.enqueue('STATUS_REPLY', 'old status', 100)
         backend = Mock()

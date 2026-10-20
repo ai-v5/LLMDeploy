@@ -62,6 +62,7 @@ def consume(tracker, messages, settings, snapshot, now):
                             text == event['content'] or text.startswith(event['content'] + '\n')):
                         event.update(status='delivered', receipt_message_id=row['msgId'], completed_epoch=now)
                         tracker.state['delivery'] = 'DELIVERED_GROUP_RECEIPT'
+                        break
             continue
         mentions = row.get('atAccountList', [])
         if isinstance(mentions, str):
