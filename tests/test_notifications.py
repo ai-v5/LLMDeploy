@@ -250,6 +250,25 @@ class DeliveryTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         worker.load_config(path)
 
+    def test_three_deepinfer_nodes_keep_service_available_and_preserve_dedup(self):
+        config = {**self.config, 'nodes':{**self.config['nodes'],'19008':'third-backend'}, 'engine_name':'DeepInfer'}
+        tracker = n.Tracker(config, copy.deepcopy(self.tracker.state))
+        def sample(now, good):
+            return {'epoch':now,'routing_mode':'session_affinity','backends':[
+                {'port':int(port),'healthy':port in good} for port in config['nodes']]}
+        events=[]
+        for now in range(100,162,2):events.extend(tracker.observe(sample(now,{'19008'}),now))
+        self.assertEqual([e['kind'] for e in events],['NODE_DOWN','NODE_DOWN'])
+        self.assertFalse(tracker.state['both'].get('alerted',False))
+        self.assertTrue(all('1/3' in e['content'] for e in events))
+        self.assertIn('3 个 DeepInfer',n.status_text(config,sample(162,{'19008'}),162))
+        restarted = n.Tracker(config,copy.deepcopy(tracker.state))
+        for now in range(164,220,2):self.assertEqual(restarted.observe(sample(now,{'19008'}),now),[])
+        recovered=[]
+        for now in range(222,234,2):recovered.extend(restarted.observe(sample(now,set(config['nodes'])),now))
+        self.assertEqual([e['kind'] for e in recovered],['NODE_RECOVERED'])
+        self.assertIn('3 机冗余已恢复',recovered[0]['content'])
+
     def test_group_echo_confirms_uncertain_delivery_without_resending(self):
         event = self.tracker.enqueue('TEST', 'masked message', 100)
         event['status'] = 'uncertain'

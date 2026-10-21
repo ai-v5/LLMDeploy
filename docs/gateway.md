@@ -1,6 +1,6 @@
-# 双后端会话路由
+# 多后端会话路由
 
-`python -m deploy_gateway` 在本地 SSH 转发端口前提供兼容 OpenAI 的 HTTP/SSE 入口。两台健康时按已绑定会话数分配新会话；已有会话保持同一机器和 DP rank。仅剩一台时使用健康机器，故障迁移后保持新绑定，原机器恢复后参与新会话分配。绑定持久化，网关重启不主动重新分配。
+`python -m deploy_gateway` 在本地 SSH 转发端口前提供兼容 OpenAI 的 HTTP/SSE 入口。健康后端按在途请求数、已绑定会话数分配新会话；已有会话优先保持同一机器，故障或容量不足时迁移并保持新绑定。绑定持久化，网关重启不主动重新分配。
 
 ```sh
 python -m deploy_gateway --key-store local/gateway-keys.json --bindings-file local/session-bindings.json --backend-state local/backend-state.json
@@ -17,3 +17,13 @@ python -m deploy_gateway --key-store local/gateway-keys.json --bindings-file loc
 两台模型版本、图片和上下文限制应保持一致；上下文不一致时用 `--model-context-limit` 指定共同支持的下限。它保守收紧 `/v1/models` 的 `max_model_len` 声明，故障切换时也不把单台实验配置当作整个入口的能力。请求 token 校验仍由模型执行，不会静默截断输入。`backend-state.json` 的 `active_ports` 表示可用池，`active_port` 仅保留一个代表端口供旧消费者使用，不代表所有请求只在该端口执行。
 
 需要给特定客户端开放长上下文时，为每个后端配置 `--backend-context-limit PORT=TOKENS`。客户端发送 `x-model-context-window`（总上下文 tokens，包含输出），只会使用支持该容量的健康后端，模型列表也按该请求的容量声明。缺少此头的客户端继续使用普通均衡与共同上限。没有符合容量的健康后端时返回 503，不降级到短上下文机器；会话迁移后保持新绑定。此头不转发给模型，实际请求仍由模型校验且不截断。只有一台支持长上下文时，该容量暂不具备双机故障切换能力。
+
+DeepInfer 等自行调度 DP rank 的后端使用 `--backend-managed-affinity`：网关保留上述会话头和 `x-deepinfer-cache-namespace`，不注入 vLLM 的 `X-data-parallel-rank`。机器层绑定与原生 token 前缀缓存调度各自保留；机器故障或满载迁移后需要在新机器重新建立缓存。
+
+重复 `--backend-port` 可配置任意数量的 loopback 后端，替代默认的两个端口。例如三个后端使用 `--backend-port 19001 --backend-port 19002 --backend-port 19008`。`--max-active-per-backend` 默认 32；全池同时等待上限由 `--max-waiting` 控制，默认 32，最长等待由 `--queue-timeout` 控制，默认 5 秒。选机和占用配额在同一把锁内完成；全池满载、队列满额或等待超时返回 429 和 `Retry-After: 1`，没有健康且准入的后端返回 503。该等待时限不包含模型执行时间。请求体最多 64 MiB，读取请求体也计入服务请求槽位；客户端断开时关闭对应上游连接并释放在途配额。
+
+多个公开端口必须由同一个反向代理转发至同一网关进程，才能共享流控和会话绑定；不要为每个入口各启动一套网关。反向代理需保留 SSE 实时传输、客户端取消和认证头，关闭包含请求或认证材料的访问日志。可先启动一个新入口，验收后排空旧入口，再通过代理的平滑重载将旧端口作为别名加入。
+
+TCP 监听队列为 256，用于吸收反向代理的瞬间建连，避免请求进入 HTTP 准入前被重置；它不扩大推理并发和等待配额。
+
+可选 `--control-file local/admission.json` 支持滚动排空。文件内容为 `{"enabled_ports":[19001,19002,19008]}`，只准入列表内的已配置后端；采用临时文件加原子替换更新。空列表、文件缺失或无效内容会关闭新请求准入，现有流继续执行。健康探测循环刷新此控制，每轮结束后间隔两秒，`backend-state.json` 的各后端 `draining` 和 `inflight` 字段用于确认排空。只在配额、原生请求指标与客户端连接均排空后停止远端服务；保留旧容器与配方用于回退。
