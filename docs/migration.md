@@ -33,6 +33,22 @@ dsh 中只需保留这些模型能力字段；提供方类型为 `openai-complet
 
 总窗口为 1,048,576 tokens，含输入和输出；输出请求 32,768 时，输入预算最多为 1,015,808。`maxTokens` 是客户端请求上限，不是本仓声称每个场景都完成了 32K 输出验证。主备窗口一致并各自验证通过后，才能把网关公共窗口及各后端容量一起更新为 1M。
 
+### DeepInfer 的 DSH 上下文预算补丁
+
+[`client-patches/deepinfer-budget`](../client-patches/deepinfer-budget/) 针对 DSH `0.2.1-rc.2` 的固定源码 SHA，在客户端 OpenAI payload 完成序列化后检查预算。窗口仍为 1,048,576，默认输出仍为 32,768；额外预留 16,384，因此完整输入达到 999,424 时进入压缩。输出只扣一次，输入计入系统提示、工具定义、消息模板和特殊 token。原有字符估算仍用于较早的 step 压力检查，不能替代最终请求检查。
+
+计数器使用锁定的 `deepseek-recipe 0.2.0` 和匹配的 V4.1 tokenizer，复用服务端的 developer/system、输出字段归一化及原生模板编码；文字请求使用实际 token 数。图片按同版本服务端预处理器每图最多 1,024 token 预留，属于保守上界，不宣称是图片实际计数。计数失败明确终止发送，不退回字符估算，不截断消息，也不降低输出上限。
+
+用 `cargo build --release --locked --manifest-path client-patches/deepinfer-budget/counter/Cargo.toml` 构建计数器；二进制、tokenizer、生成模块、manifest、真实请求收据和本机配置只放在忽略的 `local/`。在支持读取打包 runtime 的 Electron Node 环境调用 `prepare.cjs RUNTIME_NODE_MODULES OUTPUT_DIR COUNTER_EXE TOKENIZER_JSON`，生成目录必须是新的。生成器核验原始 SHA，生成模块在加载时再次核验；保留上游 MIT 许可，禁止直接改写签名的 `app.asar`。
+
+激活时保留其它 provider，只将 `deepinfer` 转到生成的 adapter；禁用原 `compaction-basic`，插入生成的 compaction 模块，并为该 provider/model 配置 `headroomTokens: 16384`、`maxTokens: 32768`、`maxOverflowRetries: 1`。DSH patch 的 `name` 是身份断言，不能直接用它替换已有模块，必须使用 disable/insert。配置备份保留在原 profile 旁，先核对并发改动再写入，禁止复制或覆盖 session 文件。
+
+明确的上下文 400 和发送前预算不足均使用既有的 `CONTEXT_WINDOW_EXCEEDED` 压缩路径；DeepInfer 最多恢复一次，只在持久 surface 有替换后重建请求。摘要选择历史的前半段，并沿既有工具调用/结果配对边界调整，避免摘要调用重复整份超限输入。摘要或重建请求仍超限则明确失败，原始 append-only 历史保留；没有可压缩完整区间时也不静默删消息。
+
+验证运行 `python -m unittest discover -s tests -v`；设置 `DEEPINFER_COUNTER` 和 `DEEPINFER_TOKENIZER` 后，Node 预算测试还会运行真实原生计数。`tests/recovery.test.mjs` 通过 `DEEPINFER_RUNTIME_MODULES`、`DEEPINFER_SDK_CLIENT`、`DEEPINFER_PATCHED_DIR`、`DEEPINFER_TEST_ROOT` 指定独立环境，用实际 SDK profile 加本地 HTTP fixture 验证明确 400、仅一次恢复、失败后停止及工具配对。这些测试不代替真实 DeepInfer 请求验收。
+
+维护责任归本配方维护者；DSH 升级必须重新生成和验收。当上游覆盖最终 payload 计数与受限恢复后，先验收上游替代，再删除 profile 里的 sidecar 行和本补丁，恢复原模块。回退只撤销本次 profile diff，不整份覆盖随后发生的用户配置变动，不修改服务端、认证或会话历史。
+
 多 DP 下，重复前缀应路由到同一个 DP。功能 smoke 使用 loopback 后端的 `X-data-parallel-rank: 0`；实际多用户入口需要既有网关的稳定会话路由。不要用轮流分配请求的入口验证缓存复用。
 
 `--enable-prompt-tokens-details` 让 API 用量携带缓存 token 数。dsh 底部是整会话累计且整数取整；旧请求缺失的用量不补记。应查看最新回答下的「用量」，不要把老会话累计 0% 直接判为缓存关闭。
