@@ -90,6 +90,7 @@ class Backends(SessionRouter):
 class Gateway(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 256
 
     def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():

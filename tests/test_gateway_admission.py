@@ -258,3 +258,29 @@ class PoolHTTPTests(unittest.TestCase):
             for model in self.models:model.release.set()
             self.assertTrue(all(f.result()[0]==200 for f in pending))
         self.assertEqual(sum(self.gateway.backends.inflight.values()),0)
+
+    def test_proxy_connection_burst_waits_for_accept_without_reset(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.gateway.process_request
+        clients = []
+        def delayed_accept(request, address):
+            entered.set()
+            release.wait(5)
+            self.gateway.shutdown_request(request)
+        self.gateway.process_request = delayed_accept
+        try:
+            clients.append(socket.create_connection(('127.0.0.1',self.gateway.server_port),timeout=1))
+            self.assertTrue(entered.wait(1))
+            connected = 0
+            for _ in range(20):
+                client = socket.socket();clients.append(client);client.settimeout(.15)
+                try:
+                    client.connect(('127.0.0.1',self.gateway.server_port));connected += 1
+                except OSError:
+                    pass
+            self.assertEqual(connected,20,'proxy burst was reset before HTTP admission')
+            self.assertEqual(sum(self.gateway.backends.inflight.values()),0)
+        finally:
+            self.gateway.process_request = original
+            release.set()
+            for client in clients:client.close()
