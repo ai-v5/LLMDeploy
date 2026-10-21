@@ -7,7 +7,7 @@ Requires=docker.service
 Type=simple
 WorkingDirectory=/opt/llmdeploy-deepinfer-recovery
 ExecStart=/usr/bin/python3 -B -m deploy_recovery.deepinfer --config /etc/llmdeploy-deepinfer-recovery.json
-Restart=on-failure
+Restart=always
 RestartSec=60
 TimeoutStopSec=25
 
