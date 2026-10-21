@@ -1,13 +1,19 @@
 """Keep only irreversible session fingerprints and loopback port bindings."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import threading
+import time
 
 
 class Unavailable(Exception):
+    pass
+
+
+class Busy(Unavailable):
     pass
 
 
@@ -44,13 +50,21 @@ def prefix_rank(key):
 
 
 class SessionRouter:
-    def __init__(self, ports, bindings_file, max_sessions=16384):
+    def __init__(self, ports, bindings_file, max_sessions=16384, max_active=32, max_waiting=32, queue_timeout=5):
         self.ports = tuple(dict.fromkeys(ports))
         if not self.ports or any(type(p) is not int or not 1 <= p <= 65535 for p in self.ports):
             raise ValueError('INVALID_BACKEND_PORTS')
         self.path = Path(bindings_file)
         self.max_sessions = max_sessions
         self.lock = threading.RLock()
+        if type(max_active) is not int or max_active < 1 or type(max_waiting) is not int or max_waiting < 0:
+            raise ValueError('INVALID_ADMISSION_LIMITS')
+        if not math.isfinite(queue_timeout) or queue_timeout <= 0:
+            raise ValueError('INVALID_QUEUE_TIMEOUT')
+        self.changed = threading.Condition(self.lock)
+        self.max_active, self.max_waiting, self.queue_timeout = max_active, max_waiting, queue_timeout
+        self.waiting = 0
+        self.enabled_ports = set(self.ports)
         self.healthy = {p: False for p in self.ports}
         self.inflight = {p: 0 for p in self.ports}
         self.bindings = {}
@@ -86,7 +100,7 @@ class SessionRouter:
 
     def order(self, key=None, balanced=True, eligible_ports=None):
         with self.lock:
-            good = [p for p in self.ports if self.healthy[p] and (eligible_ports is None or p in eligible_ports)]
+            good = [p for p in self.ports if self.healthy[p] and p in self.enabled_ports and (eligible_ports is None or p in eligible_ports)]
             if not good:
                 raise Unavailable('NO_HEALTHY_BACKEND')
             if not balanced:
@@ -112,13 +126,55 @@ class SessionRouter:
     def end(self, port):
         with self.lock:
             self.inflight[port] -= 1
+            self.changed.notify_all()
+
+    def acquire(self, key=None, balanced=True, eligible_ports=None, excluded=()):
+        """Choose and reserve under one lock; affinity spills only when full/unavailable."""
+        deadline = time.monotonic() + self.queue_timeout
+        queued = False
+        with self.changed:
+            try:
+                while True:
+                    good = [p for p in self.ports if p not in excluded and p in self.enabled_ports
+                            and self.healthy[p] and (eligible_ports is None or p in eligible_ports)]
+                    if not good:
+                        raise Unavailable('NO_HEALTHY_BACKEND')
+                    free = [p for p in good if not balanced or self.inflight[p] < self.max_active]
+                    if free:
+                        preferred = self.bindings.get(key) if balanced and key is not None else None
+                        if preferred in free:
+                            port = preferred
+                        else:
+                            rotated = self.ports[self.cursor:] + self.ports[:self.cursor]
+                            counts = {p: sum(v == p for v in self.bindings.values()) for p in free}
+                            port = min(free, key=lambda p: (self.inflight[p], counts[p], rotated.index(p)))
+                        if balanced:
+                            self._bind(key, port)
+                            self.inflight[port] += 1
+                            self.cursor = (self.ports.index(port) + 1) % len(self.ports)
+                        return port, self.generations.get(key, 0)
+                    if not queued:
+                        if self.waiting >= self.max_waiting:
+                            raise Busy('QUEUE_FULL')
+                        self.waiting += 1
+                        queued = True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Busy('QUEUE_TIMEOUT')
+                    self.changed.wait(remaining)
+            finally:
+                if queued:
+                    self.waiting -= 1
 
     def snapshot(self):
         with self.lock:
-            good = [p for p in self.ports if self.healthy[p]]
+            good = [p for p in self.ports if self.healthy[p] and p in self.enabled_ports]
             return {'active_port': good[0] if good else None, 'active_ports': good,
                     'routing_mode': 'session_affinity', 'automatic_failback': False,
                     'stream_migration': False,
-                    'backends': [{'port': p, 'healthy': self.healthy[p],
+                    'max_active_per_backend': self.max_active, 'max_waiting': self.max_waiting,
+                    'waiting': self.waiting,
+                    'backends': [{'port': p, 'healthy': self.healthy[p] and p in self.enabled_ports,
+                        'draining': p not in self.enabled_ports,
                         'inflight': self.inflight[p],
                         'sessions': sum(v == p for v in self.bindings.values())} for p in self.ports]}

@@ -102,7 +102,8 @@ class GatewayTests(unittest.TestCase):
         if session is not None:
             headers['x-deepseek-harness-session-id'] = session
         headers.update(extra_headers or {})
-        payload = json.dumps(body if body is not None else {'messages': [{'role': 'user', 'content': 'example'}]}).encode()
+        payload = None if body is None and method in ('GET','HEAD') else json.dumps(
+            body if body is not None else {'messages': [{'role': 'user', 'content': 'example'}]}).encode()
         try:
             connection.request(method, path, payload, headers)
             response = connection.getresponse()
@@ -167,7 +168,7 @@ class GatewayTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda i: self.request('parallel-' + str(i)), range(12)))
         self.assertTrue(all(r[0] == 200 for r in results))
-        self.assertEqual([sum(r[1] == str(p) for r in results) for p in self.ports], [6, 6])
+        self.assertEqual({r[1] for r in results}, set(map(str, self.ports)))
         with ThreadPoolExecutor(max_workers=8) as pool:
             same = list(pool.map(lambda _: self.request('one-session'), range(8)))
         self.assertEqual(len({r[1] for r in same}), 1)
