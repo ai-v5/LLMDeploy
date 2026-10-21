@@ -1,0 +1,155 @@
+import copy
+import unittest
+
+from deploy_recovery.deepinfer import sample_window, step
+
+
+class IdleWindowTests(unittest.TestCase):
+    def collect(self, failures=(), busy=(), end=60):
+        state = {}
+        ready = False
+        for i in range(end + 1):
+            obs = 'BUSY' if i in busy else 'UNKNOWN' if i in failures else 'IDLE'
+            state, ready = sample_window(state, i * 60, obs)
+        return state, ready
+
+    def test_full_hour_required_and_failure_budget(self):
+        self.assertFalse(self.collect(end=59)[1])
+        self.assertTrue(self.collect()[1])
+        tolerated, ready = self.collect(failures=range(10, 16))
+        self.assertTrue(ready)
+        self.assertAlmostEqual(tolerated['failure_ratio'], 6 / 61)
+        rejected, ready = self.collect(failures=range(10, 17))
+        self.assertFalse(ready)
+        self.assertGreater(rejected['failure_ratio'], 0.1)
+
+    def test_unknown_retains_window_busy_resets_it(self):
+        state, _ = self.collect(end=20)
+        unknown, ready = sample_window(state, 1260, 'UNKNOWN')
+        self.assertEqual(unknown['idle_since'], 0)
+        self.assertFalse(ready)
+        busy, ready = sample_window(state, 1260, 'BUSY')
+        self.assertIsNone(busy['idle_since'])
+        self.assertFalse(ready)
+        self.assertFalse(self.collect(busy=[30])[1])
+
+    def test_last_sample_must_be_successful(self):
+        self.assertFalse(self.collect(failures=[60])[1])
+
+    def test_missed_minutes_consume_budget(self):
+        state = {'samples': [{'time': 0, 'value': 'IDLE'}], 'idle_since': 0}
+        state, ready = sample_window(state, 3600, 'IDLE')
+        self.assertFalse(ready)
+        self.assertEqual(sum(s['value'] == 'UNKNOWN' for s in state['samples']), 59)
+
+    def test_failure_ratio_uses_recent_hour(self):
+        state, _ = self.collect(failures=range(10, 30))
+        for i in range(61, 91):
+            state, ready = sample_window(state, i * 60, 'IDLE')
+        self.assertTrue(ready)
+        self.assertEqual(state['failure_ratio'], 0)
+
+
+class ControlTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 0
+        self.container = {'Running': True, 'StartedAt': 'start', 'FinishedAt': '', 'Status': 'running', 'ExitCode': 0}
+        self.changes = []
+        self.saved, self.starts = [], []
+
+    def check(self, previous, *, observe=lambda c: 'IDLE', inspect=None, events=None):
+        return step({'container_id': 'fixed'}, previous, inspect=inspect or (lambda c: copy.deepcopy(self.container)),
+                    events=events or (lambda c, a, b: self.changes), sample=observe,
+                    start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
+                    clock=lambda: self.now, wall=lambda: 100000 + self.now)
+
+    def fail(self):
+        self.container.update(Running=False, Status='exited', ExitCode=137, FinishedAt='failure')
+
+    def hour(self, state):
+        for i in range(1, 63):
+            self.now = i * 60
+            state = self.check(state)
+        return state
+
+    def test_abnormal_death_waits_hour_and_persists_before_start(self):
+        state = self.check({})
+        self.fail()
+        for i in range(1, 61):
+            self.now = i * 60
+            state = self.check(state)
+        self.assertFalse(self.starts)
+        self.now = 3660
+        state = self.check(state)
+        self.assertEqual(len(self.starts), 1)
+        self.assertEqual(self.saved[-2]['state'], 'START_PENDING')
+        self.assertEqual(state['state'], 'START_REQUESTED')
+
+    def test_manual_stop_kill_or_unarmed_stopped_container_never_starts(self):
+        for action in ['stop', 'kill', 'destroy']:
+            with self.subTest(action=action):
+                self.setUp()
+                state = self.check({}); self.fail()
+                self.changes = [{'action': action}]
+                state = self.hour(state)
+                self.assertEqual(state['state'], 'MANUAL_HOLD')
+                self.assertFalse(self.starts)
+        self.setUp(); self.fail()
+        self.assertEqual(self.hour({})['state'], 'MANUAL_HOLD')
+
+    def test_unknown_control_and_observer_gap_disarm(self):
+        state = self.check({}); self.fail()
+        self.now = 180
+        self.assertEqual(self.check(state)['state'], 'MANUAL_HOLD')
+        def broken(_):
+            raise ValueError('TARGET_CHANGED')
+        state = self.check(state, inspect=broken)
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertFalse(state['armed'])
+
+    def test_running_target_never_samples_or_starts(self):
+        def unexpected(_):
+            self.fail('running target sampled')
+        state = self.check({}, observe=unexpected)
+        self.assertEqual(state['state'], 'RUNNING')
+        self.assertFalse(self.starts)
+
+    def test_final_probe_busy_unknown_and_manual_race_block_start(self):
+        for last in ['BUSY', 'UNKNOWN']:
+            self.setUp(); state = self.check({}); self.fail()
+            for i in range(1, 61):
+                self.now = i * 60; state = self.check(state)
+            self.now = 3660
+            values = iter(['IDLE', last])
+            out = self.check(state, observe=lambda c: next(values))
+            self.assertFalse(self.starts)
+            if last == 'UNKNOWN':
+                self.assertEqual(out['samples'][-1]['value'], 'UNKNOWN')
+                self.assertEqual(out['idle_since'], 60)
+        self.setUp(); state = self.check({}); self.fail()
+        for i in range(1, 61):
+            self.now = i * 60; state = self.check(state)
+        self.now = 3660
+        events = iter([[], [{'action': 'stop'}]])
+        self.assertEqual(self.check(state, events=lambda *args: next(events))['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_operator_action_during_slow_final_probe_is_preserved(self):
+        state = self.check({}); self.fail()
+        for i in range(1, 61):
+            self.now = i * 60; state = self.check(state)
+        self.now = 3660
+        calls = []
+        def probe(_):
+            calls.append(1)
+            if len(calls) == 2:
+                self.container.update(StartedAt='operator-start', FinishedAt='operator-stop')
+                self.changes = [{'action': 'start'}, {'action': 'kill'}, {'action': 'stop'}]
+            return 'IDLE'
+        out = self.check(state, observe=probe)
+        self.assertEqual(out['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+
+if __name__ == '__main__':
+    unittest.main()
