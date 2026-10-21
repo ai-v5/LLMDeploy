@@ -44,6 +44,18 @@ class Tracker:
         }
         for port in config['nodes']:
             self.state['nodes'].setdefault(port, {})
+        node_down = config.get('node_down_seconds', 86400)
+        previous = self.state.get('notification_policy', {}).get('node_down_seconds', config['down_seconds'])
+        if node_down > previous:
+            # A quieter policy must not flush queued alerts from the old threshold.
+            # Retain delivered/uncertain history and the aggregate outage incident.
+            for item in self.state['outbox']:
+                if item['status'] == 'pending' and item['kind'] in ('NODE_DOWN', 'NODE_RECOVERED'):
+                    item.update(status='expired', result='NODE_POLICY_THRESHOLD_INCREASED',
+                                completed_epoch=time.time())
+            for node in self.state['nodes'].values():
+                node['alerted'] = False
+        self.state['notification_policy'] = {'node_down_seconds': node_down}
 
     def enqueue(self, kind, message, now):
         item = {'id': uuid.uuid4().hex, 'kind': kind, 'content': event_content(message, now),
@@ -80,6 +92,7 @@ class Tracker:
         self.state['last_snapshot_epoch'] = sample_time
         ready_bad, ready_good = [], []
         down = self.config['down_seconds']
+        node_down = self.config.get('node_down_seconds', 86400)
         recovery = self.config['recovery_seconds']
         for port, node in self.state['nodes'].items():
             if observed[port]:
@@ -92,7 +105,7 @@ class Tracker:
                 node['good_since'] = None
                 if node.get('bad_since') is None:
                     node['bad_since'] = sample_time
-                if not node.get('alerted') and sample_time - node['bad_since'] >= down:
+                if not node.get('alerted') and sample_time - node['bad_since'] >= node_down:
                     ready_bad.append(port)
         both = self.state['both']
         all_down = not any(observed.values())
@@ -116,11 +129,11 @@ class Tracker:
                 f'【推理服务紧急告警】后端 {"、".join(labels.values())} 均持续不可用至少 {down} 秒。当前推理服务不可用，请检查模型、SSH 隧道和网络。', now))
             for port in ready_bad:
                 self.state['nodes'][port]['alerted'] = True
-        else:
+        elif not all_down and not both.get('alerted'):
             for port in ready_bad:
                 self.state['nodes'][port]['alerted'] = True
                 events.append(self.enqueue('NODE_DOWN',
-                    f'【推理服务告警】后端 {labels[port]} 持续不可用至少 {down} 秒。当前承载：{active}。{redundancy}冗余已丢失，健康后端 {sum(observed.values())}/{len(labels)}。', now))
+                    f'【推理服务告警】后端 {labels[port]} 持续不可用至少 {node_down} 秒。当前承载：{active}。{redundancy}冗余已丢失，健康后端 {sum(observed.values())}/{len(labels)}。', now))
         if not all_down and both.get('alerted') and stable_up:
             both['alerted'] = False
             for port in ready_good:
