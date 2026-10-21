@@ -22,7 +22,7 @@ from .usage import fetch_all as fetch_usage, validate as validate_usage
 def load_config(path):
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding='utf-8-sig'))
-    allowed = {'backend', 'backend_state', 'nodes', 'down_seconds', 'recovery_seconds',
+    allowed = {'backend', 'backend_state', 'nodes', 'down_seconds', 'node_down_seconds', 'recovery_seconds',
                'freshness_seconds', 'poll_seconds', 'incoming', 'usage', 'engine_name'}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError('INVALID_CONFIG_FIELDS')
@@ -45,7 +45,8 @@ def load_config(path):
     if any(not p.isdecimal() or not 1 <= int(p) <= 65535 or not isinstance(label, str)
            or not label for p, label in nodes.items()):
         raise ValueError('INVALID_NODES')
-    defaults = {'down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15, 'poll_seconds': 2}
+    defaults = {'down_seconds': 60, 'node_down_seconds': 86400, 'recovery_seconds': 10,
+                'freshness_seconds': 15, 'poll_seconds': 2}
     for key, default in defaults.items():
         value = config.setdefault(key, default)
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:

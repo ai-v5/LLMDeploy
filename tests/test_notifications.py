@@ -14,7 +14,7 @@ from deploy_notify import backends, incoming, worker
 class AlertTests(unittest.TestCase):
     def setUp(self):
         self.config = {'nodes': {'19001': '*.*.*.106', '19002': '*.*.*.47'},
-                       'down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
+                       'down_seconds': 60, 'node_down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
                        'receiver': 'example-group'}
         self.tracker = n.Tracker(self.config)
 
@@ -119,7 +119,7 @@ class AlertTests(unittest.TestCase):
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
         self.config = {'nodes': {'19001': '192.0.2.106', '19002': '198.51.100.47'},
-                       'down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
+                       'down_seconds': 60, 'node_down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
                        'backend': {'receiver': 'example-group'}}
         self.tracker = n.Tracker(self.config)
 
@@ -240,8 +240,12 @@ class DeliveryTests(unittest.TestCase):
             path.write_text(json.dumps(valid))
             checked = worker.load_config(path)
             self.assertEqual(checked['down_seconds'], 60)
+            self.assertEqual(checked['node_down_seconds'], 60)
             self.assertTrue(Path(checked['backend']['token_file']).is_absolute())
+            path.write_text(json.dumps({k: v for k, v in valid.items() if k != 'node_down_seconds'}))
+            self.assertEqual(worker.load_config(path)['node_down_seconds'], 86400)
             for update in [{'poll_seconds': False}, {'freshness_seconds': float('nan')},
+                           {'node_down_seconds': 0}, {'node_down_seconds': True},
                            {'nodes': {'bad-port': 'host'}},
                            {'backend': {**valid['backend'], 'token': 'fixture-not-a-credential'}},
                            {'backend': {**valid['backend'], 'endpoint': 'http://u:p@localhost/'}}]:

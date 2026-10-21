@@ -10,7 +10,7 @@ from deploy_notify import backends, incoming, tracker, worker
 class AdversarialTests(unittest.TestCase):
     def setUp(self):
         self.config = {'nodes': {'19001': '192.0.2.106', '19002': '198.51.100.47'},
-                       'down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
+                       'down_seconds': 60, 'node_down_seconds': 60, 'recovery_seconds': 10, 'freshness_seconds': 15,
                        'backend': {'receiver': 'example-group'}}
         self.tracker = tracker.Tracker(self.config)
         self.incoming = {'bot_uid': 'example-bot', 'bot_name': '小鲁班'}
