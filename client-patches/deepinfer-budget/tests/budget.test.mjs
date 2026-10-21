@@ -1,13 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { admitPayload, countPayload } from '../guard.mjs';
+import { admitPayload, countPayload, isBudgetTarget } from '../guard.mjs';
 
 const payload = { model: 'DeepSeek-V4.1-Flash', messages: [{ role: 'user', content: 'hello' }], max_tokens: 32768 };
 const settings = { contextWindow: 1048576 };
 
+test('both deployment providers share protection; unrelated providers are untouched', () => {
+  assert.equal(isBudgetTarget('deepinfer'), true);
+  assert.equal(isBudgetTarget('local950dt'), true);
+  assert.equal(isBudgetTarget('other'), false);
+});
+
 test('334-token overflow triggers compaction without changing output or input', async () => {
   const before = structuredClone(payload);
   await assert.rejects(admitPayload(payload, { ...settings, count: async () => 1016142 }), /context_length_exceeded/);
+  assert.deepEqual(payload, before);
+});
+
+test('reported A7 overflow preserves the 1M context and 32K output contract', async () => {
+  const before = structuredClone(payload);
+  await assert.rejects(admitPayload(payload, { ...settings, count: async () => 1025090 }), /context_length_exceeded/);
   assert.deepEqual(payload, before);
 });
 

@@ -54,7 +54,7 @@ function prepare({ runtimeModules, output, counter, tokenizer, guard = path.join
     let text = bytes.toString('utf8');
     if (kind === 'llm-pi-ai') {
       text = replaceOnce(text, '...profileOptions(profile, reasoning, apiKey),', `...profileOptions(profile, reasoning, apiKey),
-                    ...options.provider === 'deepinfer' ? { onPayload: async payload => {
+                    ...isBudgetTarget(options.provider) ? { onPayload: async payload => {
                       await admitPayload(payload, {
                         contextWindow: model.contextWindow,
                         safetyTokens: 16384,
@@ -62,12 +62,13 @@ function prepare({ runtimeModules, output, counter, tokenizer, guard = path.join
                         observe: facts => console.info('deepinfer-budget', JSON.stringify(facts)),
                       });
                     } } : {},`);
-      text = `import { admitPayload, countPayload } from ${JSON.stringify(pathToFileURL(installedGuard).href)};\nconst deepinferCounter = ${JSON.stringify(settings)};\n` + text;
+      text = `import { admitPayload, countPayload, isBudgetTarget } from ${JSON.stringify(pathToFileURL(installedGuard).href)};\nconst deepinferCounter = ${JSON.stringify(settings)};\n` + text;
     } else {
       text = replaceOnce(text, 'selectCompactableRange(agent.session, measurement, 0)',
-        `selectCompactableRange(agent.session, measurement, target.provider === 'deepinfer' ? Math.floor(measurement.surfaceTokens / 2) : 0)`);
+        `selectCompactableRange(agent.session, measurement, isBudgetTarget(target.provider) ? Math.floor(measurement.surfaceTokens / 2) : 0)`);
       text = replaceOnce(text, 'if (retries >= policy.maxOverflowRetries) return next();',
-        `if (retries >= (target.provider === 'deepinfer' ? Math.min(1, policy.maxOverflowRetries) : policy.maxOverflowRetries)) return next();`);
+        `if (retries >= (isBudgetTarget(target.provider) ? Math.min(1, policy.maxOverflowRetries) : policy.maxOverflowRetries)) return next();`);
+      text = `import { isBudgetTarget } from ${JSON.stringify(pathToFileURL(installedGuard).href)};\n` + text;
     }
     // Preserve shared runtime module identities when loading a sidecar copy.
     text = text.replace(/from "([^"\n]+)"/g, (all, spec) => {

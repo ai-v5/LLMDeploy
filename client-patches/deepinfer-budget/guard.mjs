@@ -1,5 +1,10 @@
 import { spawn } from 'node:child_process';
 
+/** Deployment aliases sharing the V4.1 recipe and total context contract. */
+export function isBudgetTarget(provider) {
+  return provider === 'deepinfer' || provider === 'local950dt';
+}
+
 /** Count a complete OpenAI payload using the matching recipe and tokenizer. */
 export function countPayload(payload, { command, tokenizer, signal }) {
   return new Promise((resolve, reject) => {

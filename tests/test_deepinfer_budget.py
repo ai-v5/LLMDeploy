@@ -11,7 +11,7 @@ class DeepInferBudgetTests(unittest.TestCase):
         self.assertIsNotNone(node, 'Node is required for the DSH client patch tests')
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
-            [node, '--test', str(root / 'client-patches/deepinfer-budget/tests/budget.test.mjs')],
+            [node, '--test', *map(str, sorted((root / 'client-patches/deepinfer-budget/tests').glob('*.test.mjs')))],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
