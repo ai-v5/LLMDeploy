@@ -1,7 +1,18 @@
 import copy
+import configparser
+from pathlib import Path
 import unittest
 
 from deploy_recovery.deepinfer import sample_window, step
+
+
+class ObserverServiceTests(unittest.TestCase):
+    def test_signalled_observer_is_restarted(self):
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(Path(__file__).parents[1] / 'deploy_recovery/llmdeploy-deepinfer-recovery.service')
+        self.assertEqual(unit['Service']['Restart'], 'always')
+        self.assertEqual(unit['Service']['RestartSec'], '60')
+        self.assertIn('-m deploy_recovery.deepinfer', unit['Service']['ExecStart'])
 
 
 class IdleWindowTests(unittest.TestCase):
