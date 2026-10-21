@@ -1,0 +1,12 @@
+[package]
+name = "deepinfer-prompt-count"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[dependencies]
+deepseek-recipe = "=0.2.0"
+deepseek-recipe-core = "=0.2.0"
+deepseek-recipe-encoding = "=0.2.0"
+serde_json = "1"
+tokenizers = "0.23"
