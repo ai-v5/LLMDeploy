@@ -9,6 +9,29 @@ import time
 import uuid
 
 
+MAX_OUTPUT_TOKENS = 32768
+
+
+def bounded_request(body):
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    result = copy.deepcopy(body)
+    budgets = []
+    for name in ('max_tokens', 'max_completion_tokens'):
+        value = result.get(name)
+        if value is None:
+            result.pop(name, None)
+            continue
+        if type(value) is not int or not 1 <= value <= MAX_OUTPUT_TOKENS:
+            raise ValueError(f'{name} must be an integer between 1 and {MAX_OUTPUT_TOKENS}')
+        budgets.append(value)
+    if len(set(budgets)) > 1:
+        raise ValueError('max_tokens and max_completion_tokens must agree when both are supplied')
+    if not budgets:
+        result['max_tokens'] = MAX_OUTPUT_TOKENS
+    return result
+
+
 def prefill_request(body):
     result = copy.deepcopy(body)
     result['stream'] = False
@@ -44,7 +67,9 @@ def create_app(prefill_url, decode_url, api_key):
 
     @asynccontextmanager
     async def lifespan(app):
-        async with httpx.AsyncClient(timeout=httpx.Timeout(36000, connect=15), trust_env=False) as client:
+        limits = httpx.Limits(max_connections=4096, max_keepalive_connections=2048)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(36000, connect=15),
+                                     limits=limits, trust_env=False) as client:
             app.state.client = client
             yield
 
@@ -76,7 +101,11 @@ def create_app(prefill_url, decode_url, api_key):
     async def complete(endpoint: str, request: Request):
         if endpoint not in ('completions', 'chat/completions'):
             return JSONResponse({'error': {'message': 'Unsupported endpoint'}}, status_code=404)
-        body = await request.json()
+        try:
+            body = bounded_request(await request.json())
+        except ValueError as error:
+            return JSONResponse({'error': {'message': str(error), 'type': 'invalid_request_error',
+                                           'param': None, 'code': None}}, status_code=400)
         request_id = 'pd-' + uuid.uuid4().hex
         headers = {'Authorization': 'Bearer ' + api_key, 'X-Request-Id': request_id}
         client = app.state.client

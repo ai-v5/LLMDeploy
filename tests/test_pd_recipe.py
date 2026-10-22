@@ -100,6 +100,31 @@ class PDRecipeTests(unittest.TestCase):
         self.assertTrue(d['stream'])
         self.assertEqual(d['kv_transfer_params'], transfer)
 
+    def test_proxy_default_budget_matches_recipe_and_preserves_input(self):
+        self.assertEqual(pd_proxy.MAX_OUTPUT_TOKENS, self.recipe['client_limits']['maxTokens'])
+        for body in ({'model': 'test'}, {'max_tokens': None, 'max_completion_tokens': None}):
+            original = copy.deepcopy(body)
+            limited = pd_proxy.bounded_request(body)
+            self.assertEqual(limited['max_tokens'], 32768)
+            self.assertNotIn('max_completion_tokens', limited)
+            self.assertEqual(body, original)
+            self.assertEqual(pd_proxy.prefill_request(limited)['max_tokens'], 1)
+
+    def test_proxy_preserves_explicit_output_budgets(self):
+        for body in ({'max_tokens': 1}, {'max_tokens': 4096}, {'max_tokens': 32768},
+                     {'max_completion_tokens': 32768},
+                     {'max_tokens': 64, 'max_completion_tokens': 64}):
+            self.assertEqual(pd_proxy.bounded_request(body), body)
+
+    def test_proxy_rejects_invalid_or_conflicting_budgets(self):
+        for field in ('max_tokens', 'max_completion_tokens'):
+            for value in (0, -1, 32769, True, 1.5, '32', [], {}):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    pd_proxy.bounded_request({field: value})
+        for body in ([], None, {'max_tokens': 64, 'max_completion_tokens': 32}):
+            with self.assertRaises(ValueError):
+                pd_proxy.bounded_request(body)
+
 
 if __name__ == '__main__':
     unittest.main()
