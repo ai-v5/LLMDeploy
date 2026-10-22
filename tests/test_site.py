@@ -7,7 +7,7 @@ import unittest
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
-from scripts.build_site import ROOT, build, pages, slug
+from scripts.build_site import ROOT, build, pages, slug, verification_files
 
 
 class Document(HTMLParser):
@@ -50,7 +50,7 @@ class SiteTests(unittest.TestCase):
             output = Path(tmp) / 'site'
             self.assertEqual(build(output), len(config['pages']))
             documents = {p['output']: Document((output / p['output']).read_text(encoding='utf-8')) for p in config['pages']}
-            expected = set(documents) | {'assets/style.css', 'sitemap.xml', 'robots.txt', '.nojekyll'}
+            expected = set(documents) | {'assets/style.css', 'sitemap.xml', 'robots.txt', '.nojekyll'} | set(config.get('google_verification_files', []))
             self.assertEqual({p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}, expected)
             for name, document in documents.items():
                 self.assertTrue(document.meta['description'])
@@ -72,6 +72,29 @@ class SiteTests(unittest.TestCase):
 
     def test_unicode_anchors(self):
         self.assertEqual(slug('DeepInfer 共享机器让机恢复', '-'), 'deepinfer-共享机器让机恢复')
+
+    def test_verification_cannot_publish_other_files_or_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('../README.md', '/private/key.html', 'arbitrary.html'):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    verification_files({'google_verification_files': [name]}, root)
+            path = root / 'site/verification/googlef1de4c0e8dff2f1b.html'
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b'not a Google verification marker')
+            with self.assertRaisesRegex(ValueError, 'INVALID_GOOGLE_VERIFICATION_CONTENT'):
+                verification_files({'google_verification_files': [path.name]}, root)
+
+    @unittest.skipUnless(importlib.util.find_spec('markdown'), 'Install site/requirements.txt for Pages verification')
+    def test_google_verification_file_is_published_byte_for_byte(self):
+        config = json.loads((ROOT / 'site/config.json').read_text(encoding='utf-8'))
+        self.assertEqual(config['google_verification_files'], ['googlef1de4c0e8dff2f1b.html'])
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'site'
+            build(output)
+            for name in config['google_verification_files']:
+                self.assertEqual((output / name).read_bytes(), (ROOT / 'site/verification' / name).read_bytes())
+                self.assertNotIn(name, (output / 'sitemap.xml').read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':
