@@ -50,6 +50,21 @@ docker image inspect --format '{{.Id}}' sha256:93b89c1ff22719cb91041f6a5b7d88323
 
 ## 构建来源与边界
 
+没有历史镜像时，可使用独立的[源码构建 Dockerfile](../../../../images/deepinfer/Dockerfile.source)。它从 Ascend 官方公开的 `ascendai/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12-devel` 基础镜像开始，编译 GCC 13.4.0、固定 commit 的 vendor 库及 DeepInfer，并分别安装 native/API 环境，不依赖本项目未公开的父镜像。基础镜像来源见 [Ascend 镜像说明](https://hub.docker.com/r/ascendai/cann)及[官方 Dockerfile](https://github.com/Ascend/cann-container-image/tree/main/cann/9.2.0-beta.2-950-ubuntu22.04-py3.12-devel)。
+
+在 Linux aarch64 构建机、LLMDeploy 仓库根目录执行以下命令；需要 Docker BuildKit、足够的内存/磁盘，以及访问公开镜像、系统软件源、源码与 Python 依赖源的网络：
+
+```sh
+docker build --platform linux/arm64 \
+  --file images/deepinfer/Dockerfile.source \
+  --build-arg MAX_JOBS=8 \
+  --tag deepinfer-ascend:source-candidate .
+```
+
+`MAX_JOBS` 控制编译并发，内存不足时应降低。可通过 `CANN_BASE` 指定已核对的同款基础镜像 digest；默认 tag 不是不可变锁。该基础环境使用 CANN `9.2.0-beta.2`，官方 Python 为 `3.12.14`，与历史配方记录不同，不能据此宣称复现了历史镜像或性能。构建过程不复制本地源码、机器配置、凭据或权重，只从构建上下文读取公开的 API 依赖锁。默认命令仅显示 API 帮助，不自动启动模型。
+
+**本次仅提供 Dockerfile，未执行镜像构建、真机验收或镜像发布。** 此新镜像不接入现有渲染器，历史 native SHA 校验保持不变；需要新配方、启动接入和端到端验收后才能作为已验证部署方案。以下 overlay 和镜像迁移仍仅适用于已有历史镜像的操作者。
+
 [serving overlay Dockerfile](../../../../images/deepinfer/Dockerfile) 依赖锁定的**已构建 native/API 父镜像**，不是从空 CANN 镜像构建。先导入配方的父镜像，然后从公开 commit 提取三处 profile 变更：
 
 ```sh

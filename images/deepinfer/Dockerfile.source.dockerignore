@@ -1,0 +1,8 @@
+# This source build needs only the public API lock from the local context.
+**
+!recipes/
+!recipes/a5/
+!recipes/a5/950dt/
+!recipes/a5/950dt/deepinfer/
+!recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/
+!recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/requirements-api.lock
