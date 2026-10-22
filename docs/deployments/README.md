@@ -10,3 +10,11 @@
 | A3 | 尚未验证 | 按 [模板](TEMPLATE.md) 新增实际型号，无占位启动命令 |
 
 每篇包含适用范围、锁定、步骤、验证、服务/回退和公开范围。只分享使用经验，敏感信息不提供，未实测项保留未验证状态。免责声明见[根 README](../../README.md)。
+
+A2 / 910B 的 DeepInfer 移植使用公开的 [Eco-Tech W8A8 权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)，上游 revision 固定为 `12b85455a58c7df345c1abc43934624a76bac576`。[文件清单](../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/model-files.json)保存该 revision 的 152 个文件大小与 SHA256。量化配置为 ModelSlim W8A8_DYNAMIC，包含三层 MTP，导出配置启用了 DSpark；这些结构信息不代表完整模型或推测生成已经验收。A2 部署配方仍待端到端验证。
+
+校验这批权重时显式选择清单；完整哈希校验会读取全部权重，应在适当的空闲窗口执行：
+
+```sh
+python3 scripts/verify_model.py --root /srv/models/DeepSeek-V4.1-Flash-1017-w8a8 --manifest recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/model-files.json --full
+```
