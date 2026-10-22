@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+# Source-build candidate only; no historical native/image identity is claimed.
+# Build from the LLMDeploy repository root on Linux aarch64. This public CANN
+# base differs from the historical environment; see the deployment guide.
+ARG CANN_BASE=ascendai/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12-devel
+FROM ${CANN_BASE}
+
+USER root
+SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
+ARG MAX_JOBS=8
+ENV DEEPINFER_ACCELERATOR=ascend \
+    PYTHONNOUSERSITE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN test "$(uname -m)" = aarch64 && \
+    python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)' && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl git build-essential cmake ninja-build pkg-config \
+        libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev libnuma-dev libaio-dev \
+        libopenblas-dev libffi-dev libssl-dev bison flex xz-utils tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# GCC release checksum: https://gcc.gnu.org/pub/gcc/releases/gcc-13.4.0/sha512.sum
+# Compile against the base image's libc rather than copying a compiler from a
+# different distribution. The corresponding C++ headers are needed by Bisheng.
+RUN mkdir -p /tmp/gcc-build && \
+    curl --fail --location --retry 3 \
+        https://gcc.gnu.org/pub/gcc/releases/gcc-13.4.0/gcc-13.4.0.tar.xz \
+        --output /tmp/gcc-13.4.0.tar.xz && \
+    echo '9b4b83ecf51ef355b868608b8d257b2fa435c06d2719cb86657a7c2c2a0828ff4ce04e9bac1055bbcad8ed5b4da524cafaef654785e23a50233d95d89201e35f  /tmp/gcc-13.4.0.tar.xz' | sha512sum --check - && \
+    tar -xJf /tmp/gcc-13.4.0.tar.xz -C /tmp && \
+    cd /tmp/gcc-build && \
+    /tmp/gcc-13.4.0/configure --prefix=/opt/gcc-13.4.0 \
+        --enable-languages=c,c++ --disable-multilib --disable-bootstrap \
+        --with-system-zlib && \
+    make -j "${MAX_JOBS}" && make install && \
+    rm -rf /tmp/gcc-build /tmp/gcc-13.4.0 /tmp/gcc-13.4.0.tar.xz
+
+# Fetch only public source at the serving profile's fixed commit. No local
+# checkout, authentication configuration, model or host configuration is copied.
+RUN git init /opt/deepinfer-build/source && \
+    git -C /opt/deepinfer-build/source remote add origin https://github.com/ai-v5/deepinfer_ascend.git && \
+    git -C /opt/deepinfer-build/source fetch --depth 1 origin 07e5002c08bce137ab2a86a5a1fc8bb652729ad6 && \
+    git -C /opt/deepinfer-build/source checkout --detach FETCH_HEAD && \
+    test "$(git -C /opt/deepinfer-build/source rev-parse HEAD)" = 07e5002c08bce137ab2a86a5a1fc8bb652729ad6
+
+RUN mkdir -p /opt/llmdeploy && \
+    python3.12 -m venv /opt/deepinfer-venv && \
+    python3.12 -m venv /opt/deepinfer-api-venv
+RUN <<'SETUP'
+cat > /opt/llmdeploy/runtime_env.sh <<'ENV_SCRIPT'
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-9.2.0-beta.2/share/info/ascendnpu-ir/bin/set_env.sh
+export CC=/opt/gcc-13.4.0/bin/gcc
+export CXX=/opt/gcc-13.4.0/bin/g++
+compiler_target="$("${CXX}" -dumpmachine)"
+export CPLUS_INCLUDE_PATH="/opt/gcc-13.4.0/include/c++/13.4.0:/opt/gcc-13.4.0/include/c++/13.4.0/${compiler_target}:/opt/gcc-13.4.0/include/c++/13.4.0/backward${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+export LD_LIBRARY_PATH="/opt/gcc-13.4.0/lib64:/opt/gcc-13.4.0/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export PATH="/opt/deepinfer-venv/bin:/opt/gcc-13.4.0/bin:${PATH}"
+export PYTHONPATH="/opt/deepinfer-build/source${PYTHONPATH:+:${PYTHONPATH}}"
+ENV_SCRIPT
+cat > /opt/llmdeploy/source-entrypoint.sh <<'ENTRY_SCRIPT'
+#!/bin/bash
+set -e
+source /opt/llmdeploy/runtime_env.sh
+exec "$@"
+ENTRY_SCRIPT
+chmod 0755 /opt/llmdeploy/source-entrypoint.sh
+SETUP
+
+WORKDIR /opt/deepinfer-build/source
+# CANN's driver stubs are build-only. Never add this directory to the runtime
+# environment: the actual host driver must be mounted when running on NPUs.
+RUN source /opt/llmdeploy/runtime_env.sh && \
+    export LD_LIBRARY_PATH="${ASCEND_HOME_PATH}/aarch64-linux/devlib:${LD_LIBRARY_PATH}" && \
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r requirements-ascend.txt && \
+    MAX_JOBS="${MAX_JOBS}" bash scripts/build_vendor.sh && \
+    MAX_JOBS="${MAX_JOBS}" bash scripts/build.sh build && \
+    test -s deepinfer/_so/ascend-aarch64/_C.cpython-312-aarch64-linux-gnu.so
+
+# The API has its own environment and must not replace the worker's torch stack.
+COPY recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/requirements-api.lock /opt/llmdeploy/requirements-api.lock
+RUN /opt/deepinfer-api-venv/bin/python -m pip install --no-cache-dir \
+        -r /opt/llmdeploy/requirements-api.lock
+
+LABEL org.opencontainers.image.source="https://github.com/ai-v5/deepinfer_ascend" \
+      org.opencontainers.image.revision="07e5002c08bce137ab2a86a5a1fc8bb652729ad6" \
+      org.opencontainers.image.description="Unvalidated Ascend source-build candidate; not the historical LLMDeploy runtime"
+
+# Default to help, not model startup. The historical renderer/entrypoint retains
+# its native SHA check and cannot accept this new binary without separate work.
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/llmdeploy/source-entrypoint.sh"]
+CMD ["/opt/deepinfer-api-venv/bin/python", "examples/serve_recipe.py", "--help"]
