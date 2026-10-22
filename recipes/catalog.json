@@ -23,9 +23,16 @@
     },
     {
       "generation": "A2",
-      "status": "planned-not-validated",
-      "hardware_model": null,
-      "engines": []
+      "status": "candidate-short-requests-validated",
+      "hardware_model": "910B1",
+      "engines": [
+        {
+          "engine": "deepinfer",
+          "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
+          "guide": "docs/deployments/a2/910b/deepinfer.md",
+          "path_note": "Native/API short requests validated; public launcher startup and full context remain unvalidated."
+        }
+      ]
     },
     {
       "generation": "A3",
