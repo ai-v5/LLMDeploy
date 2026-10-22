@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -76,6 +77,24 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(m['revision'],self.recipe['model']['revision'])
         self.assertEqual(len(m['files']),83)
         self.assertEqual(sum(r['path'].endswith('.safetensors') for r in m['files']),48)
+
+    def test_model_cli_uses_explicit_manifest_and_checks_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);(root/'weights').write_bytes(b'good')
+            manifest=root/'manifest.json'
+            manifest.write_text(json.dumps({'revision':'test-revision','files':[
+                {'path':'weights','size':4,'sha256':hashlib.sha256(b'good').hexdigest()}
+            ]}),encoding='utf-8')
+            command=[sys.executable,str(ROOT/'scripts/verify_model.py'),'--root',str(root),
+                     '--manifest',str(manifest),'--full']
+            result=subprocess.run(command,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads(result.stdout),
+                             {'state':'PASS_FULL_HASH','files':1,'revision':'test-revision'})
+            (root/'weights').write_bytes(b'evil')
+            result=subprocess.run(command,capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('MODEL_SHA256_MISMATCH',result.stderr)
 
     def test_publishable_record_and_project_license(self):
         record=json.loads((ROOT/'records/950dt8-1017.json').read_text())
