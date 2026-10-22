@@ -1,0 +1,51 @@
+{
+  "passes": 2,
+  "groups": [
+    [
+      {
+        "model": "ds-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with the number 4 only: 2 + 2."
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "temperature": 0,
+        "max_tokens": 16
+      }
+    ],
+    [
+      {
+        "model": "ds-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "List three prime numbers."
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "temperature": 0,
+        "max_tokens": 32
+      },
+      {
+        "model": "ds-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Name one color."
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "temperature": 0,
+        "max_tokens": 16
+      }
+    ]
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "container_name": "llmdeploy-deepinfer-example",
+  "model_dir": "/srv/models/DeepSeek-V4.1-Flash-1017",
+  "artifacts_dir": "/srv/llmdeploy/deepinfer-artifacts",
+  "warmup_file": "/srv/llmdeploy/config/warmup.json",
+  "image_id": "sha256:93b89c1ff22719cb91041f6a5b7d88323278e4e7a99812464a995094b70729ce",
+  "port": 8900,
+  "master_port": 28335,
+  "devices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ]
+}

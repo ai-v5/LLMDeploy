@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "id": "a5-950dt8-deepinfer-dsv41flash1017",
+  "engine": "deepinfer",
+  "hardware": {
+    "generation": "A5",
+    "model": "950DT",
+    "architecture": "linux/aarch64",
+    "cards": 8
+  },
+  "model": {
+    "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "served_name": "deepseek-v4.1-flash-1017",
+    "alias": "ds-v4.1-flash-1017",
+    "manifest": "../../../../deepseek-v4.1-flash-1017/model-files.json"
+  },
+  "source": {
+    "repository": "https://github.com/ai-v5/deepinfer_ascend",
+    "upstream_commit": "8b16149741a4935e1dec8cea27853f273b374c5b",
+    "native_build_commit": "dc65ef86441ec43fdd57070a9c7875f654059d9e",
+    "commit": "07e5002c08bce137ab2a86a5a1fc8bb652729ad6",
+    "runtime_files_sha256": {
+      "deepinfer/ve/prepare_tensor_input_vl.py": "50592a32ced05ab93f4dc58c5d47bb6d4a554d08a5c1cf6a01619b603b456cf4",
+      "examples/recipe_api/http.py": "b9abb0fd5a79a82927f144c2a458414577a2194a6eeed83bdcf54b901dca4211",
+      "examples/serve_recipe.py": "9a1a05d45b690a6339fb2d2be816f2bd50ecea714877cd835153628409302c80"
+    },
+    "native_path": "deepinfer/_so/ascend-aarch64/_C.cpython-312-aarch64-linux-gnu.so",
+    "native_sha256": "1d2da40023fae852577e719bc7494ea7effe391f25b0adf3dbe0ddb80fc927d7",
+    "recipe_protocol_commit": "935817c66f5d6e64838f419692545f06787e485f",
+    "hash_encoding": "LF-normalized UTF-8; no AST normalization",
+    "historical_packaged_files_sha256": {
+      "deepinfer/ve/prepare_tensor_input_vl.py": "a3c5b618820b96a054d2aa2932513bb236a9fdd1ad72cd711dafc5eb50684a6a",
+      "examples/recipe_api/http.py": "7cd773025aa700d39dfd4bec68bcf4c43626de0731be43079d9b4af00365394d",
+      "examples/serve_recipe.py": "7856d250f1529d4a0a65d4d0b3ff26ed9ac35037c709428ac22d06b0d073fca4"
+    }
+  },
+  "image": {
+    "historical_runtime_id": "sha256:93b89c1ff22719cb91041f6a5b7d88323278e4e7a99812464a995094b70729ce",
+    "overlay_parent_id": "sha256:d43af9a352c2668624d8fdd53e9f9101ead4486f1ef1e125e8bca743accbe3ce",
+    "registry_published": false,
+    "rebuild_requires_revalidation": true
+  },
+  "versions": {
+    "cann": "9.2.0",
+    "python": "3.12.13",
+    "gcc": "13.4.0",
+    "torch": "2.13.0+cpu",
+    "torch_npu": "2.13.0rc1",
+    "deepseek_recipe": "0.2.0"
+  },
+  "vendors": {
+    "DeepSelect": "bfa4507d935f17ebfc3d0f00ff7d3c9a4d0e5c18",
+    "FlashMLA": "2e5429fc5653bab6e081f09477126f731882a6a9",
+    "DeepEP-Ascend": "3b25377d04b24fc6154698ded78a2bcb2c59afff",
+    "DeepGEMM-Ascend": "3a35326271b069b8b5bf1a754435acd6cc91575b"
+  },
+  "topology": {
+    "DP": 8,
+    "EP": 8,
+    "CP": 1,
+    "max_num_seqs_per_rank": 4
+  },
+  "serving": {
+    "context_tokens": 1048576,
+    "output_tokens": 32768,
+    "images": 999,
+    "batch_tokens": 2048,
+    "memory_fraction": 0.95,
+    "prefill_interval": 64,
+    "eplb_interval": 8192,
+    "max_draft_tokens": 5,
+    "main_graph_interval": 6,
+    "dspark": false
+  },
+  "env": {
+    "DEEPINFER_ACCELERATOR": "ascend",
+    "DEEPINFER_HF_MODEL_DIR": "/model",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "DEEPINFER_USE_NEXTN_DECODE": "5",
+    "DEEPINFER_CUDAGRAPH_BATCH_SIZE_INTERVAL": "6",
+    "DJ_JIT_CACHE_DIR": "/artifacts/compiled-cache-r1",
+    "TILELANG_CACHE_DIR": "/artifacts/tilelang-cache-r1"
+  },
+  "paths": {
+    "source": "/opt/deepinfer-build/source",
+    "api_python": "/opt/deepinfer-api-venv/bin/python",
+    "worker_python": "/opt/deepinfer-venv/bin/python"
+  },
+  "evidence": {
+    "scope": "Historical single-host serving profile; this repository delivery does not rerun native inference or validate the new renderer on hardware.",
+    "not_included": [
+      "P/D experiments",
+      "performance results",
+      "private warmup sessions",
+      "deployment identities",
+      "credentials"
+    ]
+  }
+}

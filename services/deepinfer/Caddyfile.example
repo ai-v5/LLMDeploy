@@ -1,0 +1,12 @@
+# Two ingress aliases share exactly one router and admission budget.
+# Loopback by default. Configure your own exposure/TLS policy before external use.
+:19000, :19003 {
+    bind 127.0.0.1
+    request_body {
+        max_size 64MB
+    }
+    reverse_proxy 127.0.0.1:19010 {
+        # SSE is flushed immediately; keep cancellation when clients disconnect.
+        flush_interval 10ms
+    }
+}

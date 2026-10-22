@@ -1,0 +1,14 @@
+[Unit]
+Description=Private SSH backend tunnel %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Configure your own User and private SSH config; the alias owns LocalForward.
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 %i
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

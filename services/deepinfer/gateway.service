@@ -1,0 +1,14 @@
+[Unit]
+Description=Shared authenticated DeepInfer backend pool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/LLMDeploy
+ExecStart=/usr/bin/python3 -m deploy_gateway --listen 127.0.0.1 --port 19010 --backend-port 19001 --backend-port 19002 --backend-port 19008 --backend-managed-affinity --max-active-per-backend 32 --max-waiting 32 --queue-timeout 5 --model-context-limit 1048576 --key-store /etc/llmdeploy/keyring.json --bindings-file /var/lib/llmdeploy/bindings.json --backend-state /var/lib/llmdeploy/backend-state.json --control-file /etc/llmdeploy/admission.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
