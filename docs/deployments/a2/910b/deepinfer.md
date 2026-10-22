@@ -1,6 +1,6 @@
 # A2 / 910B1 / DeepInfer
 
-状态：八卡原生短生成、实际 MTP 草稿接受及 API 文本请求已通过；公开启动器完成只读身份检查，**尚未验证其实际启动链路**。262144-token 完整容量测试仍在进行，不能将配置值或超长请求拒绝当作容量验收。
+状态：公开启动器已完成实际启动，八个 native worker 就绪；新源码的真实 JSON/SSE、MTP 正接受计数、前缀缓存和超窗拒绝检查已通过。**262144-token 冷热完整请求正在验证，逐 DP 副本覆盖仍待复验**。前一源码版本的逐 rank 原生生成与缓存证据不能直接沿用到新版本；也不能将配置值、组件对照或超窗拒绝当作完整容量验收。
 
 本方案使用公开的 [Eco-Tech ModelSlim W8A8 权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)，先部署单机 P/D 不分离服务。它是独立的 910B1 兼容路径，不沿用 [950DT 配方](../../a5/950dt/deepinfer.md)的 native 库、设备清单或内存比例。
 
@@ -17,12 +17,14 @@
 | 算子参考 | vLLM Ascend commit `5f828ad638ee4f9b12db87f9d5481f29076d37f9`，SOC `ascend910b1` |
 | 容器软件 | Ubuntu 22.04.5 / glibc 2.35，CANN 9.1.0，Python 3.12.13，GCC 13.4.0，torch 2.10.0+cpu，torch-npu 2.10.0.post4 |
 | 已用宿主组合 | 驱动 26.0.rc1、CANN 9.0；变更组合必须重新验收 |
-| 调度 | eager，prefill budget 2048，memory fraction 0.75，EPLB 关闭 |
+| 调度 | eager，prefill budget 2048，memory fraction 0.75，EPLB 关闭；验收时每步记录统计 |
 | MTP | 三层 DFlash，最多提出 5 个 token，DSpark 变长验证开启；保留独立 MTP embedding 与 FP32 输出 head |
 | 缓存 | 原生前缀缓存开启；YOCO mask 保留 256 tokens，状态槽比例 2 |
 | 容量与图片 | 总窗口配置 262144、最大输出 32768；图片接收上限配置 1，视觉推理未验收 |
 
 W8A8 是混合精度导出：量化专家采用动态 INT8，其他参数保留其 checkpoint dtype。此路径使用 BF16 attention/indexer 和 CPU 专家 offload，不把 INT8 权重重新解释为 A5 FP8/FP4。当前启动预检要求至少 700 GiB 可用主存；这属于该固定 profile 的资源门槛，不是所有 W8A8 模型的通用最低值。
+
+当前索引实现只对完整的 4096 个有效 key 分块合并收集和矩阵乘法；保留每个 query 的紧凑索引顺序、FP32 按 head 求和及尾块原计算路径，decode 索引路径保持不变。六组真机组件对照覆盖长 dense 索引、不同 query 的长候选块、重复块、填充和 NaN 遮罩；这不替代新源码的完整模型验收。
 
 ## 准备固定工件
 
@@ -75,7 +77,7 @@ python3 "$DEPLOY_REPO/scripts/verify_model.py" \
 
 路径不采用默认布局时，可显式传入容器内的 `--source` 和 `--api-python`。二者必须位于 `/workspace`，API venv 必须使用固定镜像中的解释器。身份检查不导入 Torch，也不创建 NPU worker；通过不等于模型验收。
 
-以下是待真机启动验证的公开候选命令。先人工阅读，确认工作目录及空闲资源后显式执行；它不覆盖或停止已有容器。`CONTAINER_NAME` 必须由使用者选择新的名称。
+以下是公开候选容器命令。启动器已在具有上述固定运行工件的隔离容器中实际启动并通过短请求检查；新的容器和换机组合仍需独立验收。先人工阅读，确认工作目录及空闲资源后显式执行；它不覆盖或停止已有容器。`CONTAINER_NAME` 必须由使用者选择新的名称。
 
 ```sh
 mkdir -p "$WORK_DIR/logs" "$WORK_DIR/home" "$WORK_DIR/tmp" "$WORK_DIR/cache/xdg" "$WORK_DIR/cache/hf"
@@ -102,7 +104,7 @@ docker run --detach --name "$CONTAINER_NAME" \
 
 ## 验证、换机与回退
 
-等待 `/health` 返回 `ready` 且 `workers=8`，检查 `/v1/models`，再做真实 JSON/SSE 查询、实际 MTP 接受和冷热前缀一致性检查。当前已通过的 API 文本样本包括固定输出长度请求、2223-token 输入的冷热请求及 2048-token 前缀命中，以及超出总窗口一个 token 的拒绝；没有把这些短请求提升为完整 256K 验收。默认 native 日志间隔可能只留下首个 prefill 统计，不能把缺少请求结束计数解释为 MTP 关闭。
+等待 `/health` 返回 `ready` 且 `workers=8`，检查 `/v1/models`，再做真实 JSON/SSE 查询、实际 MTP 接受和冷热前缀一致性检查。新源码已通过固定 32-token 输出请求、2223-token 输入的冷热请求及 2048-token 前缀命中，以及超出总窗口一个 token 的拒绝；它们仍属于短请求验收，不能提升为完整 256K 结论。当前配方设置 `DEEPINFER_LOGGING_INTERVAL_STEP=1`，需在实际请求期间核对 `verified_tokens` 和 `accepted_tokens` 正计数及长 prefill 进度。它们是滑动步骤窗口统计，不能直接相加当作请求总接受率。
 
 262144 总窗口仍需真实完整请求验证；图片、P/D 分离、图模式和其他硬件/镜像组合不在本次已验收范围。性能结果与原始运行收据保存在私有工作目录，不进入本仓；旧 A5 MFU 分母不用于 910B 性能结论。
 

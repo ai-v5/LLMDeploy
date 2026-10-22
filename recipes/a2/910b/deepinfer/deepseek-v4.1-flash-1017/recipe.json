@@ -21,7 +21,7 @@
     "repository": "https://github.com/ai-v5/deepinfer_ascend",
     "commit": "07e5002c08bce137ab2a86a5a1fc8bb652729ad6",
     "patch": "patches/deepinfer/a2-910b-modelslim-w8a8.patch",
-    "patch_sha256": "80d298cc96c962f0e90fed72728b7ff2843f1e81af86ce5991c66c582ef8946e",
+    "patch_sha256": "0e3dad0ffedb2fb9729e9710c9878045ccbea64e27b68d03725942e4c7392b44",
     "manifest": "source-files.json"
   },
   "operators": {
@@ -67,7 +67,8 @@
     "DEEPINFER_ZERO_OVERHEAD_SCHEDULING": "0",
     "DEEPINFER_USE_NEXTN_DECODE": "5",
     "ASCEND_CUSTOM_OPP_PATH": "/workspace/envs/v41-ops/vendors/custom_transformer",
-    "DEEPINFER_910B_OP_LIBRARY": "/workspace/build/vllm-bindings-lib/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so"
+    "DEEPINFER_910B_OP_LIBRARY": "/workspace/build/vllm-bindings-lib/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+    "DEEPINFER_LOGGING_INTERVAL_STEP": "1"
   },
   "library_paths": [
     "envs/v41-ops/vendors/custom_transformer/op_api/lib",
@@ -87,15 +88,17 @@
     "dspark": true
   },
   "validation": {
-    "native_eight_rank_generation_mtp_and_prefix_consistency": "PASS_SHORT_REQUEST_SCOPE",
-    "api_json_fixed32_sse_prefix_and_overflow": "PASS_SHORT_REQUEST_SCOPE",
+    "native_eight_rank_generation_mtp_and_prefix_consistency": "PENDING_REVALIDATION_AFTER_PREFILL_OPTIMIZATION",
+    "api_json_fixed32_sse_prefix_and_overflow": "PASS_CURRENT_SOURCE_SHORT_REQUEST_SCOPE",
     "model_file_contents": "PASS_ALL_152_SHA256",
-    "public_launcher_start": "NOT_RUN_CANDIDATE",
+    "public_launcher_start": "PASS_ACTUAL_START_EIGHT_WORKERS_AND_REAL_API_QUERIES",
     "total_context_tokens": 262144,
     "context_capacity": "IN_PROGRESS_NOT_VALIDATED",
     "vision_inference": "NOT_VALIDATED",
     "performance_data": "PRIVATE_NOT_STORED_HERE",
-    "public_launcher_artifact_check": "PASS_READ_ONLY_SOURCE_LIBRARIES_AND_PACKAGE_IDENTITY_NO_MODEL_START"
+    "public_launcher_artifact_check": "PASS_READ_ONLY_SOURCE_LIBRARIES_AND_PACKAGE_IDENTITY_NO_MODEL_START",
+    "prefill_component": "PASS_SIX_NATIVE_SCORE_AND_TOPK_EQUIVALENCE_CASES_NOT_FULL_MODEL_ACCEPTANCE",
+    "native_api_mtp_acceptance": "PASS_POSITIVE_NATIVE_STEP_WINDOW_COUNTERS_DURING_ACTUAL_FIXED32_STREAM"
   },
   "api_requirements": "requirements-api.lock",
   "tested_software": {

@@ -1,7 +1,7 @@
 {
   "base_commit": "07e5002c08bce137ab2a86a5a1fc8bb652729ad6",
   "hash_encoding": "LF-normalized UTF-8 bytes; no AST normalization",
-  "patch_sha256": "80d298cc96c962f0e90fed72728b7ff2843f1e81af86ce5991c66c582ef8946e",
+  "patch_sha256": "0e3dad0ffedb2fb9729e9710c9878045ccbea64e27b68d03725942e4c7392b44",
   "before_sha256": {
     "deep_cluster/topology/bind.py": "325fa9827b0d601c80a3e6d169ddf734375a715b720de1839636f5f7affb8894",
     "deepinfer/engine/llm_engine.py": "a636d60ca5711f6b7c21e68370c3bd9c2de6fc3f4439a7429ca4f572f0edeebe",
@@ -134,7 +134,7 @@
     "deepinfer/npu_ops/deep_select.py": "7996cad6664e861a3b40311711b381af20d85889fbcf8fe6d0a9476523f5cd5d",
     "deepinfer/npu_ops/engram910b.py": "a1a85865fe6d9a06acf7fa0125790f09fbeacc76e5422cf399c0fc3c07d56b87",
     "deepinfer/npu_ops/hccl_init.py": "fe3977a882e631774582efbfa25e132cf57ef0cdf7e5b561ae486d8e0d550683",
-    "deepinfer/npu_ops/indexer910b.py": "a6e7796dfba456f9272774028631bd4106deaffaecf340f72e1976721290f552",
+    "deepinfer/npu_ops/indexer910b.py": "77b8c2450564173e6e103eb06931525c50411ec68b2960fcd43627d284c1bca4",
     "deepinfer/npu_ops/mhc910b.py": "ef6fa30c0e0d0029a77a842039536396c367e72af416a96d4a8005653049249c",
     "deepinfer/npu_ops/moe910b.py": "32162353bde1dbc3c9a66baba1be2910da1830cf5d1db3dd9eb899cb41419be9",
     "deepinfer/npu_ops/patch_imports.py": "e7cf0fb2a0f16ec2544d3c38cd8b831293d260d79babd4fb5a1a6484cc9704bc",

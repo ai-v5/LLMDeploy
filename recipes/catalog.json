@@ -30,7 +30,7 @@
           "engine": "deepinfer",
           "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
           "guide": "docs/deployments/a2/910b/deepinfer.md",
-          "path_note": "Native/API short requests validated; public launcher startup and full context remain unvalidated."
+          "path_note": "Public launcher and current-source API/MTP/prefix-cache short checks passed; full context and per-DP coverage remain pending."
         }
       ]
     },

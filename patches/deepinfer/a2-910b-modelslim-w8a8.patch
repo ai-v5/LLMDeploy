@@ -2549,7 +2549,7 @@ diff --git a/deepinfer/npu_ops/indexer910b.py b/deepinfer/npu_ops/indexer910b.py
 new file mode 100644
 --- /dev/null
 +++ b/deepinfer/npu_ops/indexer910b.py
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,100 @@
 +"""BF16 indexer logits with bounded scratch and explicit paged addressing."""
 +import torch
 +
@@ -2569,21 +2569,57 @@ new file mode 100644
 +
 +
 +@torch.inference_mode()
-+def prefill(q,keys,weights,starts,ends,max_len,blocks=None,block_size=0,valid_mask=None):
-+    starts=starts.cpu().tolist();ends=ends.cpu().tolist()
-+    candidates=None if blocks is None else blocks.cpu()
-+    valid=[True]*q.shape[0] if valid_mask is None else valid_mask.cpu().tolist()
-+    width=max_len if blocks is None else blocks.shape[1]*block_size
-+    out=torch.full((q.shape[0],width),-torch.inf,dtype=torch.bfloat16,device=q.device)
-+    for row,(start,end,active) in enumerate(zip(starts,ends,valid)):
-+        if not active:continue
-+        positions,columns=_positions(end-start,None if candidates is None else candidates[row],block_size)
-+        for offset in range(0,positions.numel(),4096):
-+            pos=positions[offset:offset+4096].to(q.device)
-+            selected=keys.index_select(0,pos+start)
-+            col=columns[offset:offset+4096].to(q.device)
-+            out[row].index_copy_(0,col,_scores(q[row],selected,weights[row]))
-+    return out
++def prefill(q, keys, weights, starts, ends, max_len, blocks=None, block_size=0, valid_mask=None):
++    starts = starts.cpu().tolist()
++    ends = ends.cpu().tolist()
++    candidates = None if blocks is None else blocks.cpu()
++    active = [True] * q.shape[0] if valid_mask is None else valid_mask.cpu().tolist()
++    width = max_len if blocks is None else blocks.shape[1] * block_size
++    output = torch.full((q.shape[0], width), -torch.inf, dtype=torch.bfloat16, device=q.device)
++    for begin in range(0, q.shape[0], 8):
++        end = min(begin + 8, q.shape[0])
++        selections = []
++        for row in range(begin, end):
++            if active[row]:
++                positions, columns = _positions(ends[row] - starts[row], None if candidates is None else candidates[row], block_size)
++                selections.append((positions + starts[row], columns))
++            else:
++                empty = torch.empty(0, dtype=torch.int64)
++                selections.append((empty, empty))
++        maximum = max((positions.numel() for positions, _ in selections), default=0)
++        query = q[begin:end].float()
++        head_weights = weights[begin:end].float().unsqueeze(-1)
++        for offset in range(0, maximum, 4096):
++            count = min(4096, maximum - offset)
++            addresses = torch.zeros(end - begin, count, dtype=torch.int64)
++            counts = []
++            for row, (positions, _) in enumerate(selections):
++                selected = positions[offset:offset + count]
++                counts.append(selected.numel())
++                addresses[row, :selected.numel()] = selected
++            # A ragged N dimension can select another NPU matmul tiling and
++            # change rounding. Batch full 4096-key tiles only; preserve the
++            # original scalar path for every partial tile.
++            weighted = None
++            if count == 4096:
++                selected_keys = keys.index_select(0, addresses.flatten().to(q.device))
++                selected_keys = selected_keys.reshape(end - begin, count, keys.shape[-1]).float()
++                dots = torch.bmm(query, selected_keys.transpose(1, 2))
++                weighted = dots.relu() * head_weights
++            for row, size in enumerate(counts):
++                if not size:
++                    continue
++                # The compact [heads, valid_keys] shape and stride govern the
++                # NPU reduction tree. Preserve both, including partial tiles.
++                if size == 4096:
++                    values = weighted[row].contiguous().sum(0).bfloat16()
++                else:
++                    selected = selections[row][0][offset:offset + size].to(q.device)
++                    selected_keys = keys.index_select(0, selected)
++                    values = _scores(q[begin + row], selected_keys, weights[begin + row])
++                columns = selections[row][1][offset:offset + size].to(q.device)
++                output[begin + row].index_copy_(0, columns, values)
++    return output
 +
 +
 +@torch.inference_mode()
