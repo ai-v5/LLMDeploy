@@ -1,0 +1,23 @@
+{
+  "url": "https://ai-v5.github.io/LLMDeploy/",
+  "repository": "https://github.com/ai-v5/LLMDeploy",
+  "branch": "main",
+  "google_site_verification": "",
+  "pages": [
+    {"source": "README.md", "output": "index.html", "title": "LLMDeploy · 昇腾大模型部署实践", "description": "A5 Ascend 950DT 单机八卡 vLLM Ascend、DeepInfer 部署配方、版本锁定和 API 服务指南。分享已使用经验，为 A2、A3 预留结构。"},
+    {"source": "docs/deployments/README.md", "output": "deployments.html", "title": "部署方案与硬件目录", "description": "按 A5、A2、A3 代际及型号、推理引擎查找部署方案，区分已使用与待验证状态。"},
+    {"source": "docs/deployments/a5/950dt/vllm.md", "output": "a5/950dt/vllm.html", "title": "A5 / 950DT / vLLM Ascend", "description": "Ascend 950DT 单机八卡 vLLM 固定配方、镜像构建与换机文档入口。"},
+    {"source": "docs/deployments/a5/950dt/deepinfer.md", "output": "a5/950dt/deepinfer.html", "title": "A5 / 950DT / DeepInfer", "description": "DeepInfer Ascend 八卡历史部署 profile、源码与镜像身份、独立 API、合成预热及验收边界。"},
+    {"source": "docs/deployments/a5/950dt/deepinfer-pool.md", "output": "a5/950dt/deepinfer-pool.html", "title": "DeepInfer 多后端服务池", "description": "独立八卡 DeepInfer 副本的认证网关、SSH 隧道、Caddy、共享准入与滚动排空。"},
+    {"source": "docs/deployments/TEMPLATE.md", "output": "new-platform.html", "title": "新硬件部署文档模板", "description": "A2、A3 等后续平台的版本锁定、部署、证据等级与验收模板；预留不代表已经支持。"},
+    {"source": "docs/gateway.md", "output": "gateway.html", "title": "认证与多后端网关", "description": "OpenAI 兼容服务的凭据引用、请求路由、连接取消、共享限流及准入管理。"},
+    {"source": "docs/recovery.md", "output": "recovery.html", "title": "空闲恢复与资源让出", "description": "共享机器的只读资源观察、空闲窗口和失败采样约束；不抢占其他任务。"},
+    {"source": "docs/image-build.md", "output": "vllm-image.html", "title": "vLLM 镜像与编译", "description": "固定版本的 vLLM Ascend 镜像构建及编译来源。"},
+    {"source": "docs/migration.md", "output": "migration.html", "title": "换机与客户端配置", "description": "核实权重与工件后进行显式部署、服务验收和客户端接入。"},
+    {"source": "docs/deployment-record.md", "output": "deployment-record.html", "title": "部署来源记录", "description": "不含机器身份、原始日志与性能数据的部署来源记录。"},
+    {"source": "docs/notifications.md", "output": "notifications.html", "title": "通知与去重", "description": "服务状态通知的观察器、去重、维护暂停与恢复。"},
+    {"source": "docs/usage.md", "output": "usage.html", "title": "用量统计", "description": "服务用量统计的实现边界与本地私有记录。"},
+    {"source": "docs/pages.md", "output": "publishing.html", "title": "网站发布与 Google 收录", "description": "GitHub Pages 构建与公开输入清单、Search Console 验证、sitemap 提交和收录限制。"},
+    {"source": "THIRD_PARTY_NOTICES.md", "output": "third-party.html", "title": "许可与第三方声明", "description": "LLMDeploy 原创内容与上游代码、补丁和依赖的许可边界。"}
+  ]
+}

@@ -1,6 +1,7 @@
 """Functional text/SSE usage check over an existing private loopback tunnel."""
 import argparse
 import json
+from pathlib import Path
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -10,7 +11,8 @@ def main():
     assert parsed.scheme=='http' and parsed.hostname in ['127.0.0.1','localhost'] and not parsed.username and not parsed.query,'USE_EXISTING_LOOPBACK_TUNNEL'
     op=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with op.open(a.base+'/models',timeout=15) as r:m=json.load(r)['data'][0]
-    assert m['id']=='ds-v4.1-flash-1017' and m['max_model_len']==524288
+    recipe=json.loads((Path(__file__).resolve().parents[1]/'recipes/deepseek-v4.1-flash-1017/recipe.json').read_text(encoding='utf-8'))
+    assert m['id']==recipe['model']['served_name'] and m['max_model_len']==recipe['client_limits']['contextWindow']
     rows=[]
     prompt='cache-test '+('stable prefix block. '*2048)+' Reply exactly DEPLOY_OK.'
     for stage in ['cold','warm']:

@@ -1,0 +1,78 @@
+import importlib.util
+import json
+from html.parser import HTMLParser
+from pathlib import Path
+import tempfile
+import unittest
+from urllib.parse import unquote, urlsplit
+from xml.etree import ElementTree as ET
+
+from scripts.build_site import ROOT, build, pages, slug
+
+
+class Document(HTMLParser):
+    def __init__(self, text):
+        super().__init__()
+        self.links, self.ids, self.meta = [], set(), {}
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if 'id' in attrs:
+            self.ids.add(attrs['id'])
+        if 'href' in attrs:
+            self.links.append(attrs['href'])
+        if tag == 'meta' and 'name' in attrs:
+            self.meta[attrs['name']] = attrs.get('content')
+
+
+class SiteTests(unittest.TestCase):
+    def test_reject_private_and_duplicate_publish_inputs(self):
+        for source, output in [('local/receipt.md', 'receipt.html'), ('../README.md', 'index.html'),
+                               ('docs/../local/token.md', 'index.html'), ('README.md', '../index.html')]:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                pages({'pages': [{'source': source, 'output': output}]})
+        config = {'pages': [{'source': 'README.md', 'output': 'index.html'}] * 2}
+        with self.assertRaises(ValueError):
+            pages(config)
+
+    def test_future_platforms_are_not_advertised_as_validated(self):
+        catalog = json.loads((ROOT / 'recipes/catalog.json').read_text(encoding='utf-8'))
+        text = json.dumps(catalog)
+        self.assertIn('planned-not-validated', text)
+        self.assertIn('A2', text)
+        self.assertIn('A3', text)
+
+    @unittest.skipUnless(importlib.util.find_spec('markdown'), 'Install site/requirements.txt for Pages verification')
+    def test_site_contains_only_allowlisted_pages_with_valid_metadata_links_and_sitemap(self):
+        config = json.loads((ROOT / 'site/config.json').read_text(encoding='utf-8'))
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'site'
+            self.assertEqual(build(output), len(config['pages']))
+            documents = {p['output']: Document((output / p['output']).read_text(encoding='utf-8')) for p in config['pages']}
+            expected = set(documents) | {'assets/style.css', 'sitemap.xml', 'robots.txt', '.nojekyll'}
+            self.assertEqual({p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}, expected)
+            for name, document in documents.items():
+                self.assertTrue(document.meta['description'])
+                self.assertNotIn('google-site-verification', document.meta)
+                for link in document.links:
+                    if not link.startswith(config['url']) and not link.startswith('#'):
+                        continue
+                    relative = link[len(config['url']):] if link.startswith(config['url']) else name + link
+                    url = urlsplit(relative)
+                    target = unquote(url.path) or 'index.html'
+                    self.assertTrue((output / target).is_file(), (name, link))
+                    if url.fragment and target in documents:
+                        self.assertIn(unquote(url.fragment), documents[target].ids, (name, link))
+            urls = ET.parse(output / 'sitemap.xml').findall('{*}url/{*}loc')
+            self.assertEqual(len(urls), len(documents))
+            self.assertEqual(len({u.text for u in urls}), len(documents))
+            with self.assertRaises(FileExistsError):
+                build(output)
+
+    def test_unicode_anchors(self):
+        self.assertEqual(slug('DeepInfer 共享机器让机恢复', '-'), 'deepinfer-共享机器让机恢复')
+
+
+if __name__ == '__main__':
+    unittest.main()

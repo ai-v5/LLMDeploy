@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "layout": "recipes/<generation>/<hardware-model>/<engine>/<model-id>/recipe.json",
+  "platforms": [
+    {
+      "generation": "A5",
+      "hardware_model": "950DT",
+      "status": "historical-use",
+      "engines": [
+        {
+          "engine": "vllm-ascend",
+          "recipe": "recipes/deepseek-v4.1-flash-1017/recipe.json",
+          "guide": "docs/deployments/a5/950dt/vllm.md",
+          "path_note": "Existing canonical path retained for current tools and pending P/D work."
+        },
+        {
+          "engine": "deepinfer",
+          "recipe": "recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
+          "guide": "docs/deployments/a5/950dt/deepinfer.md",
+          "path_note": "Single-host serving profile; new renderer has local tests only."
+        }
+      ]
+    },
+    {
+      "generation": "A2",
+      "status": "planned-not-validated",
+      "hardware_model": null,
+      "engines": []
+    },
+    {
+      "generation": "A3",
+      "status": "planned-not-validated",
+      "hardware_model": null,
+      "engines": []
+    }
+  ],
+  "planned_guide": "docs/deployments/TEMPLATE.md"
+}
