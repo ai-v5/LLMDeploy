@@ -82,14 +82,29 @@ class Links(HTMLParser):
         self.result.append('<!--' + data + '-->')
 
 
+def verification_files(config, root):
+    files = {}
+    for name in config.get('google_verification_files', []):
+        if not re.fullmatch(r'google[0-9a-f]{16}\.html', name) or name in files:
+            raise ValueError('INVALID_GOOGLE_VERIFICATION_FILE')
+        raw = (root / 'site/verification' / name).read_bytes()
+        if raw.rstrip(b'\r\n') != ('google-site-verification: ' + name).encode('ascii'):
+            raise ValueError('INVALID_GOOGLE_VERIFICATION_CONTENT')
+        files[name] = raw
+    return files
+
+
 def build(output, root=ROOT):
     import markdown
     config = json.loads((root / 'site/config.json').read_text(encoding='utf-8'))
     mapping = pages(config)
+    verification_assets = verification_files(config, root)
     # Require a new directory so no stale files or private inputs survive.
     output.mkdir(parents=True, exist_ok=False)
     (output / 'assets').mkdir()
     (output / 'assets/style.css').write_bytes((root / 'site/style.css').read_bytes())
+    for name, raw in verification_assets.items():
+        (output / name).write_bytes(raw)
     verification = config.get('google_site_verification', '')
     if verification and not re.fullmatch(r'[A-Za-z0-9_-]+', verification):
         raise ValueError('INVALID_GOOGLE_VERIFICATION_TAG')

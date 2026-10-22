@@ -4,7 +4,7 @@
 
 ## 构建与发布
 
-`site/config.json` 明确列出页面，`scripts/build_site.py` 只读取该清单中的 README 和 `docs/` Markdown，以及固定 CSS。不复制整个仓库，不读取 `local/`、私有机器配置、原始日志或用户会话。站内文档链接转换为网站 URL，配方与源码链接指回 GitHub。
+`site/config.json` 明确列出页面，`scripts/build_site.py` 只读取该清单中的 README 和 `docs/` Markdown、固定 CSS，以及显式声明的 Google 验证文件。不复制整个仓库，不读取 `local/`、私有机器配置、原始日志或用户会话。站内文档链接转换为网站 URL，配方与源码链接指回 GitHub。
 
 本地预览采用独立环境，输出目录必须不存在：
 
@@ -23,6 +23,10 @@ GitHub Settings → Pages → Build and deployment 选择 **GitHub Actions**。`
 新增 A2、A3 时先填写[部署模板](deployments/TEMPLATE.md)，按实际型号/引擎登记 `recipes/catalog.json`，再把文档加入站点清单；未验收项保持待验证标识。
 
 ## Google Search Console
+
+本网站已采用 **HTML 文件上传**方式：验证文件 `googlef1de4c0e8dff2f1b.html` 保存在 `site/verification/`，由 `site/config.json` 的 `google_verification_files` 明确列出。构建器检查文件名和 Google 验证标记后按字节原样复制到网站根目录，不套用页面模板，也不加入 sitemap。验证地址为 <https://ai-v5.github.io/LLMDeploy/googlef1de4c0e8dff2f1b.html>。
+
+站点所有者在 Search Console 的对应 URL 前缀资源中选择 HTML 文件方式并点击“验证”。**成功后仍须保留文件及发布清单项**，后续每次发布都会持续携带该文件；文件可访问不代表已经替账号完成验证。此文件是用于公开发布的所有权验证标记，不包含 Google 登录凭据。也可按下述说明使用 HTML 标记作为额外验证方式。
 
 GitHub Pages 有利于提供独立可抓取的文档，但**不能强迫 Google 收录，也不保证排名或 GitHub 仓库收录加速**。仓库链接便于读者与爬虫发现源码，不是排名承诺。参见 [Google 抓取与重新索引说明](https://developers.google.com/search/docs/crawling-indexing/ask-google-to-recrawl)。
 
