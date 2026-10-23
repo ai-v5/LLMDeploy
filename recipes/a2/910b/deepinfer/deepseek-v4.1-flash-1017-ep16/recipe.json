@@ -30,7 +30,7 @@
       },
       {
         "path": "patches/deepinfer/a2-910b-ep16-resident.patch",
-        "sha256": "07f371a47954950fb0d1cb19ac9eeb08648f1d513fe2a643418d9b9972ee9659"
+        "sha256": "ffbf1f891ca2ca372b6560443f961f53fe675406d37b3e602781d733d94aea14"
       }
     ]
   },
@@ -79,7 +79,9 @@
     "ASCEND_CUSTOM_OPP_PATH": "/workspace/envs/v41-ops/vendors/custom_transformer",
     "DEEPINFER_910B_OP_LIBRARY": "/workspace/build/vllm-bindings-r1/vllm_ascend_C.so",
     "DEEPINFER_LOGGING_INTERVAL_STEP": "1",
-    "HCCL_DETERMINISTIC": "true"
+    "HCCL_DETERMINISTIC": "true",
+    "TASK_QUEUE_ENABLE": "1",
+    "DEEPINFER_910B_MAIN_SEGMENTED_GRAPH": "1"
   },
   "library_paths": [
     "envs/v41-ops/vendors/custom_transformer/op_api/lib",
@@ -100,18 +102,21 @@
   },
   "validation": {
     "source_patch_replay": "PASS_EXACT_PYTHON_SOURCE",
-    "native_two_host_short_mtp_prefix": "PASS_CURRENT_PUBLIC_SHORT_REQUEST_SLICE",
+    "native_two_host_short_mtp_prefix": "PASS_CURRENT_SOURCE_SHORT_CACHE_NATIVE_MTP_WITH_MAIN_SEGMENTED_GRAPH",
     "prefill_batching_component": "PASS_STRICT_OUTPUT_LSE_INPUT_OWNERSHIP_NOT_MODEL_OR_CONTEXT_ACCEPTANCE",
-    "public_launcher": "PASS_ACTUAL_TWO_HOST_START_SHORT_PREFIX_NATIVE_MTP_NOT_FULL_CONTEXT_ACCEPTANCE",
-    "public_launcher_4k_sse": "PASS_SAME_FROZEN_REQUEST_AND_MESSAGES_NOT_GENERAL_QUALITY_ACCEPTANCE",
-    "public_launcher_dp_coverage": "PASS_SERIAL_SHORT_REQUEST_ON_ALL_16_DP_NOT_CONCURRENT_OR_PER_DP_MTP_COVERAGE",
+    "public_launcher": "PASS_TWO_HOST_READ_ONLY_IDENTITY_CURRENT_SOURCE_CONTROL_NOT_PUBLIC_ENTRY_MODEL_RESTART",
+    "public_launcher_4k_sse": "CURRENT_SOURCE_FROZEN_4K_PASS_ENTRY_LINEAGE_CHECK_NOT_PUBLIC_ENTRY_RESTART",
+    "public_launcher_dp_coverage": "HISTORICAL_PREVIOUS_SOURCE_16DP_SERIAL_ONLY_NOT_CURRENT_SOURCE_COVERAGE",
     "fixed_source_32k_functional": "HISTORICAL_PREVIOUS_SOURCE_ONLY_NOT_CURRENT_SOURCE_ACCEPTANCE",
     "context_capacity": "CONFIGURED_262144_NOT_VALIDATED",
     "cross_source_long_continuation": "BEFORE_PROMOTION_QUALITY_HOLD",
     "vision_inference": "NOT_VALIDATED",
     "performance_data": "PRIVATE_NOT_STORED_HERE",
-    "native_4k_sse_mtp_prefix": "PASS_SAME_FROZEN_4K_MESSAGES_NOT_LONG_CONTEXT_OR_QUALITY_PROMOTION",
-    "candidate_decode_component": "PASS_STRICT_SCORE_MASK_TOPK_PHYSICAL_INDICES_INPUT_OWNERSHIP_NOT_MODEL_ACCEPTANCE"
+    "native_4k_sse_mtp_prefix": "PASS_CURRENT_SOURCE_SAME_FROZEN_4K_MESSAGES_USAGE_NATIVE_COUNTERS",
+    "candidate_decode_component": "PASS_STRICT_SCORE_MASK_TOPK_PHYSICAL_INDICES_INPUT_OWNERSHIP_NOT_MODEL_ACCEPTANCE",
+    "main_decode_segmented_graph": "PASS_CURRENT_MODEL_FOUR_SLICES_ALL16_REPLAY_NOT_FULL_SINGLEGRAPH",
+    "main_decode_graph_component": "PASS_Q1_TO_6_ACTUAL_WEIGHT_PARTS_AND_SHARED_POOL_LIFETIMES_NOT_FULL_MODEL_BUCKET_COVERAGE",
+    "main_decode_full_graph": "NOT_VALIDATED_DYNAMIC_PATHS_REMAIN_EAGER"
   },
   "tested_software": {
     "host_driver": "25.5.3",

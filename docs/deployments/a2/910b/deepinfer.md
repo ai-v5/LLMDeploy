@@ -1,6 +1,6 @@
 # A2 / 910B1 / DeepInfer
 
-状态：当前实施方向是双机16卡 EP16、全部专家常驻 HBM。当前模型源码和公开双机入口已通过两端只读身份检查、实际16-worker启动、短请求、MTP、前缀缓存及同一冻结4K冷/缓存请求检查。此前源码的32K合成功能结果仅作为历史证据，不继承为当前源码的32K验收。**262144仅为窗口配置，未实测验收；后续 prefill 测试不超过32768，常规迭代使用较短输入。** 较早候选间的强制续写差异仍保留质量晋级待核项，不能把检索烟测、组件一致性或窗口配置当作完整质量与容量验收。
+状态：当前实施方向是双机16卡 EP16、全部专家常驻 HBM。当前模型源码已通过实际16-worker启动、短请求、MTP、前缀缓存及同一冻结4K冷/缓存请求检查，四类主模型decode分段图在全部rank均有实际回放。公开入口沿用已验证的控制代码并单独核对身份；当前源码的验收不等同于重新启动公开入口的验收。此前源码的32K合成功能结果仅作为历史证据，不继承为当前源码的32K验收。**262144仅为窗口配置，未实测验收；后续 prefill 测试不超过32768，常规迭代使用较短输入。** 较早候选间的强制续写差异仍保留质量晋级待核项，不能把检索烟测、组件一致性或窗口配置当作完整质量与容量验收。
 
 本方案使用公开的 [Eco-Tech ModelSlim W8A8 权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)，服务保持 P/D 不分离。它是独立的910B1路径，不沿用 [950DT配方](../../a5/950dt/deepinfer.md)的 native 库、设备清单或内存比例。原单机八卡 CPU 专家 offload 配方作为历史兼容记录保留，不是当前双机常驻专家部署入口。
 
@@ -14,7 +14,7 @@
 | 专家 | 主模型和MTP的 routed/shared expert 权重及scale均在所属NPU常驻；不使用CPU专家offload或热点缓存替代 |
 | 其他主存使用 | Engram仍采用CPU选行读取，不能据此宣称整个模型无H2D传输 |
 | MoE通信 | 当前为padding all_gather、紧凑本地专家计算和all_reduce；不是已实现的真AlltoAll dispatch |
-| 调度与缓存 | eager、prefill budget2048、每rank最多1请求、memory fraction0.95；前缀缓存开启 |
+| 调度与缓存 | 主模型四类decode分段图，其余路径和MTP保持eager；TASK_QUEUE_ENABLE=1、prefill budget2048、每rank最多1请求、memory fraction0.95；前缀缓存开启 |
 | MTP | 保持5-token草稿和DSpark；独立MTP embedding与FP32 head不与主模型混用 |
 | 软件身份 | CANN9.1.0 / Python3.12.13 / torch2.10.0+cpu / torch-npu2.10.0.post4；已用宿主驱动25.5.3，其他组合需另验 |
 | 证据边界 | 固定模型源码的实际请求验收与公开入口自身的启动验收分开记录；配置262144不代表通过该长度测试 |
@@ -22,6 +22,10 @@
 当前补丁含常驻专家、动态量化复用、紧凑专家计算、indexer地址/评分批处理和注意力临时内存复用。single-bank prefill按64个query分块，decode和多bank仍按8个query分块；QK、softmax、PV保持FP32计算。扩大prefill分块会增加该组件的临时显存，不能描述成节省整机HBM。
 
 候选块decode按同一page-run长度分组，批量收集分页key并计算FP32点积，保持每段原来的二维head归约；输出列按原候选顺序一次写回，保留空洞与重复块。组件对照覆盖8/16-token候选块、部分页、无效行、NaN、非连续布局及当前共享KV存储跨度，并核对完整分数、top-k和物理索引；逐元素相等且将NaN视为相等，不声称NaN payload或signed-zero字节一致。批处理可能增加组件临时内存，不代表整机显存减少；组件计时不作为完整模型收益。
+
+主模型分段图覆盖mHC attention/FFN前处理与归一化、Qb投影/归一化/RoPE、共享专家。只捕获纯张量路径，按实际Q1至6建立精确shape缓存，不补齐路由；其他Q仍走原路径。每个设备和Q共享一个图池及capture stream，各层按实际顺序捕获和回放，固定输入在池外分配，输出由图缓存持有。此实现依赖当前单主模型forward线程，不支持并发重入或改变层执行顺序。组件覆盖全部六个Q及跨层输出生命周期，完整模型的实际bucket覆盖更窄，不能由组件测试代替。
+
+整模型runner与MTP仍设置`DEEPINFER_ENFORCE_EAGER=1`和`DEEPINFER_DFLASH_ENFORCE_EAGER=1`，另以`DEEPINFER_910B_MAIN_SEGMENTED_GRAPH=1`启用上述主模型片段。动态EP路由、indexer、compressor、Engram与采样仍在图外；不能仅关闭eager就宣称完成主模型单图。沿用`expandable_segments:True,pinned_reserve_segment_size_mb:64`，每片段独占图池或改成False分配器均未通过当前完整模型验收。图池复用用于控制额外内存，不代表模型HBM减少。
 
 在新的源目录从固定commit开始，依次应用原910B补丁和EP16增量；先按`source-files.json`核对两个补丁的SHA256：
 
@@ -69,9 +73,9 @@ docker run --detach --name "$CONTAINER_NAME" \
   'source /usr/local/Ascend/ascend-toolkit/set_env.sh && exec python3 /workspace/deploy/scripts/serve_deepinfer_ep16.py --serve --role "$NODE_ROLE" --coordinator "$COORDINATOR_IP" --peer "$WORKER_IP" --interface "$GLOO_INTERFACE" --run-id "$RUN_ID"'
 ```
 
-启动器核对309份Python源码、固定控制源码、包版本、native/算子/协议工件和模型文件；`--full-model-hash`可额外读取全部模型内容。只有`--serve`会检查空闲卡/NIC/端口、建立运行目录并启动本机进程。PID1 supervisor保证native worker具有存活的父进程，spawn重新导入不会再启动一套coordinator或agent。
+启动器核对310份Python源码、固定控制源码、包版本、native/算子/协议工件和模型文件；`--full-model-hash`可额外读取全部模型内容。只有`--serve`会检查空闲卡/NIC/端口、建立运行目录并启动本机进程。PID1 supervisor保证native worker具有存活的父进程，spawn重新导入不会再启动一套coordinator或agent。
 
-等待`/health`同时满足`ready`和`workers=16`，再检查真实JSON/SSE、冷/缓存输出一致、`prompt_cache_hit_tokens>0`及本次原生`accepted_draft_tokens>0`。`receipts/<RUN_ID>-runtime-rank*.json`记录专家驻留、原生计数和allocator采样；这些计数可能包括最终截断的草稿，不能直接作为HTTP吞吐。新运行必须使用新`RUN_ID`，保留旧容器与收据，不自动清理。新组合的短请求成功不继承历史32K验收，更不继承未完成的256K验收。
+等待`/health`同时满足`ready`和`workers=16`，再检查真实JSON/SSE、冷/缓存输出一致、`prompt_cache_hit_tokens>0`及本次原生`accepted_draft_tokens>0`。`receipts/<RUN_ID>-runtime-rank*.json`记录专家驻留、原生计数、主模型各图片段回放次数和allocator采样；这些计数可能包括最终截断的草稿，不能直接作为HTTP吞吐。新运行必须使用新`RUN_ID`，保留旧容器与收据，不自动清理。新组合的短请求成功不继承历史32K验收，更不继承未完成的256K验收。
 
 ## 历史单机八卡范围
 

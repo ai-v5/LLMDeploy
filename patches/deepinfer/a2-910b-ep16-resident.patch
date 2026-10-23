@@ -22,6 +22,79 @@ diff --git a/deepinfer/hugging_face/modelslim_loading.py b/deepinfer/hugging_fac
      for name,prefix in plan.engram_modules.items():
          owner=model.get_submodule(name)
          owner.modelslim_backend=ModelSlimEngram(checkpoint,prefix,cfg.gpt)
+diff --git a/deepinfer/model_executor/models/decoder_layer.py b/deepinfer/model_executor/models/decoder_layer.py
+--- a/deepinfer/model_executor/models/decoder_layer.py
++++ b/deepinfer/model_executor/models/decoder_layer.py
+@@ -104,6 +104,8 @@
+         cross_layer_runtime: CrossLayerRuntime | None = None,
+         dflash_input: torch.Tensor | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | HCLazyPostData | None]:
++        self._910b_decode_active=not input_metadata.is_prompt
++        self.self_attn._910b_decode_active=self._910b_decode_active
+         hidden_states = hidden_states.move() if isinstance(hidden_states, Movable) else hidden_states
+         if cross_layer_runtime is None:
+             cross_layer_runtime = CrossLayerRuntime()
+diff --git a/deepinfer/model_executor/models/deepseek.py b/deepinfer/model_executor/models/deepseek.py
+--- a/deepinfer/model_executor/models/deepseek.py
++++ b/deepinfer/model_executor/models/deepseek.py
+@@ -101,6 +101,13 @@
+             ]
+         )
+         self.num_layers = len(self.layers)
++        import os
++        if cfg.get("modelslim_w8a8",False) and os.environ.get("DEEPINFER_910B_MAIN_SEGMENTED_GRAPH")=="1":
++            # Only main-model modules: DSpark/MTP retains its eager path.
++            for layer in self.layers:
++                layer._910b_main_graph_enabled=True
++                layer.self_attn._910b_main_graph_enabled=True
++                layer.mlp.modelslim_backend._910b_main_graph_enabled=True
+ 
+         assert isinstance(head_module, MainPredictHeadHC), f"{type(head_module)=}"
+         self.hc_head = HCHead(head_module) if not self.hc_shifted else None
+diff --git a/deepinfer/model_executor/models/v4_modules/attn.py b/deepinfer/model_executor/models/v4_modules/attn.py
+--- a/deepinfer/model_executor/models/v4_modules/attn.py
++++ b/deepinfer/model_executor/models/v4_modules/attn.py
+@@ -479,7 +479,13 @@
+         wait_kv_swa = userbuffer.cp.all_gather(kv_swa) if use_cp else None
+         return kv_swa, wait_kv_swa
+ 
+-    def _project_q_b(
++    def _project_q_b(self,q_a,positions):
++        if getattr(self,"_910b_main_graph_enabled",False) and getattr(self,"_910b_decode_active",False):
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            return main_graph_call(self,"q_b_norm_rope",self._project_q_b_eager,q_a,positions)
++        return self._project_q_b_eager(q_a,positions)
++
++    def _project_q_b_eager(
+         self,
+         q_a: torch.Tensor,
+         positions: torch.Tensor,
+diff --git a/deepinfer/model_executor/models/v4_modules/hc.py b/deepinfer/model_executor/models/v4_modules/hc.py
+--- a/deepinfer/model_executor/models/v4_modules/hc.py
++++ b/deepinfer/model_executor/models/v4_modules/hc.py
+@@ -318,7 +318,21 @@
+             return (y_fp8, y_sf), y_bf16, lazy_data
+         return y_bf16, y_bf16, lazy_data
+ 
+-    def _hc_pre(
++    def _hc_pre(self,residual,hc_modules,prev_pre_layer_mix,cast_kwargs=None):
++        if (getattr(self,"_910b_main_graph_enabled",False) and getattr(self,"_910b_decode_active",False)
++                and not cast_kwargs and mhc910b.is_910b_tensor(residual)):
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            def compute(value,*previous):
++                normalized,bf16,lazy=self._hc_pre_eager(value,hc_modules,previous[0] if previous else None,None)
++                return normalized,bf16,lazy.residual,lazy.post_layer_mix,lazy.comb_res_mix,lazy.pre_layer_mix
++            inputs=(residual,) if prev_pre_layer_mix is None else (residual,prev_pre_layer_mix)
++            name="hc_attn_pre_norm" if hc_modules.layer_norm is self.attn_layernorm else "hc_ffn_pre_norm"
++            values=main_graph_call(self,name,compute,*inputs)
++            # The consumer clears its lazy bundle: never expose the cached object.
++            return values[0],values[1],HCLazyPostData(*values[2:])
++        return self._hc_pre_eager(residual,hc_modules,prev_pre_layer_mix,cast_kwargs)
++
++    def _hc_pre_eager(
+         self,
+         residual: torch.Tensor,  # [n, hc_mult, hidden_size]
+         hc_modules: HCSubmodules,
 diff --git a/deepinfer/model_executor/models/v4_modules/index_attn.py b/deepinfer/model_executor/models/v4_modules/index_attn.py
 --- a/deepinfer/model_executor/models/v4_modules/index_attn.py
 +++ b/deepinfer/model_executor/models/v4_modules/index_attn.py
@@ -321,6 +394,76 @@ new file mode 100644
 +            values=((q[row].float()@keys.float().T).relu()*weights[row,:,None].float()).sum(0).bfloat16()
 +            output[row,page*page_size:size]=values
 +    return output
+diff --git a/deepinfer/npu_ops/main_decode_graph910b.py b/deepinfer/npu_ops/main_decode_graph910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/main_decode_graph910b.py
+@@ -0,0 +1,65 @@
++"""Fixed-shape NPUGraph for an explicitly pure, tensor-only main-model slice."""
++import torch
++
++
++class FixedTensorGraph:
++    def __init__(self, function, examples, workspace=None):
++        if not examples or any(not isinstance(x,torch.Tensor) or x.device.type!='npu' or not x.numel() for x in examples):
++            raise ValueError('Explicit nonempty NPU tensor inputs are required')
++        if len({x.device for x in examples})!=1:
++            raise ValueError('A graph slice owns exactly one device')
++        self.inputs=tuple(torch.empty_like(x,memory_format=torch.contiguous_format) for x in examples)
++        self.specs=tuple((x.shape,x.dtype,x.device) for x in examples)
++        for static,example in zip(self.inputs,examples):static.copy_(example)
++        self.pool,self.stream=workspace if workspace is not None else (torch.npu.graph_pool_handle(),torch.npu.Stream(device=examples[0].device))
++        self.stream.wait_stream(torch.npu.current_stream())
++        with torch.npu.stream(self.stream):
++            for _ in range(2):function(*self.inputs)
++        self.stream.synchronize()
++        self.graph=torch.npu.NPUGraph()
++        with torch.npu.graph(self.graph,pool=self.pool,stream=self.stream):
++            self.output=function(*self.inputs)
++        torch.npu.current_stream().wait_stream(self.stream)
++        self.replays=0
++
++    @torch.inference_mode()
++    def __call__(self,*inputs):
++        if len(inputs)!=len(self.specs) or any((x.shape,x.dtype,x.device)!=spec for x,spec in zip(inputs,self.specs)):
++            raise ValueError('Graph replay requires the captured shapes, dtypes and device')
++        for static,value in zip(self.inputs,inputs):static.copy_(value)
++        self.graph.replay()
++        self.replays+=1
++        return self.output
++
++
++_MAIN_WORKSPACES={}
++
++
++def graph_workspace(device, q):
++    # Single main forward thread. Each exact-Q path captures and replays its
++    # main layers in order; no pool is shared across different Q buckets.
++    key=(device,q)
++    if key not in _MAIN_WORKSPACES:
++        _MAIN_WORKSPACES[key]=(torch.npu.graph_pool_handle(),torch.npu.Stream(device=device))
++    return _MAIN_WORKSPACES[key]
++
++
++def main_graph_call(owner, name, function, *inputs):
++    # Experimental first slice: exact local decode Q1..6; never pad routing.
++    if not 1 <= inputs[0].shape[0] <= 6:
++        return function(*inputs)
++    key=(name,tuple((tuple(x.shape),x.dtype,x.device) for x in inputs))
++    cache=owner.__dict__.setdefault('_910b_main_graph_cache',{})
++    if key not in cache:
++        cache[key]=FixedTensorGraph(function,inputs,graph_workspace(inputs[0].device,inputs[0].shape[0]))
++    return cache[key](*inputs)
++
++
++def main_graph_stats(model):
++    stats={'graphs':0,'replays':0,'by_slice':{}}
++    for module in model.modules():
++        for key,graph in module.__dict__.get('_910b_main_graph_cache',{}).items():
++            stats['graphs']+=1;stats['replays']+=graph.replays
++            item=stats['by_slice'].setdefault(key[0],{'graphs':0,'replays':0})
++            item['graphs']+=1;item['replays']+=graph.replays
++    return stats
 diff --git a/deepinfer/npu_ops/memory910b.py b/deepinfer/npu_ops/memory910b.py
 new file mode 100644
 --- /dev/null
@@ -394,6 +537,19 @@ diff --git a/deepinfer/npu_ops/moe910b.py b/deepinfer/npu_ops/moe910b.py
  
      @torch.inference_mode()
      def gate_forward(self, hidden, metadata, out=None):
+@@ -85,7 +102,11 @@
+             raise ValueError("Normalized and routing inputs must have matching shapes/devices")
+         indices, weights = self.gate_forward(hidden_bf16, metadata)
+         routed = self.routed(hidden, indices, weights)
+-        shared = self.shared(hidden)
++        if getattr(self,"_910b_main_graph_enabled",False) and not metadata.is_prompt:
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            shared = main_graph_call(self,"shared_expert",self.shared,hidden)
++        else:
++            shared = self.shared(hidden)
+         valid = getattr(metadata, "valid_token_mask", None)
+         if valid is not None:
+             shared = shared.masked_fill(~valid.reshape(-1, 1), 0)
 diff --git a/deepinfer/npu_ops/sparse_attention910b.py b/deepinfer/npu_ops/sparse_attention910b.py
 --- a/deepinfer/npu_ops/sparse_attention910b.py
 +++ b/deepinfer/npu_ops/sparse_attention910b.py
@@ -565,6 +721,19 @@ diff --git a/deepinfer/npu_ops/w8a8.py b/deepinfer/npu_ops/w8a8.py
          hidden = torch_npu.npu_swiglu(torch.cat((gate, up), dim=-1))
          return self.w2(hidden)
  
+@@ -117,9 +166,9 @@
+         if not valid.item():
+             raise ValueError("Invalid expert indices, scores, dtypes or devices on an EP rank")
+         count = torch.tensor([x.shape[0]], device=x.device, dtype=torch.int32)
+-        counts = [torch.empty_like(count) for _ in range(self.world)]
+-        dist.all_gather(counts, count, group=self.group)
+-        counts_cpu = [int(value.item()) for value in counts]
++        counts = torch.empty(self.world, device=x.device, dtype=torch.int32)
++        dist.all_gather_into_tensor(counts, count, group=self.group)
++        counts_cpu = counts.cpu().tolist()
+         padded = max(counts_cpu)
+         if padded == 0:
+             return x.clone()
 @@ -129,18 +178,23 @@
              buffer[:value.shape[0]].copy_(value)
              buffers = [torch.empty_like(buffer) for _ in range(self.world)]
@@ -591,6 +760,18 @@ diff --git a/deepinfer/npu_ops/w8a8.py b/deepinfer/npu_ops/w8a8.py
 -        start = self.rank * padded
 +        start = sum(counts_cpu[:self.rank])
          return output[start:start + x.shape[0]].to(x.dtype)
+diff --git a/deepinfer/platform.py b/deepinfer/platform.py
+--- a/deepinfer/platform.py
++++ b/deepinfer/platform.py
+@@ -106,7 +106,7 @@
+         os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+ 
+         # Disable task queue
+-        os.environ["TASK_QUEUE_ENABLE"] = "0"
++        os.environ["TASK_QUEUE_ENABLE"] = "1"
+ 
+         # HCCL envs
+         os.environ["HCCL_BUFFSIZE"] = "16"
 diff --git a/deepinfer/worker/base.py b/deepinfer/worker/base.py
 --- a/deepinfer/worker/base.py
 +++ b/deepinfer/worker/base.py

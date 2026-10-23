@@ -33,7 +33,7 @@ class DeepInferEP16Tests(unittest.TestCase):
         self.assertEqual(source['patches'], self.recipe['source']['patches'])
         for item in source['patches']:
             self.assertEqual(hashlib.sha256((ROOT / item['path']).read_bytes()).hexdigest(), item['sha256'])
-        self.assertEqual(len(source['after_sha256']), 309)
+        self.assertEqual(len(source['after_sha256']), 310)
         model = serving.load(serving.PROFILE / 'model-files.json')
         self.assertEqual(model['revision'], self.recipe['model']['revision'])
         self.assertEqual(len(model['files']), 152)
@@ -63,6 +63,9 @@ class DeepInferEP16Tests(unittest.TestCase):
             self.assertEqual(env['DEEPINFER_USE_NEXTN_DECODE'], '5')
             self.assertEqual(env['DEEPINFER_PREFILL_STORE_EXTRA_STATE'], '1')
             self.assertEqual(env['DEEPINFER_ENFORCE_EAGER'], '1')
+            self.assertEqual(env['DEEPINFER_DFLASH_ENFORCE_EAGER'], '1')
+            self.assertEqual(env['DEEPINFER_910B_MAIN_SEGMENTED_GRAPH'], '1')
+            self.assertEqual(env['TASK_QUEUE_ENABLE'], '1')
             self.assertEqual(env['DEEPINFER_CONTROL_RUN_ID'], 'example-run')
             self.assertIn('/workspace/envs/native-extra-site', env['PYTHONPATH'])
             self.assertIn('/workspace/envs/runtime-site', env['PYTHONPATH'])

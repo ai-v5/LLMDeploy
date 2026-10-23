@@ -42,7 +42,8 @@ def resident_worker(rank,config,jobs,events,cancel,python_path):
         torch.npu.reset_peak_memory_stats()
         def memory():
             return {'allocated':torch.npu.memory_allocated(),'reserved':torch.npu.memory_reserved(),
-                'peak_allocated':torch.npu.max_memory_allocated(),'peak_reserved':torch.npu.max_memory_reserved()}
+                'peak_allocated':torch.npu.max_memory_allocated(),'peak_reserved':torch.npu.max_memory_reserved(),
+                'main_segmented_graph':__import__('deepinfer.npu_ops.main_decode_graph910b',fromlist=['main_graph_stats']).main_graph_stats(model)}
         restores.append(install(llm.llm_engine,RequestOutput,memory,record,root/f'{run}-runtime-rank{rank}.json'))
         return llm
     _config.create_llm=create
