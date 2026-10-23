@@ -53,20 +53,41 @@ diff --git a/deepinfer/npu_ops/indexer910b.py b/deepinfer/npu_ops/indexer910b.py
      starts = starts.cpu().tolist()
      ends = ends.cpu().tolist()
      candidates = None if blocks is None else blocks.cpu()
-@@ -72,6 +72,9 @@
+@@ -72,29 +72,48 @@
  
  @torch.inference_mode()
  def decode(q,cache,weights,lengths,tables,max_len,blocks=None,block_size=0,valid_mask=None):
+-    if cache.ndim==4:
+-        assert cache.shape[-2]==1
+-        cache=cache.squeeze(-2)
+-    lengths=lengths.cpu().tolist();tables=tables.cpu().tolist()
+-    candidates=None if blocks is None else blocks.cpu()
+-    valid=[True]*q.shape[0] if valid_mask is None else valid_mask.cpu().tolist()
+-    width=max_len if blocks is None else blocks.shape[1]*block_size
+-    out=torch.full((q.shape[0],width),-torch.inf,dtype=torch.bfloat16,device=q.device)
+-    page_size=cache.shape[1]
+-    for row,(length,active) in enumerate(zip(lengths,valid)):
+-        if not active:continue
+-        positions,columns=_positions(length,None if candidates is None else candidates[row],block_size)
+-        # Work page by page: scalar page views retain the 64-bit byte base,
+-        # including when the shared physical block stride crosses 2 GiB.
+-        page_ids=positions//page_size
+-        pages,counts=torch.unique_consecutive(page_ids,return_counts=True)
+-        cursor=0
+-        for page,count in zip(pages.tolist(),counts.tolist()):
+-            selected_columns=slice(cursor,cursor+count);cursor+=count
+-            pos=positions[selected_columns]
+-            physical=tables[row][page]
+-            if not 0<=physical<cache.shape[0]:raise ValueError('Invalid physical index-cache page')
+-            keys=cache[physical].index_select(0,(pos%page_size).to(q.device))
+-            col=columns[selected_columns].to(q.device)
+-            out[row].index_copy_(0,col,_scores(q[row],keys,weights[row]))
+-    return out
 +    if blocks is None:
-+        from deepinfer.npu_ops.indexer_decode910b import decode as dense_decode
-+        return dense_decode(q,cache,weights,lengths,tables,max_len,None,block_size,valid_mask)
-     if cache.ndim==4:
-         assert cache.shape[-2]==1
-         cache=cache.squeeze(-2)
-@@ -98,3 +101,43 @@
-             col=columns[selected_columns].to(q.device)
-             out[row].index_copy_(0,col,_scores(q[row],keys,weights[row]))
-     return out
++        from deepinfer.npu_ops.indexer_decode910b import decode as implementation
++    else:
++        from deepinfer.npu_ops.indexer_candidate_decode910b import decode as implementation
++    return implementation(q,cache,weights,lengths,tables,max_len,blocks,block_size,valid_mask)
 +
 +
 +@torch.inference_mode()
@@ -159,6 +180,70 @@ new file mode 100644
 +            restored=torch.full((batch,tile+1),-torch.inf,dtype=values.dtype,device=q.device)
 +            restored.scatter_(1,indices.masked_fill(indices<0,tile),values)
 +            output[begin:stop,offset:offset+count].copy_(restored[:,:count].masked_fill(~mask,-torch.inf))
++    return output
+diff --git a/deepinfer/npu_ops/indexer_candidate_decode910b.py b/deepinfer/npu_ops/indexer_candidate_decode910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/indexer_candidate_decode910b.py
+@@ -0,0 +1,59 @@
++"""Candidate decode: batch equal-length page runs without changing reductions."""
++import torch
++
++
++def _gather(cache, physical, within, dim):
++    offsets=physical[:,None]*cache.stride(0)+within*cache.stride(1)+cache.storage_offset()
++    elements=cache.untyped_storage().nbytes()//cache.element_size()
++    if cache.stride(0)%dim==0 and cache.stride(1)%dim==0 and cache.storage_offset()%dim==0:
++        storage=cache.as_strided((elements//dim,dim),(dim,1),storage_offset=0)
++        return storage.index_select(0,(offsets//dim).reshape(-1))
++    storage=cache.as_strided((elements,),(1,),storage_offset=0)
++    addresses=offsets.reshape(-1,1)+torch.arange(dim,device=cache.device,dtype=torch.int64)
++    return storage.index_select(0,addresses.reshape(-1)).reshape(-1,dim)
++
++
++@torch.inference_mode()
++def decode(q,cache,weights,lengths,tables,max_len,blocks=None,block_size=0,valid_mask=None):
++    if blocks is None or block_size not in (8,16):raise ValueError('Expected8/16-token candidate blocks')
++    if cache.ndim==4:
++        if cache.shape[-2]!=1:raise ValueError('Expected one KV head')
++        cache=cache.squeeze(-2)
++    tokens,heads,dim=q.shape
++    if cache.ndim!=3 or cache.shape[-1]!=dim or cache.stride(-1)!=1:raise ValueError('Expected paged key rows')
++    if weights.shape!=(tokens,heads) or lengths.shape!=(tokens,) or tables.shape[0]!=tokens or blocks.shape[0]!=tokens:raise ValueError('Metadata shape mismatch')
++    width=blocks.shape[1]*block_size
++    output=torch.full((tokens,width),-torch.inf,dtype=torch.bfloat16,device=q.device)
++    if tokens==0 or width==0:return output
++    sizes=lengths.cpu().tolist();page_tables=tables.cpu().tolist();candidates=blocks.cpu()
++    active=[True]*tokens if valid_mask is None else valid_mask.cpu().tolist()
++    page_size=cache.shape[1];groups={}
++    within=torch.arange(block_size,device='cpu',dtype=torch.int64)
++    for row,(size,enabled) in enumerate(zip(sizes,active)):
++        if not enabled:continue
++        positions=(candidates[row].long()[:,None]*block_size+within).reshape(-1)
++        valid=(candidates[row][:,None]>=0).expand(-1,block_size).reshape(-1)&(positions<size)
++        columns=torch.arange(width,device='cpu',dtype=torch.int64)[valid];positions=positions[valid]
++        pages,counts=torch.unique_consecutive(positions//page_size,return_counts=True)
++        cursor=0
++        for page,count in zip(pages.tolist(),counts.tolist()):
++            physical=page_tables[row][page]
++            if not 0<=physical<cache.shape[0]:raise ValueError('Invalid physical index-cache page')
++            end=cursor+count
++            groups.setdefault(count,[]).append((row,physical,positions[cursor:end]%page_size,columns[cursor:end]))
++            cursor=end
++    for count,runs in groups.items():
++        for start in range(0,len(runs),32):
++            batch=runs[start:start+32]
++            rows=torch.tensor([run[0] for run in batch],device=q.device,dtype=torch.int64)
++            physical=torch.tensor([run[1] for run in batch],device=q.device,dtype=torch.int64)
++            offsets=torch.stack([run[2] for run in batch]).to(q.device)
++            keys=_gather(cache,physical,offsets,dim).reshape(len(batch),count,dim)
++            dots=torch.bmm(q.index_select(0,rows).float(),keys.float().transpose(1,2))
++            dots.relu_().mul_(weights.index_select(0,rows).float().unsqueeze(-1))
++            # Retain each original contiguous[heads,count] reduction shape.
++            values=torch.stack([score.contiguous().sum(0).bfloat16() for score in dots])
++            columns=torch.stack([run[3] for run in batch]).to(q.device)
++            destinations=rows[:,None]*width+columns
++            output.view(-1).index_copy_(0,destinations.reshape(-1),values.reshape(-1))
 +    return output
 diff --git a/deepinfer/npu_ops/indexer_decode910b.py b/deepinfer/npu_ops/indexer_decode910b.py
 new file mode 100644

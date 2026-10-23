@@ -33,7 +33,7 @@ class DeepInferEP16Tests(unittest.TestCase):
         self.assertEqual(source['patches'], self.recipe['source']['patches'])
         for item in source['patches']:
             self.assertEqual(hashlib.sha256((ROOT / item['path']).read_bytes()).hexdigest(), item['sha256'])
-        self.assertEqual(len(source['after_sha256']), 308)
+        self.assertEqual(len(source['after_sha256']), 309)
         model = serving.load(serving.PROFILE / 'model-files.json')
         self.assertEqual(model['revision'], self.recipe['model']['revision'])
         self.assertEqual(len(model['files']), 152)

@@ -30,7 +30,7 @@
       },
       {
         "path": "patches/deepinfer/a2-910b-ep16-resident.patch",
-        "sha256": "dc730a46883454b055f73ba135ce6bb04fdd21fbbf0655fd31d9c87ddcaef98f"
+        "sha256": "07f371a47954950fb0d1cb19ac9eeb08648f1d513fe2a643418d9b9972ee9659"
       }
     ]
   },
@@ -100,17 +100,18 @@
   },
   "validation": {
     "source_patch_replay": "PASS_EXACT_PYTHON_SOURCE",
-    "native_two_host_short_mtp_prefix": "PASS_CURRENT_NATIVE_SHORT_REQUEST_SLICE",
+    "native_two_host_short_mtp_prefix": "PASS_CURRENT_PUBLIC_SHORT_REQUEST_SLICE",
     "prefill_batching_component": "PASS_STRICT_OUTPUT_LSE_INPUT_OWNERSHIP_NOT_MODEL_OR_CONTEXT_ACCEPTANCE",
     "public_launcher": "PASS_ACTUAL_TWO_HOST_START_SHORT_PREFIX_NATIVE_MTP_NOT_FULL_CONTEXT_ACCEPTANCE",
     "public_launcher_4k_sse": "PASS_SAME_FROZEN_REQUEST_AND_MESSAGES_NOT_GENERAL_QUALITY_ACCEPTANCE",
     "public_launcher_dp_coverage": "PASS_SERIAL_SHORT_REQUEST_ON_ALL_16_DP_NOT_CONCURRENT_OR_PER_DP_MTP_COVERAGE",
-    "fixed_source_32k_functional": "PASS_SYNTHETIC_COLD_CACHED_NOT_PUBLIC_ENTRY_32K_OR_FULL_QUALITY_ACCEPTANCE",
+    "fixed_source_32k_functional": "HISTORICAL_PREVIOUS_SOURCE_ONLY_NOT_CURRENT_SOURCE_ACCEPTANCE",
     "context_capacity": "CONFIGURED_262144_NOT_VALIDATED",
     "cross_source_long_continuation": "BEFORE_PROMOTION_QUALITY_HOLD",
     "vision_inference": "NOT_VALIDATED",
     "performance_data": "PRIVATE_NOT_STORED_HERE",
-    "native_4k_sse_mtp_prefix": "PASS_CURRENT_SOURCE_IDENTICAL_R8_OUTPUT_NOT_LONG_CONTEXT_OR_QUALITY_PROMOTION"
+    "native_4k_sse_mtp_prefix": "PASS_SAME_FROZEN_4K_MESSAGES_NOT_LONG_CONTEXT_OR_QUALITY_PROMOTION",
+    "candidate_decode_component": "PASS_STRICT_SCORE_MASK_TOPK_PHYSICAL_INDICES_INPUT_OWNERSHIP_NOT_MODEL_ACCEPTANCE"
   },
   "tested_software": {
     "host_driver": "25.5.3",

@@ -37,7 +37,7 @@
           "profile": "two-host-ep16-resident",
           "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/recipe.json",
           "guide": "docs/deployments/a2/910b/deepinfer.md",
-          "path_note": "Native EP16 resident experts with MTP and prefix cache; public entry identity checks, actual two-host start and short native MTP/cache checks passed. Configured context is not capacity validation."
+          "path_note": "Native EP16 resident experts with MTP, prefix cache and batched candidate decode; actual public two-host start, short native MTP/cache and identical frozen4K cold/cache checks passed. Previous-source32K is historical only; configured context is not capacity validation."
         }
       ]
     },
