@@ -30,7 +30,7 @@ class DeepInferA2Tests(unittest.TestCase):
         self.assertEqual(sum(value is None for value in source['before_sha256'].values()), 13)
         self.assertEqual(model['revision'], self.recipe['model']['revision'])
         self.assertFalse(self.recipe['image']['registry_published'])
-        self.assertEqual(self.recipe['validation']['context_capacity'], 'IN_PROGRESS_NOT_VALIDATED')
+        self.assertEqual(self.recipe['validation']['context_capacity'], 'HISTORICAL_CONFIGURED_NOT_VALIDATED_NO_ACTIVE_CAPACITY_TEST')
 
     def test_fixed_mtp_cache_context_and_api_isolation_contract(self):
         plan = serving.build_plan(self.recipe, '/workspace/src/runtime', '/workspace/envs/api/bin/python', 8900, 29500)

@@ -23,14 +23,21 @@
     },
     {
       "generation": "A2",
-      "status": "candidate-short-requests-validated",
+      "status": "candidate-native-text-validation-not-full-context",
       "hardware_model": "910B1",
       "engines": [
         {
           "engine": "deepinfer",
           "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
           "guide": "docs/deployments/a2/910b/deepinfer.md",
-          "path_note": "Public launcher and current-source API/MTP/prefix-cache short checks passed; full context and per-DP coverage remain pending."
+          "path_note": "Historical single-host compatibility profile with CPU expert offload; not the current resident-expert deployment."
+        },
+        {
+          "engine": "deepinfer",
+          "profile": "two-host-ep16-resident",
+          "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/recipe.json",
+          "guide": "docs/deployments/a2/910b/deepinfer.md",
+          "path_note": "Native EP16 resident experts with MTP and prefix cache; public entry identity checks, actual two-host start and short native MTP/cache checks passed. Configured context is not capacity validation."
         }
       ]
     },

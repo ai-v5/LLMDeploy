@@ -93,7 +93,7 @@
     "model_file_contents": "PASS_ALL_152_SHA256",
     "public_launcher_start": "PASS_ACTUAL_START_EIGHT_WORKERS_AND_REAL_API_QUERIES",
     "total_context_tokens": 262144,
-    "context_capacity": "IN_PROGRESS_NOT_VALIDATED",
+    "context_capacity": "HISTORICAL_CONFIGURED_NOT_VALIDATED_NO_ACTIVE_CAPACITY_TEST",
     "vision_inference": "NOT_VALIDATED",
     "performance_data": "PRIVATE_NOT_STORED_HERE",
     "public_launcher_artifact_check": "PASS_READ_ONLY_SOURCE_LIBRARIES_AND_PACKAGE_IDENTITY_NO_MODEL_START",

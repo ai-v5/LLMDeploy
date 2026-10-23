@@ -1,10 +1,77 @@
 # A2 / 910B1 / DeepInfer
 
-状态：公开启动器已完成实际启动，八个 native worker 就绪；新源码的真实 JSON/SSE、MTP 正接受计数、前缀缓存和超窗拒绝检查已通过。**262144-token 冷热完整请求正在验证，逐 DP 副本覆盖仍待复验**。前一源码版本的逐 rank 原生生成与缓存证据不能直接沿用到新版本；也不能将配置值、组件对照或超窗拒绝当作完整容量验收。
+状态：当前实施方向是双机16卡 EP16、全部专家常驻 HBM。固定模型源码已通过实际文本请求、MTP、前缀缓存和32K功能检查；公开双机入口已通过两端只读身份检查，并实际启动16个worker，通过短请求、MTP和缓存检查。**262144仅为窗口配置，未实测验收；后续 prefill 测试不超过32768，常规迭代使用较短输入。** 较早候选间的强制续写差异仍保留质量晋级待核项，不能把检索烟测、组件一致性或窗口配置当作完整质量与容量验收。
 
-本方案使用公开的 [Eco-Tech ModelSlim W8A8 权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)，先部署单机 P/D 不分离服务。它是独立的 910B1 兼容路径，不沿用 [950DT 配方](../../a5/950dt/deepinfer.md)的 native 库、设备清单或内存比例。
+本方案使用公开的 [Eco-Tech ModelSlim W8A8 权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8)，服务保持 P/D 不分离。它是独立的910B1路径，不沿用 [950DT配方](../../a5/950dt/deepinfer.md)的 native 库、设备清单或内存比例。原单机八卡 CPU 专家 offload 配方作为历史兼容记录保留，不是当前双机常驻专家部署入口。
 
-## 固定范围
+## 双机 EP16 常驻专家候选
+
+使用独立的 [EP16配方](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/recipe.json)、[源码补丁链](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/source-files.json)、[运行工件身份](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/runtime-lock.json)和[启动器](../../../../scripts/serve_deepinfer_ep16.py)，不要将八卡启动器用于此源码集合。
+
+| 项目 | 双机固定配置 |
+| --- | --- |
+| 硬件与并行 | 两台 Linux aarch64，各8张64GiB的910B1；EP16 / DP16 / CP1 / ENP16 |
+| 专家 | 主模型和MTP的 routed/shared expert 权重及scale均在所属NPU常驻；不使用CPU专家offload或热点缓存替代 |
+| 其他主存使用 | Engram仍采用CPU选行读取，不能据此宣称整个模型无H2D传输 |
+| MoE通信 | 当前为padding all_gather、紧凑本地专家计算和all_reduce；不是已实现的真AlltoAll dispatch |
+| 调度与缓存 | eager、prefill budget2048、每rank最多1请求、memory fraction0.95；前缀缓存开启 |
+| MTP | 保持5-token草稿和DSpark；独立MTP embedding与FP32 head不与主模型混用 |
+| 软件身份 | CANN9.1.0 / Python3.12.13 / torch2.10.0+cpu / torch-npu2.10.0.post4；已用宿主驱动25.5.3，其他组合需另验 |
+| 证据边界 | 固定模型源码的实际请求验收与公开入口自身的启动验收分开记录；配置262144不代表通过该长度测试 |
+
+当前补丁含常驻专家、动态量化复用、紧凑专家计算、indexer地址/评分批处理和注意力临时内存复用。single-bank prefill按64个query分块，decode和多bank仍按8个query分块；QK、softmax、PV保持FP32计算。扩大prefill分块会增加该组件的临时显存，不能描述成节省整机HBM。
+
+在新的源目录从固定commit开始，依次应用原910B补丁和EP16增量；先按`source-files.json`核对两个补丁的SHA256：
+
+```sh
+git clone https://github.com/ai-v5/deepinfer_ascend.git "$WORK_DIR/src/deepinfer-runtime"
+git -C "$WORK_DIR/src/deepinfer-runtime" checkout --detach 07e5002c08bce137ab2a86a5a1fc8bb652729ad6
+git -C "$WORK_DIR/src/deepinfer-runtime" apply --check "$DEPLOY_REPO/patches/deepinfer/a2-910b-modelslim-w8a8.patch"
+git -C "$WORK_DIR/src/deepinfer-runtime" apply "$DEPLOY_REPO/patches/deepinfer/a2-910b-modelslim-w8a8.patch"
+git -C "$WORK_DIR/src/deepinfer-runtime" apply --check "$DEPLOY_REPO/patches/deepinfer/a2-910b-ep16-resident.patch"
+git -C "$WORK_DIR/src/deepinfer-runtime" apply "$DEPLOY_REPO/patches/deepinfer/a2-910b-ep16-resident.patch"
+```
+
+本仓只保存源码和身份清单，不分发权重、镜像或二进制工件。两端分别准备自己的工作目录及完整模型，保留工作目录内部的符号链接。除`src/deepinfer-runtime`外，还需匹配锁定文件的`envs/native-extra-site`、`envs/runtime-site`、`envs/gcc13`、`envs/v41-ops`和`build/vllm-bindings-r1`；不能直接换用历史八卡API venv。公开镜像tag只是来源说明，实际启动应核对配方中的完整镜像ID；tag漂移或重新构建都需要复验。模型大小检查不替代一次完整SHA256校验。
+
+两端必须设置相同的`COORDINATOR_IP`、`WORKER_IP`和新的`RUN_ID`，分别选择`NODE_ROLE=coordinator`与`NODE_ROLE=worker`及本机的`GLOO_INTERFACE`。控制连接只用于受信任的两节点网络，不提供密码认证；`RUN_ID`是运行名称，不是认证secret。不要把控制端口暴露为公共入口。默认API只监听coordinator的loopback8900；控制端口29570，`MASTER_PORT=29550`对应原生实际store端口29500。
+
+先在固定镜像和挂载下执行`--plan`或`--check-only`。两者都不启动模型；默认不传动作时也只检查。仓库挂载必须在工作目录容器边界内，例如`/workspace/deploy`：
+
+```sh
+python3 /workspace/deploy/scripts/serve_deepinfer_ep16.py --check-only \
+  --role "$NODE_ROLE" --coordinator "$COORDINATOR_IP" --peer "$WORKER_IP" \
+  --interface "$GLOO_INTERFACE" --run-id "$RUN_ID"
+```
+
+确认设备归属、两端8卡健康空闲、主存和端口后，按[通知维护流程](../../../notifications.md)处理通知。外部owner已暂停的任务不能由本次部署擅自恢复。以下命令只创建使用者选定的新容器，不停止已有服务；两端各执行一次，并提供自己的工作目录、模型路径和新的容器名：
+
+```sh
+mkdir -p "$WORK_DIR/home" "$WORK_DIR/tmp" "$WORK_DIR/cache/pyc"
+NPU_SMI="$(readlink -f "$(command -v npu-smi)")"
+IMAGE_ID=sha256:2ae3b99b6d3ba3162f152877357a2cc6e7124e3aed9b6a33c1bfd7da7d2def89
+docker run --detach --name "$CONTAINER_NAME" \
+  --network host --shm-size 8g --cap-add SYS_NICE \
+  --env NODE_ROLE="$NODE_ROLE" --env COORDINATOR_IP="$COORDINATOR_IP" --env WORKER_IP="$WORKER_IP" \
+  --env GLOO_INTERFACE="$GLOO_INTERFACE" --env RUN_ID="$RUN_ID" \
+  --env HOME=/workspace/home --env TMPDIR=/workspace/tmp --env PYTHONPYCACHEPREFIX=/workspace/cache/pyc \
+  --mount "type=bind,src=$WORK_DIR,dst=/workspace" \
+  --mount "type=bind,src=$MODEL_DIR,dst=/model,readonly" \
+  --mount "type=bind,src=$DEPLOY_REPO,dst=/workspace/deploy,readonly" \
+  --mount type=bind,src=/usr/local/Ascend/driver,dst=/usr/local/Ascend/driver,readonly \
+  --mount "type=bind,src=$NPU_SMI,dst=/usr/local/sbin/npu-smi,readonly" \
+  --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+  --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
+  --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+  --entrypoint /bin/bash "$IMAGE_ID" -lc \
+  'source /usr/local/Ascend/ascend-toolkit/set_env.sh && exec python3 /workspace/deploy/scripts/serve_deepinfer_ep16.py --serve --role "$NODE_ROLE" --coordinator "$COORDINATOR_IP" --peer "$WORKER_IP" --interface "$GLOO_INTERFACE" --run-id "$RUN_ID"'
+```
+
+启动器核对308份Python源码、固定控制源码、包版本、native/算子/协议工件和模型文件；`--full-model-hash`可额外读取全部模型内容。只有`--serve`会检查空闲卡/NIC/端口、建立运行目录并启动本机进程。PID1 supervisor保证native worker具有存活的父进程，spawn重新导入不会再启动一套coordinator或agent。
+
+等待`/health`同时满足`ready`和`workers=16`，再检查真实JSON/SSE、冷/缓存输出一致、`prompt_cache_hit_tokens>0`及本次原生`accepted_draft_tokens>0`。`receipts/<RUN_ID>-runtime-rank*.json`记录专家驻留、原生计数和allocator采样；这些计数可能包括最终截断的草稿，不能直接作为HTTP吞吐。新运行必须使用新`RUN_ID`，保留旧容器与收据，不自动清理。新组合的短请求成功不继承历史32K验收，更不继承未完成的256K验收。
+
+## 历史单机八卡范围
 
 权威配置见 [recipe.json](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/recipe.json)、[源码身份](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/source-files.json)和[运行库锁定](../../../../recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/runtime-lock.json)。
 
@@ -106,7 +173,7 @@ docker run --detach --name "$CONTAINER_NAME" \
 
 等待 `/health` 返回 `ready` 且 `workers=8`，检查 `/v1/models`，再做真实 JSON/SSE 查询、实际 MTP 接受和冷热前缀一致性检查。新源码已通过固定 32-token 输出请求、2223-token 输入的冷热请求及 2048-token 前缀命中，以及超出总窗口一个 token 的拒绝；它们仍属于短请求验收，不能提升为完整 256K 结论。当前配方设置 `DEEPINFER_LOGGING_INTERVAL_STEP=1`，需在实际请求期间核对 `verified_tokens` 和 `accepted_tokens` 正计数及长 prefill 进度。它们是滑动步骤窗口统计，不能直接相加当作请求总接受率。
 
-262144 总窗口仍需真实完整请求验证；图片、P/D 分离、图模式和其他硬件/镜像组合不在本次已验收范围。性能结果与原始运行收据保存在私有工作目录，不进入本仓；旧 A5 MFU 分母不用于 910B 性能结论。
+历史单机未完成262144总窗口的真实完整请求验证；当前测试上限为32768，不安排更大的prefill。图片、P/D分离、图模式和其他硬件/镜像组合未因此获得验收。性能结果与原始运行收据保存在私有工作目录，不进入本仓；旧A5 MFU分母不用于910B性能结论。
 
 健康与查询验证通过后恢复通知并保留去重状态。loopback API 不独立校验 key；对外接入时由使用者配置 [SSH 转发或认证网关](../../../gateway.md)，不要把原生端口直接作为公共入口。
 

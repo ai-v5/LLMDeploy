@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "id": "a2-910b16-deepinfer-dsv41flash1017-w8a8",
+  "engine": "deepinfer",
+  "hardware": {
+    "generation": "A2",
+    "model": "910B1",
+    "architecture": "linux/aarch64",
+    "cards": 16,
+    "hbm_gib_per_card": 64,
+    "hosts": 2,
+    "cards_per_host": 8
+  },
+  "model": {
+    "repo": "Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8",
+    "revision": "12b85455a58c7df345c1abc43934624a76bac576",
+    "source": "https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8",
+    "manifest": "model-files.json",
+    "served_name": "deepseek-v4.1-flash-1017",
+    "precision": "ModelSlim W8A8_DYNAMIC mixed precision; independent MTP embedding and FP32 MTP output head"
+  },
+  "source": {
+    "repository": "https://github.com/ai-v5/deepinfer_ascend",
+    "commit": "07e5002c08bce137ab2a86a5a1fc8bb652729ad6",
+    "manifest": "source-files.json",
+    "patches": [
+      {
+        "path": "patches/deepinfer/a2-910b-modelslim-w8a8.patch",
+        "sha256": "0e3dad0ffedb2fb9729e9710c9878045ccbea64e27b68d03725942e4c7392b44"
+      },
+      {
+        "path": "patches/deepinfer/a2-910b-ep16-resident.patch",
+        "sha256": "dc730a46883454b055f73ba135ce6bb04fdd21fbbf0655fd31d9c87ddcaef98f"
+      }
+    ]
+  },
+  "operators": {
+    "repository": "https://github.com/vllm-project/vllm-ascend",
+    "commit": "5f828ad638ee4f9b12db87f9d5481f29076d37f9",
+    "soc_version": "ascend910b1"
+  },
+  "image": {
+    "reference": "quay.io/ascend/vllm-ascend:v0.27.1rc1",
+    "historical_runtime_id": "sha256:2ae3b99b6d3ba3162f152877357a2cc6e7124e3aed9b6a33c1bfd7da7d2def89",
+    "registry_digest_available": false,
+    "tag_is_not_identity_proof": true,
+    "rebuild_requires_revalidation": true
+  },
+  "runtime_lock": "runtime-lock.json",
+  "env": {
+    "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True,pinned_reserve_segment_size_mb:64",
+    "DEEPINFER_ENFORCE_EAGER": "1",
+    "DEEPINFER_DFLASH_ENFORCE_EAGER": "1",
+    "DEEPINFER_DISABLE_SYNC_GUARD": "1",
+    "DEEPINFER_ENABLE_MTP_VARLEN": "1",
+    "DEEPINFER_SAMPLER_FORCE_TOPK": "0",
+    "DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS": "0",
+    "DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL": "0",
+    "DEEPINFER_REARRANGE_AFTER_PREFILL_IN_NORMAL_ENGINE": "0",
+    "DEEPINFER_PREFILL_STORE_EXTRA_STATE": "1",
+    "DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE": "mask",
+    "DEEPINFER_YOCO_PREFILL_KEEP_TOKENS": "256",
+    "DEEPINFER_NUM_STATE_SLOTS_RATIO": "2",
+    "DEEPINFER_HF_MODEL_DIR": "/model",
+    "DEEPINFER_JIT_CACHE_DIR": "/workspace/cache/jit",
+    "HF_HOME": "/workspace/cache/hf",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HCCL_EXEC_TIMEOUT": "1800",
+    "OMP_NUM_THREADS": "8",
+    "HOME": "/workspace/home",
+    "XDG_CACHE_HOME": "/workspace/cache/xdg",
+    "TMPDIR": "/workspace/tmp",
+    "TILELANG_CACHE_DIR": "/workspace/cache/jit/tilelang",
+    "TORCH_EXTENSIONS_DIR": "/workspace/cache/torch-extensions",
+    "DEEPINFER_ACCELERATOR": "ascend",
+    "DEEPINFER_ZERO_OVERHEAD_SCHEDULING": "0",
+    "DEEPINFER_USE_NEXTN_DECODE": "5",
+    "ASCEND_CUSTOM_OPP_PATH": "/workspace/envs/v41-ops/vendors/custom_transformer",
+    "DEEPINFER_910B_OP_LIBRARY": "/workspace/build/vllm-bindings-r1/vllm_ascend_C.so",
+    "DEEPINFER_LOGGING_INTERVAL_STEP": "1",
+    "HCCL_DETERMINISTIC": "true"
+  },
+  "library_paths": [
+    "envs/v41-ops/vendors/custom_transformer/op_api/lib",
+    "build/vllm-bindings-r1",
+    "envs/gcc13/lib",
+    "envs/native-extra-site/z3/lib"
+  ],
+  "server": {
+    "max_model_len": 262144,
+    "max_output_tokens": 32768,
+    "max_images_per_request": 999,
+    "max_num_batched_tokens": 2048,
+    "max_num_seqs": 1,
+    "gpu_memory_utilization": 0.95,
+    "prefill_any_interval": 1,
+    "eplb_interval": 0,
+    "dspark": true
+  },
+  "validation": {
+    "source_patch_replay": "PASS_EXACT_PYTHON_SOURCE",
+    "native_two_host_short_mtp_prefix": "PASS_CURRENT_NATIVE_SHORT_REQUEST_SLICE",
+    "prefill_batching_component": "PASS_STRICT_OUTPUT_LSE_INPUT_OWNERSHIP_NOT_MODEL_OR_CONTEXT_ACCEPTANCE",
+    "public_launcher": "PASS_ACTUAL_TWO_HOST_START_SHORT_PREFIX_NATIVE_MTP_NOT_FULL_CONTEXT_ACCEPTANCE",
+    "public_launcher_4k_sse": "PASS_SAME_FROZEN_REQUEST_AND_MESSAGES_NOT_GENERAL_QUALITY_ACCEPTANCE",
+    "public_launcher_dp_coverage": "PASS_SERIAL_SHORT_REQUEST_ON_ALL_16_DP_NOT_CONCURRENT_OR_PER_DP_MTP_COVERAGE",
+    "fixed_source_32k_functional": "PASS_SYNTHETIC_COLD_CACHED_NOT_PUBLIC_ENTRY_32K_OR_FULL_QUALITY_ACCEPTANCE",
+    "context_capacity": "CONFIGURED_262144_NOT_VALIDATED",
+    "cross_source_long_continuation": "BEFORE_PROMOTION_QUALITY_HOLD",
+    "vision_inference": "NOT_VALIDATED",
+    "performance_data": "PRIVATE_NOT_STORED_HERE",
+    "native_4k_sse_mtp_prefix": "PASS_CURRENT_SOURCE_IDENTICAL_R8_OUTPUT_NOT_LONG_CONTEXT_OR_QUALITY_PROMOTION"
+  },
+  "tested_software": {
+    "host_driver": "25.5.3",
+    "container_cann": "9.1.0",
+    "python": "3.12.13",
+    "scope": "Observed combination only. Driver/framework/operator rebuilds require separate validation."
+  },
+  "topology": {
+    "ep": 16,
+    "dp": 16,
+    "cp": 1,
+    "enp": 16,
+    "expert_policy": "All main and MTP routed/shared expert weight and scale buffers resident on owning NPU; CPU expert offload forbidden",
+    "transport": "Padded all_gather with compact local expert compute and all_reduce; not true AlltoAll MoE dispatch"
+  },
+  "requirements": "requirements.lock"
+}
