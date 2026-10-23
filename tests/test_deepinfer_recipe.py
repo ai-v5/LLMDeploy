@@ -2,6 +2,7 @@ import copy
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -45,6 +46,18 @@ class DeepInferRecipeTests(unittest.TestCase):
                        {'unknown': 'field'}):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 validate({**self.host, **fields}, self.recipe)
+
+    def test_source_build_uses_its_own_revision_at_fetch_checkout_and_label(self):
+        candidate = self.recipe['source_build_candidate']
+        revision = candidate['commit']
+        dockerfile = (ROOT / 'images/deepinfer/Dockerfile.source').read_text(encoding='utf-8')
+        self.assertNotEqual(revision, self.recipe['source']['commit'])
+        self.assertEqual(re.findall(r'fetch --depth 1 origin ([0-9a-f]{40})', dockerfile), [revision])
+        self.assertEqual(re.findall(r'rev-parse HEAD\)" = ([0-9a-f]{40})', dockerfile), [revision])
+        self.assertEqual(re.findall(r'org.opencontainers.image.revision="([0-9a-f]{40})"', dockerfile), [revision])
+        self.assertTrue(candidate['native_rebuild_required'])
+        self.assertFalse(candidate['historical_overlay_compatible'])
+        self.assertNotIn(self.recipe['source']['native_sha256'], dockerfile)
 
     def test_shell_quote_and_no_render_execution(self):
         host = {**self.host, 'artifacts_dir': '/srv/cache $(false)'}
