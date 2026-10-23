@@ -10,6 +10,7 @@
     {"source": "docs/deployments/a5/950dt/vllm.md", "output": "a5/950dt/vllm.html", "title": "A5 / 950DT / vLLM Ascend", "description": "Ascend 950DT 单机八卡 vLLM 固定配方、镜像构建与换机文档入口。"},
     {"source": "docs/deployments/a5/950dt/deepinfer.md", "output": "a5/950dt/deepinfer.html", "title": "A5 / 950DT / DeepInfer", "description": "DeepInfer Ascend 八卡历史部署 profile、源码与镜像身份、独立 API、合成预热及验收边界。"},
     {"source": "docs/deployments/a5/950dt/deepinfer-pool.md", "output": "a5/950dt/deepinfer-pool.html", "title": "DeepInfer 多后端服务池", "description": "独立八卡 DeepInfer 副本的认证网关、SSH 隧道、Caddy、共享准入与滚动排空。"},
+    {"source": "docs/deployments/a2/910b/deepinfer.md", "output": "a2/910b/deepinfer.html", "title": "A2 / 910B1 / DeepInfer 候选", "description": "固定公开 W8A8 权重的 910B 配方、源码补丁和实际启动记录；短请求通过，完整容量仍待验收。"},
     {"source": "docs/deployments/TEMPLATE.md", "output": "new-platform.html", "title": "新硬件部署文档模板", "description": "A2、A3 等后续平台的版本锁定、部署、证据等级与验收模板；预留不代表已经支持。"},
     {"source": "docs/gateway.md", "output": "gateway.html", "title": "认证与多后端网关", "description": "OpenAI 兼容服务的凭据引用、请求路由、连接取消、共享限流及准入管理。"},
     {"source": "docs/recovery.md", "output": "recovery.html", "title": "空闲恢复与资源让出", "description": "共享机器的只读资源观察、空闲窗口和失败采样约束；不抢占其他任务。"},

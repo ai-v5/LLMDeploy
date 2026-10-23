@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "files": {
+    "agent.py": "de6915f535ab5842886863b4d68e959fca5d54e711504535c51194980c964e7b",
+    "api_entry.py": "b3e72ffa6af9d50a3df904e1833f06ca835ebecdfa0699211b58a42eb647e8be",
+    "remote_backend.py": "f202449088a38dca12be504d2c2ed20272c002d736d8cf580c8214942743b592",
+    "resident_worker.py": "494d1cf70e7674d37a1338a8917d6a5f86555ccfe87f971227d2ab828fc9b215",
+    "runtime_audit.py": "39f68b76d923796c9192f80e65f22f8ba7824475749f1f4904a16d8f54a05431",
+    "runtime_entry.py": "b2726cb6d940e6861a7ad011d75f377fb5cd9b7e0d54af76b712986ae5cad7cb",
+    "serve_recipe_ep16.py": "7322679d5b0c85ccf92a1ad2eb7eb7aa2067696df14a62931f7bfd246eb1f988",
+    "supervisor.py": "4945eb9a7a4048241b694cb785eb175013d75189fd4f78b32d0742bd66d20f3f",
+    "wire.py": "f112d0eb7b97fa0f476f30f0981e7cffc52b7d2708bee0a174e53e3a999a376d"
+  },
+  "scope": "Fixed two-host EP16 control/entry source identity. No model or capacity acceptance implied."
+}
