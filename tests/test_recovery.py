@@ -24,11 +24,28 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(npu_idle(snapshot()))
         self.assertFalse(npu_idle(snapshot(util=1)))
         self.assertFalse(npu_idle(snapshot(busy_card=7)))
-        for value in [snapshot(missing_process_card=7), snapshot(alarm_card=1), snapshot().replace('Ascend950DT', 'Other'),
+        for value in [snapshot(missing_process_card=7), snapshot().replace('Ascend950DT', 'Other'),
                       snapshot().replace('| 7 | Ascend950DT', '| 6 | Ascend950DT'), snapshot().replace('NA | 0 ', 'NA | nan ')]:
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     npu_idle(value)
+
+    def test_alarm_does_not_block_complete_idle_snapshot(self):
+        self.assertTrue(npu_idle(snapshot(alarm_card=5)))
+        self.assertTrue(npu_idle(snapshot().replace('| OK |', '| Alarm |')))
+
+    def test_alarm_does_not_hide_occupancy_or_incomplete_snapshot(self):
+        self.assertFalse(npu_idle(snapshot(alarm_card=5, busy_card=5)))
+        self.assertFalse(npu_idle(snapshot(alarm_card=5, busy_card=0)))
+        self.assertFalse(npu_idle(snapshot(alarm_card=5, util=1)))
+        with self.assertRaises(ValueError):
+            npu_idle(snapshot(alarm_card=5, missing_process_card=7))
+
+    def test_other_health_states_still_block_idle_admission(self):
+        for health in ['Unknown', 'Critical', 'Offline', '']:
+            with self.subTest(health=health):
+                with self.assertRaises(ValueError):
+                    npu_idle(snapshot(alarm_card=5).replace('| Alarm |', f'| {health} |'))
 
     def test_at_least_one_hour_and_seven_observations(self):
         state = {}

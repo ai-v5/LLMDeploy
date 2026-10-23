@@ -2,8 +2,10 @@ import copy
 import configparser
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
-from deploy_recovery.deepinfer import sample_window, step
+from deploy_recovery.deepinfer import npu_observation, sample_window, step
+from test_recovery import snapshot
 
 
 class ObserverServiceTests(unittest.TestCase):
@@ -95,6 +97,33 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(len(self.starts), 1)
         self.assertEqual(self.saved[-2]['state'], 'START_PENDING')
         self.assertEqual(state['state'], 'START_REQUESTED')
+
+    def test_alarm_idle_samples_allow_recovery_only_after_full_hour(self):
+        state = self.check({})
+        self.fail()
+        def observe(_):
+            return npu_observation({'npu_smi': '/usr/bin/npu-smi'})
+        with patch('deploy_recovery.deepinfer.command', return_value=snapshot(alarm_card=5)):
+            for i in range(1, 61):
+                self.now = i * 60
+                state = self.check(state, observe=observe)
+            self.assertEqual(state['observation'], 'IDLE')
+            self.assertFalse(self.starts)
+            self.now = 3660
+            state = self.check(state, observe=observe)
+        self.assertEqual(state['state'], 'START_REQUESTED')
+        self.assertEqual(len(self.starts), 1)
+
+    def test_alarm_does_not_turn_busy_or_unknown_samples_into_idle(self):
+        for payload, expected in [
+            (snapshot(alarm_card=5, busy_card=5), 'BUSY'),
+            (snapshot(alarm_card=5, util=1), 'BUSY'),
+            (snapshot(alarm_card=5, missing_process_card=7), 'UNKNOWN'),
+            (snapshot(alarm_card=5).replace('| Alarm |', '| Unknown |'), 'UNKNOWN'),
+        ]:
+            with self.subTest(expected=expected):
+                with patch('deploy_recovery.deepinfer.command', return_value=payload):
+                    self.assertEqual(npu_observation({'npu_smi': '/usr/bin/npu-smi'}), expected)
 
     def test_manual_stop_kill_or_unarmed_stopped_container_never_starts(self):
         for action in ['stop', 'kill', 'destroy']:

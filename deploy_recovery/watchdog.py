@@ -50,7 +50,7 @@ def npu_idle(payload):
             pending = None
     if set(cards) != set(range(8)) or covered != set(range(8)) or processes is None:
         raise ValueError('INCOMPLETE_NPU_SNAPSHOT')
-    if any(c['util'] is None or c['health'] != 'OK' for c in cards.values()):
+    if any(c['util'] is None or c['health'] not in ('OK', 'Alarm') for c in cards.values()):
         raise ValueError('UNHEALTHY_OR_UNKNOWN_CARD')
     return processes == 0 and all(c['util'] == 0 for c in cards.values())
 
