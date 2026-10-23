@@ -35,6 +35,21 @@
       "examples/serve_recipe.py": "7856d250f1529d4a0a65d4d0b3ff26ed9ac35037c709428ac22d06b0d073fca4"
     }
   },
+  "source_build_candidate": {
+    "repository": "https://github.com/ai-v5/deepinfer_ascend",
+    "base_commit": "8b16149741a4935e1dec8cea27853f273b374c5b",
+    "commit": "b1203ac1bcc57df099d6e336255bf6a7b6e9bb83",
+    "tree": "42a07a920e56cf35bb9704fa2818c8f57222f14b",
+    "pull_request": "https://github.com/ai-v5/deepinfer_ascend/pull/1",
+    "native_rebuild_required": true,
+    "historical_overlay_compatible": false,
+    "validation": {
+      "cpu_protocol_and_source_tests": "passed",
+      "native_build": "not_run_for_this_revision",
+      "npu_inference": "not_run_for_this_revision",
+      "performance": "not_claimed"
+    }
+  },
   "image": {
     "historical_runtime_id": "sha256:93b89c1ff22719cb91041f6a5b7d88323278e4e7a99812464a995094b70729ce",
     "overlay_parent_id": "sha256:d43af9a352c2668624d8fdd53e9f9101ead4486f1ef1e125e8bca743accbe3ce",

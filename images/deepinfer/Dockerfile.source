@@ -36,13 +36,13 @@ RUN mkdir -p /tmp/gcc-build && \
     make -j "${MAX_JOBS}" && make install && \
     rm -rf /tmp/gcc-build /tmp/gcc-13.4.0 /tmp/gcc-13.4.0.tar.xz
 
-# Fetch only public source at the serving profile's fixed commit. No local
+# Fetch only public source at the recipe's source_build_candidate commit. No local
 # checkout, authentication configuration, model or host configuration is copied.
 RUN git init /opt/deepinfer-build/source && \
     git -C /opt/deepinfer-build/source remote add origin https://github.com/ai-v5/deepinfer_ascend.git && \
-    git -C /opt/deepinfer-build/source fetch --depth 1 origin 07e5002c08bce137ab2a86a5a1fc8bb652729ad6 && \
+    git -C /opt/deepinfer-build/source fetch --depth 1 origin b1203ac1bcc57df099d6e336255bf6a7b6e9bb83 && \
     git -C /opt/deepinfer-build/source checkout --detach FETCH_HEAD && \
-    test "$(git -C /opt/deepinfer-build/source rev-parse HEAD)" = 07e5002c08bce137ab2a86a5a1fc8bb652729ad6
+    test "$(git -C /opt/deepinfer-build/source rev-parse HEAD)" = b1203ac1bcc57df099d6e336255bf6a7b6e9bb83
 
 RUN mkdir -p /opt/llmdeploy && \
     python3.12 -m venv /opt/deepinfer-venv && \
@@ -85,7 +85,7 @@ RUN /opt/deepinfer-api-venv/bin/python -m pip install --no-cache-dir \
         -r /opt/llmdeploy/requirements-api.lock
 
 LABEL org.opencontainers.image.source="https://github.com/ai-v5/deepinfer_ascend" \
-      org.opencontainers.image.revision="07e5002c08bce137ab2a86a5a1fc8bb652729ad6" \
+      org.opencontainers.image.revision="b1203ac1bcc57df099d6e336255bf6a7b6e9bb83" \
       org.opencontainers.image.description="Unvalidated Ascend source-build candidate; not the historical LLMDeploy runtime"
 
 # Default to help, not model startup. The historical renderer/entrypoint retains
