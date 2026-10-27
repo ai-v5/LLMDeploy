@@ -1,10 +1,10 @@
 # GitHub Pages 与搜索发现
 
-网站地址：<https://ai-v5.github.io/LLMDeploy/>。Markdown 是唯一内容源，网站不另存一套部署说明。
+网站地址：<https://ai-v5.github.io/LLMDeploy/>。部署说明以 Markdown 为内容源；首页使用独立展示模板，只介绍项目和核心部署入口，不另存一套操作说明。
 
 ## 构建与发布
 
-`site/config.json` 明确列出页面，`scripts/build_site.py` 只读取该清单中的 README 和 `docs/` Markdown、固定 CSS，以及显式声明的 Google 验证文件。不复制整个仓库，不读取 `local/`、私有机器配置、原始日志或用户会话。站内文档链接转换为网站 URL，配方与源码链接指回 GitHub。
+`site/config.json` 明确列出页面。`scripts/build_site.py` 只读取该清单中的公开 Markdown、仅用于 `index.html` 的固定 `site/home.html` 模板、固定 CSS，以及显式声明的 Google 验证文件。首页沿用文档的浅色样式，只保留项目介绍和核心部署入口，不使用文档侧栏；部署文档保留原有阅读布局。不引入脚本或第三方资源，不复制整个仓库，不读取 `local/`、私有机器配置、原始日志或用户会话。站内文档链接转换为网站 URL，配方与源码链接指回 GitHub。
 
 本地预览采用独立环境，输出目录必须不存在：
 

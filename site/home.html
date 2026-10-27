@@ -1,0 +1,24 @@
+<header><div><a class="brand" href="home.html">LLMDeploy<small>ASCEND · DEPLOYMENT NOTES</small></a><div class="home-header-links"><a href="../docs/deployments/README.md">部署文档</a><a class="source" href="https://github.com/ai-v5/LLMDeploy">GitHub ↗</a></div></div></header>
+<main id="content" class="home-content">
+  <div class="eyebrow">A5 / ASCEND 950DT</div>
+  <h1>昇腾大模型部署实践</h1>
+  <p class="home-intro">按模型与推理框架选择部署方案，查看对应的配方、版本锁定和验证范围。</p>
+  <table class="framework-table" aria-label="模型与推理框架部署方案">
+    <colgroup><col class="model-col"><col class="deepinfer-col"><col class="vllm-col"></colgroup>
+    <thead><tr><th scope="col">模型</th><th scope="col">DeepInfer</th><th scope="col">vLLM Ascend</th></tr></thead>
+    <tbody><tr>
+      <th scope="row" class="model-cell">DeepSeek V4.1<br><span>Flash-1017</span></th>
+      <td>
+        <a class="scheme-link" href="../docs/deployments/a5/950dt/deepinfer-topologies.md">单机 8 卡 P/D 混部 <span aria-hidden="true">→</span></a>
+        <div class="related-links"><a href="../docs/deployments/a5/950dt/deepinfer.md">API 指南</a><span>·</span><a href="../docs/deployments/a5/950dt/deepinfer-pool.md">独立副本池</a></div>
+        <a class="scheme-link" href="../docs/deployments/a5/950dt/deepinfer-topologies.md#单机与-pd-的公开-api-入口">双机 8P＋8D 分离 <span aria-hidden="true">→</span></a>
+        <a class="scheme-link" href="../docs/deployments/a5/950dt/deepinfer-topologies.md#ep16需要怎样的启动器">双机 16 卡 EP16 混部 <span aria-hidden="true">→</span></a>
+      </td>
+      <td><a class="scheme-link" href="../docs/deployments/a5/950dt/vllm.md">单机 8 卡 <span aria-hidden="true">→</span></a><p class="cell-note">TP1 / DP8 / EP8</p></td>
+    </tr></tbody>
+  </table>
+  <p class="home-note">DeepInfer 双机方案已做有限原生推理验证，双机在线 API 尚未验收；P/D 分离使用文本 checkpoint 参考路径。</p>
+  <div class="home-bottom"><a class="home-button" href="../docs/deployments/README.md">查看部署文档 →</a><span>部署经验分享 · 新环境需重新验证</span></div>
+  <p class="home-scope">不构成兼容性、稳定性、性能或生产可用性保证。性能数据、凭据、机器身份和私有资料不公开。</p>
+</main>
+<footer class="home-footer"><span>LLMDeploy · 原创内容 <a href="../LICENSE">AGPL-3.0-only</a></span><a href="../THIRD_PARTY_NOTICES.md">第三方声明</a></footer>
