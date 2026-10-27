@@ -5,7 +5,7 @@
   "google_site_verification": "",
   "google_verification_files": ["googlef1de4c0e8dff2f1b.html"],
   "pages": [
-    {"source": "README.md", "output": "index.html", "title": "LLMDeploy · 昇腾大模型部署实践", "description": "A5 Ascend 950DT 单机八卡 vLLM Ascend、DeepInfer 部署配方、版本锁定和 API 服务指南。分享已使用经验，为 A2、A3 预留结构。"},
+    {"source": "README.md", "output": "index.html", "title": "LLMDeploy · 昇腾大模型部署实践", "description": "A5 Ascend 950DT 的 vLLM 单机八卡、DeepInfer 单机八卡、双机 P/D 分离与十六卡 EP16 混部部署。分别说明原生推理与 API 验证范围，不公开性能数据。"},
     {"source": "docs/deployments/README.md", "output": "deployments.html", "title": "部署方案与硬件目录", "description": "按 A5、A2、A3 代际及型号、推理引擎查找部署方案，区分已使用与待验证状态。"},
     {"source": "docs/deployments/a5/950dt/vllm.md", "output": "a5/950dt/vllm.html", "title": "A5 / 950DT / vLLM Ascend", "description": "Ascend 950DT 单机八卡 vLLM 固定配方、镜像构建与换机文档入口。"},
     {"source": "docs/deployments/a5/950dt/deepinfer.md", "output": "a5/950dt/deepinfer.html", "title": "A5 / 950DT / DeepInfer", "description": "DeepInfer Ascend 八卡历史部署 profile、源码与镜像身份、独立 API、合成预热及验收边界。"},

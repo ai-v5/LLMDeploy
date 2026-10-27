@@ -1,6 +1,6 @@
 # LLMDeploy
 
-分享已使用成功的大模型部署配方、版本锁定、构建方法与换机步骤。当前内容来自 **A5 / Ascend 950DT** 的 vLLM Ascend 单机 8 卡，以及 DeepInfer 单机、双机原生推理和 API 使用经验。
+分享大模型部署配方、版本锁定、构建方法与换机步骤。当前覆盖 **A5 / Ascend 950DT**：vLLM Ascend 单机 8 卡，以及 DeepInfer 的**单机 8 卡、双机 8P＋8D 分离、双机 16 卡 EP16 混部**。单机 API 与双机原生推理的验证范围分别说明。
 
 **[在线文档](https://ai-v5.github.io/LLMDeploy/)** · [部署目录](docs/deployments/README.md) · [网站发布与搜索发现](docs/pages.md)
 
@@ -13,7 +13,9 @@
 | 代际 / 型号 | 引擎 | 当前范围 | 入口 |
 | --- | --- | --- | --- |
 | A5 / 950DT | vLLM Ascend | 已使用的单机 8 卡配方，1M 总窗口 / 32K 输出 | [部署指南](docs/deployments/a5/950dt/vllm.md) |
-| A5 / 950DT | DeepInfer | 单机 8 卡 API 与副本池；另有单机、双机原生拓扑记录 | [API 指南](docs/deployments/a5/950dt/deepinfer.md) · [原生拓扑](docs/deployments/a5/950dt/deepinfer-topologies.md) |
+| A5 / 950DT | DeepInfer | **单机 8 卡 P/D 混部**，DP8 / EP8；原生推理记录、历史 API 与独立副本池 | [原生部署](docs/deployments/a5/950dt/deepinfer-topologies.md) · [API 指南](docs/deployments/a5/950dt/deepinfer.md) · [副本池](docs/deployments/a5/950dt/deepinfer-pool.md) |
+| A5 / 950DT | DeepInfer | **双机 8P＋8D 分离**，共 16 卡，P、D 各 EP8；有限原生推理，双机 API 待验收 | [P/D 分离部署](docs/deployments/a5/950dt/deepinfer-topologies.md#单机与-pd-的公开-api-入口) |
+| A5 / 950DT | DeepInfer | **双机 16 卡 EP16 混部**，一个 DP16 / EP16 引擎；有限原生推理，分布式 API 启动器待交付 | [EP16 混部部署](docs/deployments/a5/950dt/deepinfer-topologies.md#ep16需要怎样的启动器) |
 | A2 / 待确定型号 | 待验证 | 仅预留文档结构，尚无配方或支持结论 | [新增方案模板](docs/deployments/TEMPLATE.md) |
 | A3 / 待确定型号 | 待验证 | 仅预留文档结构，尚无配方或支持结论 | [新增方案模板](docs/deployments/TEMPLATE.md) |
 
