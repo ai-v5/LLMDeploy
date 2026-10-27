@@ -1,6 +1,6 @@
 # LLMDeploy
 
-分享已使用成功的大模型部署配方、版本锁定、构建方法与换机步骤。当前内容来自 **A5 / Ascend 950DT / 单机 8 卡** 的 vLLM Ascend 和 DeepInfer 使用经验。
+分享已使用成功的大模型部署配方、版本锁定、构建方法与换机步骤。当前内容来自 **A5 / Ascend 950DT** 的 vLLM Ascend 单机 8 卡，以及 DeepInfer 单机、双机原生推理和 API 使用经验。
 
 **[在线文档](https://ai-v5.github.io/LLMDeploy/)** · [部署目录](docs/deployments/README.md) · [网站发布与搜索发现](docs/pages.md)
 
@@ -13,11 +13,11 @@
 | 代际 / 型号 | 引擎 | 当前范围 | 入口 |
 | --- | --- | --- | --- |
 | A5 / 950DT | vLLM Ascend | 已使用的单机 8 卡配方，1M 总窗口 / 32K 输出 | [部署指南](docs/deployments/a5/950dt/vllm.md) |
-| A5 / 950DT | DeepInfer | 已使用的单机 8 卡 API profile；可组成多后端共享池 | [部署指南](docs/deployments/a5/950dt/deepinfer.md) |
+| A5 / 950DT | DeepInfer | 单机 8 卡 API 与副本池；另有单机、双机原生拓扑记录 | [API 指南](docs/deployments/a5/950dt/deepinfer.md) · [原生拓扑](docs/deployments/a5/950dt/deepinfer-topologies.md) |
 | A2 / 待确定型号 | 待验证 | 仅预留文档结构，尚无配方或支持结论 | [新增方案模板](docs/deployments/TEMPLATE.md) |
 | A3 / 待确定型号 | 待验证 | 仅预留文档结构，尚无配方或支持结论 | [新增方案模板](docs/deployments/TEMPLATE.md) |
 
-精确模型 revision、镜像及参数以各配方为准。1M 为输入与输出合计上限；足额 32K 输出时，输入最多 1,015,808 tokens。配置上限不等于该长度已经实测。实验中的双机 P/D 不属于上表已使用方案。
+精确模型 revision、镜像及参数以各配方为准。1M 为输入与输出合计上限；足额 32K 输出时，输入最多 1,015,808 tokens。配置上限不等于该长度已经实测。双机 P/D 与 EP16 有有限原生推理记录，仍属于实验路径，不代表分布式在线 API 已验收。
 
 ## 目录与导航
 

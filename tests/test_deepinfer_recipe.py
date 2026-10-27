@@ -59,6 +59,33 @@ class DeepInferRecipeTests(unittest.TestCase):
         self.assertFalse(candidate['historical_overlay_compatible'])
         self.assertNotIn(self.recipe['source']['native_sha256'], dockerfile)
 
+    def test_native_record_cannot_silently_replace_historical_runtime(self):
+        candidate = self.recipe['source_build_candidate']
+        record = load(RECIPE.parent / candidate['native_deployment_record'])
+        self.assertEqual(record['source']['public_commit'], candidate['commit'])
+        self.assertEqual(record['source']['tree'], candidate['tree'])
+        self.assertNotEqual(record['artifacts']['native_sha256'], self.recipe['source']['native_sha256'])
+        self.assertNotEqual(record['artifacts']['runtime_image_id'], self.recipe['image']['historical_runtime_id'])
+        manifest = load(RECIPE.parent / record['model']['manifest'])
+        self.assertEqual(record['model']['revision'], manifest['revision'])
+        self.assertFalse(record['acceptance_boundaries']['distributed_api_accepted'])
+        self.assertFalse(record['acceptance_boundaries']['public_source_dockerfile_built'])
+
+    def test_native_topologies_have_exactly_one_worker_per_allocated_card(self):
+        record = load(RECIPE.parent / 'native-topologies.json')
+        for profile in record['profiles']:
+            with self.subTest(profile=profile['id']):
+                workers = 0
+                for engine in profile['engines']:
+                    ranks = sum(engine['local_ranks_by_node'], [])
+                    self.assertEqual(sorted(ranks), list(range(engine['dp'])))
+                    self.assertEqual(engine['dp'], engine['ep'])
+                    self.assertTrue(all(len(node) == record['hardware']['cards_per_host']
+                                        for node in engine['local_ranks_by_node']))
+                    workers += len(ranks)
+                self.assertEqual(workers, profile['allocated_cards'])
+                self.assertEqual(workers, profile['hosts'] * record['hardware']['cards_per_host'])
+
     def test_shell_quote_and_no_render_execution(self):
         host = {**self.host, 'artifacts_dir': '/srv/cache $(false)'}
         args = command(host, self.recipe, '/srv/LLMDeploy', [])

@@ -17,7 +17,9 @@
           "engine": "deepinfer",
           "recipe": "recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
           "guide": "docs/deployments/a5/950dt/deepinfer.md",
-          "path_note": "Single-host serving profile; new renderer has local tests only."
+          "path_note": "Historical single-host API profile plus limited native single8, split8p8d and combined16 records; distributed API not accepted.",
+          "native_topologies": "recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/native-topologies.json",
+          "native_guide": "docs/deployments/a5/950dt/deepinfer-topologies.md"
         }
       ]
     },
