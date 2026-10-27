@@ -27,9 +27,29 @@ python3 scripts/verify_deepinfer_910b_w4a8_source.py --source "$DEEPINFER_SRC"
 
 当前 Python 运行时代码固定检查九个历史原生 indexer 工件的 SHA256。仓库不直接提供这些工件或六份完整 CCE 源码。四段算子主体位于 `recipes/a2/910b/deepinfer/w4a8-source/native-bodies/`；它们不包含 TBE 生成的元数据。另两份归约内核源码仍需单独解决来源和再分发问题。三个 C++ 桥接源码位于相邻的 `native-bridges/`。文件顶部的历史注释描述的是生成时的阶段，不能替代当前环境的准入记录。
 
-如果已经在对应 CANN 环境中生成或合法取得与 `native-body-inputs.json` 匹配的 TBE ARA 基准源码，可先在内存中校验四份完整 CCE 的身份，再写入一个不存在的新目录。`TBE_ARA_CCE` 和 `NATIVE_SOURCE` 由使用者自行指定；生成的元数据仅从本地基准读取，不包含在本仓库中：
+仓库提供 `scripts/generate_deepinfer_910b_tbe_ara.py` 供生成 TBE ARA 基准。它依赖已安装的 TBE 内部接口，检查四个模块的 SHA256，并验证生成的基准源码哈希；这些内部接口可能随 CANN 版本变化。已验证的单次生成使用 ARM64、Python 3.12.13 和 CANN 9.1.0 的固定环境，使用 CPU，不执行设备测试。其他环境须自行准备兼容依赖，哈希不匹配时停止；脚本不安装 SDK，也不提供生成物的再分发许可。
+
+在已配置好 CANN 环境的隔离容器内，将全新的空目录挂载为 `/workspace`，并将 `REPO` 设为只读挂载的仓库目录。以下命令会在这个工作目录生成中间文件和 `result.json`，不要用包含已有数据的目录：
 
 ```sh
+set -e
+mkdir /workspace/home /workspace/tmp
+cp --no-clobber -- "$REPO/scripts/generate_deepinfer_910b_tbe_ara.py" /workspace/compile.py
+cmp -s -- "$REPO/scripts/generate_deepinfer_910b_tbe_ara.py" /workspace/compile.py
+cd /workspace
+export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.1.0
+export ASCEND_OPP_PATH="$ASCEND_HOME_PATH/opp"
+export ASCEND_WORK_PATH=/workspace ASCEND_PROCESS_LOG_PATH=/workspace/log
+export PYTHONPATH="$ASCEND_HOME_PATH/python/site-packages:$ASCEND_OPP_PATH/built-in/op_impl/ai_core/tbe"
+export LD_LIBRARY_PATH="$ASCEND_HOME_PATH/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common"
+export PATH="$ASCEND_HOME_PATH/tools/ccec_compiler/bin:/usr/local/python3.12.13/bin:/usr/bin:/bin"
+HOME=/workspace/home TMPDIR=/workspace/tmp PYTHONDONTWRITEBYTECODE=1 python3 -B /workspace/compile.py
+```
+
+脚本成功后，基准路径为 `/workspace/kernel_meta/reduce_installed_ara_r532/reduce_installed_ara_r532_82100900.cce`。如果已经生成或合法取得与 `native-body-inputs.json` 匹配的 TBE ARA 基准源码，可先在内存中校验四份完整 CCE 的身份，再写入一个不存在的新目录。`TBE_ARA_CCE` 和 `NATIVE_SOURCE` 由使用者自行指定；生成的元数据仅从本地基准读取，不包含在本仓库中：
+
+```sh
+cd "$REPO"
 python3 scripts/assemble_deepinfer_910b_indexer_bodies.py --tbe-ara-cce "$TBE_ARA_CCE" --check-only
 python3 scripts/assemble_deepinfer_910b_indexer_bodies.py --tbe-ara-cce "$TBE_ARA_CCE" --output "$NATIVE_SOURCE"
 ```
