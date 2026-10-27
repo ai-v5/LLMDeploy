@@ -1,6 +1,6 @@
 # A5 / 950DT / DeepInfer
 
-本方案整理历史使用成功的**单机 8 卡原生 DeepInfer + recipe API**。多个这样的后端组成独立副本池，区别于实验中的双机 P/D。仅分享使用经验，不作兼容性、稳定性、性能或生产保证；敏感信息不提供，见[免责声明](../../../../README.md)。
+本方案整理历史使用成功的**单机 8 卡原生 DeepInfer + recipe API**。多个这样的后端组成独立副本池；新源码的单机、双机 P/D 和 EP16 原生路径另见[三拓扑指南](deepinfer-topologies.md)，不与历史 API profile 混用。仅分享使用经验，不作兼容性、稳定性、性能或生产保证；敏感信息不提供，见[免责声明](../../../../README.md)。
 
 ## 固定范围
 
@@ -52,7 +52,7 @@ docker image inspect --format '{{.Id}}' sha256:93b89c1ff22719cb91041f6a5b7d88323
 
 新的源码构建固定到 DeepInfer fork [PR #1](https://github.com/ai-v5/deepinfer_ascend/pull/1) 的合并提交 `b1203ac1bcc57df099d6e336255bf6a7b6e9bb83`，源码树为 `42a07a920e56cf35bb9704fa2818c8f57222f14b`。它包含 Ascend 兼容补丁、常驻 API、前缀缓存与预热、原生前缀 checkpoint、批量 worker 事件和默认关闭的 step 遥测。补丁及 vendor 的准确版本由该提交锁定，在 fork 的 `scripts/build_vendor.sh` 中应用，本仓不重复复制补丁。
 
-此提交已通过 CPU 协议与源码回归；**本次未构建其 native 库、未运行其 NPU 推理或性能验收**。原生调度和绑定发生变化，必须重建 native 与 Python 源码，不能将新文件覆盖到历史 native 镜像中，也不能沿用历史模型、完整上下文或性能结论。
+此提交已通过 CPU 协议与源码回归。后续在与它源码树相同的构建提交上重建了 native，并完成三种拓扑的有限原生 NPU 推理；准确工件身份和限制见[三拓扑指南](deepinfer-topologies.md)。这不表示下面的公开源码 Dockerfile 已构建验收，也不表示新 API、完整上下文或所有跨拓扑输出一致性已验收。原生调度和绑定发生变化，必须配套构建 native 与 Python 源码，不能将新文件覆盖到历史 native 镜像中。
 
 没有历史镜像时，可使用独立的[源码构建 Dockerfile](../../../../images/deepinfer/Dockerfile.source)。它获取 `source_build_candidate.commit`，从 Ascend 官方公开的 `ascendai/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12-devel` 基础镜像开始，编译 GCC 13.4.0、固定 commit 的 vendor 库及 DeepInfer，并分别安装 native/API 环境，不依赖本项目未公开的父镜像。基础镜像来源见 [Ascend 镜像说明](https://hub.docker.com/r/ascendai/cann)及[官方 Dockerfile](https://github.com/Ascend/cann-container-image/tree/main/cann/9.2.0-beta.2-950-ubuntu22.04-py3.12-devel)。
 
@@ -127,4 +127,4 @@ python3 scripts/smoke_deepinfer.py --base http://127.0.0.1:8900/v1
 
 ## 验证状态
 
-此 profile 有历史真实八卡模型/API 使用记录，但不代表今天所有副本健康，也不代表双机 P/D 或性能已验收。本次新渲染器、preflight、overlay 准备及导航只做本地验证，未重启、构建或启动真实服务；使用者仍需在独立空闲机器验收新的端到端启动流程。敏感配置、内部身份、原始日志及性能数据不提供。
+此 profile 有历史真实八卡模型/API 使用记录，但不代表今天所有副本健康。后续新源码的双机原生推理记录见[三拓扑指南](deepinfer-topologies.md)，不能据此宣称双机在线 API 已验收。本次新渲染器、preflight、overlay 准备及导航只做本地验证，未重启、构建或启动真实服务；使用者仍需在独立空闲机器验收新的端到端启动流程。敏感配置、内部身份、原始日志及性能数据不提供。

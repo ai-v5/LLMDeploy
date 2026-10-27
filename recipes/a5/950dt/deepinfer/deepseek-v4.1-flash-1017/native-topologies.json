@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "kind": "descriptive-native-deployment-record-not-renderer-input",
+  "source": {
+    "repository": "https://github.com/ai-v5/deepinfer_ascend",
+    "public_commit": "b1203ac1bcc57df099d6e336255bf6a7b6e9bb83",
+    "build_commit": "7429712e0bd31418bba121bc9b152058579e1894",
+    "tree": "42a07a920e56cf35bb9704fa2818c8f57222f14b",
+    "relationship": "Both commits have the same Git source tree; native was rebuilt from build_commit."
+  },
+  "artifacts": {
+    "runtime_image_id": "sha256:b65fbd0353e4036be0f24019623ade6dd8bb65108ed85c6290de1df9110deeb0",
+    "native_sha256": "5ade8bf73b6193107461493a336971c1399e1d4118aaf13cbbc5395d08d4f69c",
+    "native_is_readonly_external_runtime": true,
+    "registry_published": false,
+    "source_dockerfile_reproduction_validated": false,
+    "rebuild_requires_revalidation": true
+  },
+  "model": {
+    "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "manifest": "../../../../deepseek-v4.1-flash-1017/model-files.json",
+    "mount": "readonly",
+    "shared_weights_supported_in_observed_deployment": true
+  },
+  "hardware": {
+    "generation": "A5",
+    "model": "950DT",
+    "architecture": "linux/aarch64",
+    "cards_per_host": 8,
+    "multi_host_requirement": "Same physical 64-card pod, verified from physical topology rather than fabric ID alone.",
+    "driver_sha256": {
+      "version.info": "ef2b93952542a0649a13cd4e8d0408d9ee8986a9a4b2ae4d5deec873bd33cf1f",
+      "lib64/driver/libascend_hal.so": "4868b6c8bc0f60d2f9405f5870eb770f15a23a4676c9023dd6dacb54a45c8b55",
+      "lib64/driver/libdrvdsmi_host.so": "6b4cc040ae54d74945a8fa9bea4ac553317bca7de2b34e008badfaacf6d331cd"
+    }
+  },
+  "common_engine_config": {
+    "max_model_len": 1048576,
+    "max_output_tokens": 32768,
+    "max_num_batched_tokens": 2048,
+    "prefill_any_interval": 1,
+    "eplb_interval": 8192,
+    "eplb_after_prefill": false,
+    "dspark": false,
+    "cp": 1,
+    "kv_layout": "NORMAL"
+  },
+  "environment": {
+    "DEEPINFER_ACCELERATOR": "ascend",
+    "DEEPINFER_USE_NEXTN_DECODE": "5",
+    "DEEPINFER_CUDAGRAPH_BATCH_SIZE_INTERVAL": "6",
+    "DJ_JIT_CACHE_DIR": "/artifacts/compiled-cache",
+    "TILELANG_CACHE_DIR": "/artifacts/tilelang-cache",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1"
+  },
+  "profiles": [
+    {
+      "id": "single8-combined",
+      "hosts": 1,
+      "allocated_cards": 8,
+      "engines": [{"pd_role": "combined", "dp": 8, "ep": 8, "local_ranks_by_node": [[0, 1, 2, 3, 4, 5, 6, 7]]}],
+      "validation": "limited-native-inference-observed"
+    },
+    {
+      "id": "split8p8d",
+      "hosts": 2,
+      "allocated_cards": 16,
+      "engines": [
+        {"pd_role": "prefill", "dp": 8, "ep": 8, "local_ranks_by_node": [[0, 1, 2, 3, 4, 5, 6, 7]]},
+        {"pd_role": "decode", "dp": 8, "ep": 8, "local_ranks_by_node": [[0, 1, 2, 3, 4, 5, 6, 7]]}
+      ],
+      "transfer": "immutable-prefix-checkpoint-via-trusted-shared-directory-cpu-serialization",
+      "text_only": true,
+      "validation": "limited-native-inference-observed-api-path-not-accepted"
+    },
+    {
+      "id": "combined16-ep16",
+      "hosts": 2,
+      "allocated_cards": 16,
+      "engines": [{"pd_role": "combined", "dp": 16, "ep": 16, "local_ranks_by_node": [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15]]}],
+      "validation": "limited-native-inference-observed-no-distributed-api-launcher"
+    }
+  ],
+  "operator_selected_not_universal_defaults": ["max_num_seqs", "gpu_memory_utilization"],
+  "acceptance_boundaries": {
+    "full_context_executed": false,
+    "all_topologies_token_equivalent": false,
+    "distributed_api_accepted": false,
+    "public_source_dockerfile_built": false,
+    "production_pool_changed": false
+  },
+  "excluded": ["performance results", "capacity outcomes", "workload receipts", "machine identities", "credentials"]
+}

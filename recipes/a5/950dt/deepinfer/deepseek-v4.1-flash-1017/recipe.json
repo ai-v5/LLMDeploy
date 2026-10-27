@@ -45,10 +45,11 @@
     "historical_overlay_compatible": false,
     "validation": {
       "cpu_protocol_and_source_tests": "passed",
-      "native_build": "not_run_for_this_revision",
-      "npu_inference": "not_run_for_this_revision",
+      "native_build": "passed_on_tree_equivalent_build_commit_see_native_topologies",
+      "npu_inference": "limited_native_topologies_not_distributed_api_see_native_topologies",
       "performance": "not_claimed"
-    }
+    },
+    "native_deployment_record": "native-topologies.json"
   },
   "image": {
     "historical_runtime_id": "sha256:93b89c1ff22719cb91041f6a5b7d88323278e4e7a99812464a995094b70729ce",
