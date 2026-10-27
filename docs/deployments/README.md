@@ -5,7 +5,9 @@
 | 硬件 | 引擎 | 指南 |
 | --- | --- | --- |
 | A5 / 950DT | vLLM Ascend | [指南](a5/950dt/vllm.md)，权威配方保留原路径 |
-| A5 / 950DT | DeepInfer | [API 指南](a5/950dt/deepinfer.md)、[原生三拓扑](a5/950dt/deepinfer-topologies.md)、[共享池](a5/950dt/deepinfer-pool.md) |
+| A5 / 950DT | DeepInfer · 单机 8 卡 P/D 混部 | [原生部署](a5/950dt/deepinfer-topologies.md)、[历史 API](a5/950dt/deepinfer.md)、[共享副本池](a5/950dt/deepinfer-pool.md) |
+| A5 / 950DT | DeepInfer · 双机 8P＋8D 分离 | [P/D 分离部署](a5/950dt/deepinfer-topologies.md#单机与-pd-的公开-api-入口)；有限原生推理，双机 API 待验收 |
+| A5 / 950DT | DeepInfer · 双机 16 卡 EP16 混部 | [EP16 混部部署](a5/950dt/deepinfer-topologies.md#ep16需要怎样的启动器)；分布式在线 API 启动器待交付 |
 | A2 | 尚未验证 | 按 [模板](TEMPLATE.md) 新增实际型号，无占位启动命令 |
 | A3 | 尚未验证 | 按 [模板](TEMPLATE.md) 新增实际型号，无占位启动命令 |
 
