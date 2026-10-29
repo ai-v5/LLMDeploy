@@ -1,5 +1,6 @@
-"""Yield a failed DeepInfer container until an hour of mostly observed idleness."""
+"""Recover a pinned DeepInfer container after two hours of observed idleness."""
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -10,8 +11,9 @@ import time
 from .watchdog import load_config, npu_idle, write_state
 
 INTERVAL = 60
-WINDOW = 3600
+WINDOW = 7200
 MAX_FAILURE_RATIO = 0.10
+POLICY_VERSION = 2
 
 
 def sample_window(previous, now, observation):
@@ -36,7 +38,7 @@ def sample_window(previous, now, observation):
     ratio = failed / len(samples)
     ready = (since is not None and now - since >= WINDOW
              and observation == 'IDLE' and ratio <= MAX_FAILURE_RATIO
-             and len(samples) >= 60)
+             and len(samples) >= WINDOW // INTERVAL)
     return {'samples': samples, 'idle_since': since, 'failure_ratio': ratio}, ready
 
 
@@ -77,6 +79,49 @@ def npu_observation(config):
         return 'UNKNOWN'
 
 
+def prepare_previous(previous, config, boot_id, boot_epoch):
+    """Reset the window and allow a verified pre-boot exit to be reconsidered."""
+    valid = (isinstance(previous, dict) and previous.get('version') == 1
+             and previous.get('target_id') == config['container_id']
+             and isinstance(previous.get('boot_id'), str)
+             and previous.get('policy_version') in (None, POLICY_VERSION))
+    current = dict(previous) if valid else {}
+    new_boot = valid and current['boot_id'] != boot_id
+    legacy_boot_hold = (valid and not new_boot and current.get('policy_version') != POLICY_VERSION
+                        and current.get('state') == 'MANUAL_HOLD' and current.get('armed') is False)
+    # A host reboot starts a new recovery window; explicit stop actions after
+    # that boot still block it. Missing or corrupt state must not silently
+    # claim an existing stopped container.
+    if ((new_boot and isinstance(current.get('manual_hold'), bool))
+            or (legacy_boot_hold and current.get('manual_hold') is False)):
+        current.update(boot_recovery_pending=True, boot_recovery=False, boot_finished_at=None,
+                       boot_epoch=boot_epoch, event_cursor=boot_epoch, armed=False, manual_hold=False)
+        current.pop('last_check', None)
+    elif new_boot:
+        current.update(boot_recovery_pending=False, boot_recovery=False, boot_finished_at=None,
+                       event_cursor=boot_epoch, armed=False)
+        current.pop('last_check', None)
+    current.update(boot_id=boot_id, policy_version=POLICY_VERSION,
+                   samples=[], idle_since=None, failure_ratio=None)
+    return current
+
+
+def finished_before_boot(finished_at, boot_epoch):
+    if not isinstance(finished_at, str) or not isinstance(boot_epoch, (int, float)):
+        raise ValueError('UNKNOWN_BOOT_TIME')
+    ended = datetime.fromisoformat(finished_at.replace('Z', '+00:00'))
+    if ended.tzinfo is None or ended.year < 1970 or not math.isfinite(boot_epoch):
+        raise ValueError('UNKNOWN_FINISHED_TIME')
+    return ended.timestamp() < boot_epoch
+
+
+def linux_boot_epoch():
+    for line in Path('/proc/stat').read_text().splitlines():
+        if line.startswith('btime '):
+            return int(line.split()[1])
+    raise ValueError('UNKNOWN_BOOT_TIME')
+
+
 def step(config, previous, *, inspect=inspect_target, events=docker_events,
          sample=npu_observation, start=None, persist=None, clock=time.monotonic, wall=time.time):
     """Single synchronous sample; never stop or kill a container or workload."""
@@ -85,21 +130,42 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
     current.update(version=1, epoch=wall(), last_check=now, target_id=config.get('container_id'))
     try:
         state = inspect(config)
-        cursor = previous.get('event_cursor', current['epoch'] - 1)
-        changes = events(config, cursor - 1, current['epoch'])
+        pending_boot = previous.get('boot_recovery_pending') is True
+        cursor = previous.get('boot_epoch') if pending_boot else previous.get('event_cursor', current['epoch'] - 1)
+        if not isinstance(cursor, (int, float)) or not math.isfinite(cursor) or cursor > current['epoch']:
+            raise ValueError('UNKNOWN_EVENT_CURSOR')
+        changes = events(config, cursor if pending_boot else cursor - 1, current['epoch'])
         # If the control history has a gap, a stopped target needs human re-arming.
-        gap = bool(previous) and now - previous.get('last_check', now) > INTERVAL * 2
+        gap = not pending_boot and bool(previous) and now - previous.get('last_check', now) > INTERVAL * 2
         manual = previous.get('manual_hold', False) or any(e['action'] in ('kill', 'stop', 'destroy') for e in changes)
         if state['Running'] and state['StartedAt'] != previous.get('started'):
             manual = False
         current.update(event_cursor=current['epoch'], started=state['StartedAt'], manual_hold=manual)
         if state['Running'] or state.get('Paused') or state.get('Restarting'):
-            current.update(state='RUNNING', armed=not manual, samples=[], idle_since=None, failure_ratio=None)
+            current.update(state='RUNNING', armed=not manual, boot_recovery_pending=False,
+                           boot_recovery=False, boot_finished_at=None,
+                           samples=[], idle_since=None, failure_ratio=None)
             persist(current)
             return current
         if state['Status'] != 'exited':
             raise ValueError('UNEXPECTED_CONTAINER_STATE')
-        if manual or gap or not previous.get('armed') or state['ExitCode'] == 0:
+        armed = previous.get('armed') is True
+        boot_recovery = previous.get('boot_recovery') is True
+        if pending_boot:
+            eligible = (not manual and not any(e['action'] == 'start' for e in changes)
+                        and finished_before_boot(state['FinishedAt'], previous.get('boot_epoch')))
+            current['boot_recovery_pending'] = False
+            if not eligible:
+                current.update(state='MANUAL_HOLD', armed=False, boot_recovery=False,
+                               samples=[], idle_since=None, failure_ratio=None)
+                persist(current)
+                return current
+            armed, boot_recovery = True, True
+            current.update(armed=True, boot_recovery=True, boot_finished_at=state['FinishedAt'])
+        elif boot_recovery and state['FinishedAt'] != previous.get('boot_finished_at'):
+            manual = True
+            current['manual_hold'] = True
+        if manual or gap or not armed or (state['ExitCode'] == 0 and not boot_recovery):
             current.update(state='MANUAL_HOLD', armed=False, samples=[], idle_since=None, failure_ratio=None)
             persist(current)
             return current
@@ -128,7 +194,7 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
                         current.update(state='MANUAL_HOLD', armed=False, samples=[], idle_since=None, failure_ratio=None)
                         persist(current)
                         return current
-                    # Reset durably before requesting start; a failed start waits a new hour.
+                    # Reset durably before requesting start; failure waits a new window.
                     current.update(state='START_PENDING', samples=[], idle_since=None, failure_ratio=None)
                     persist(current)
                     try:
@@ -167,12 +233,9 @@ def main():
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         try:
             previous = json.loads(path.read_text()) if path.exists() else {}
-            if (previous.get('version') != 1 or previous.get('boot_id') != boot
-                    or previous.get('target_id') != config['container_id']):
-                previous = {}
         except (OSError, ValueError, AttributeError):
             previous = {}
-        previous.update(boot_id=boot, samples=[], idle_since=None, failure_ratio=None)
+        previous = prepare_previous(previous, config, boot, linux_boot_epoch())
         while True:
             began = time.monotonic()
             previous = step(config, previous, persist=lambda s: write_state(path, s),

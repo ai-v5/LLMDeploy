@@ -2,15 +2,17 @@
 
 ## DeepInfer 共享机器让机恢复
 
-`deploy_recovery.deepinfer` 用于 DeepInfer 三节点共享机器。目标容器使用 `restart=no`；宿主机的 `llmdeploy-deepinfer-recovery.service` 观察异常退出，只对固定 ID、镜像和配置的原容器执行 start，不停止或杀死其他任务。当前正在运行的模型无需重启即可切换此策略。
+`deploy_recovery.deepinfer` 用于 DeepInfer 三节点共享机器。目标容器使用 `restart=no`；宿主机的 `llmdeploy-deepinfer-recovery.service` 观察异常退出和宿主机重启后的退出状态，只对固定 ID、镜像和配置的原容器执行 start，不停止或杀死其他任务。当前正在运行的模型无需重启即可切换此策略。
 
 观察器使用 `Restart=always`、间隔 60 秒，使进程被 SIGTERM 等信号终止后仍能重新运行；systemd 将 SIGTERM 视为正常退出，`on-failure` 无法覆盖这一情况。主动执行 `systemctl stop` 仍会保持观察器停止，不会被该重启策略抵消。观察器重启不保留旧空闲窗口，也不会因此立即启动模型。
 
-异常退出后每 60 秒串行采集一次 `npu-smi info`，没有并发或补发重试。慢调用未完成时不启动下一轮；命令超时为 20 秒。完整的 8 卡状态为 `OK` 或 `Alarm`、利用率为零、逐卡无进程才记为 IDLE；`Alarm` 保留为设备告警，不单独阻塞恢复，也不代表推理已验收。明确占用记为 BUSY，重新开始空闲窗口。其他设备状态、采集失败、超时、缺卡或解析失败记为 UNKNOWN，不等同于占用，也不立即清空窗口。漏采的整分钟补记 UNKNOWN。空闲候选窗口至少持续 3600 秒，且最近一小时 UNKNOWN 比例不超过 10%、最后一次采集成功确认空闲，才允许恢复。有限频率采样仍可能错过一分钟内的短任务。
+异常退出后每 60 秒串行采集一次 `npu-smi info`，没有并发或补发重试。慢调用未完成时不启动下一轮；命令超时为 20 秒。完整的 8 卡状态为 `OK` 或 `Alarm`、利用率为零、逐卡无进程才记为 IDLE；`Alarm` 保留为设备告警，不单独阻塞恢复，也不代表推理已验收。明确占用记为 BUSY，重新开始空闲窗口。其他设备状态、采集失败、超时、缺卡或解析失败记为 UNKNOWN，不等同于占用，也不立即清空窗口。漏采的整分钟补记 UNKNOWN。空闲候选窗口至少持续 7200 秒，且最近两小时 UNKNOWN 比例不超过 10%、最后一次采集成功确认空闲，才允许恢复。有限频率采样仍可能错过一分钟内的短任务。
 
-启动前再次核对容器身份、Docker 控制事件和 8 卡空闲。采集全程单飞；先持久化清空窗口再启动，启动失败后重新等待一小时。容器运行时不采集 NPU 空闲；网关独立等待 8 个 worker 和预热完成后才恢复路由。
+启动前再次核对容器身份、Docker 控制事件和 8 卡空闲。采集全程单飞；先持久化清空窗口再启动，启动失败后重新等待两小时。容器运行时不采集 NPU 空闲；网关独立等待 8 个 worker 和预热完成后才恢复路由。
 
 Docker `stop`/`kill` 控制事件会保持 MANUAL_HOLD。对已经退出的容器再次执行 `docker stop` 可能没有事件，无法表达可观察的停止意图；人工接管时必须先 `systemctl stop llmdeploy-deepinfer-recovery.service`（长期停用再 disable），然后操作模型容器。守护进程重启会清空空闲窗口；同一宿主机启动周期内保留已观察到的停止意图。无法确认控制历史、身份漂移或观察中断超过两分钟时，已停止目标保持停止，等待人工确认并启动模型后重新布防。
+
+宿主机重启会开启新的恢复窗口，包括重启前已记录的停止意图；要求状态文件与固定目标匹配、目标在本次开机之前已经退出，且本次开机之后没有新的 start/stop/kill/destroy 事件。符合条件时重新采样两小时，不复用重启前的空闲窗口；本次开机后发生的人为停止仍保持 MANUAL_HOLD。升级旧版时，对当前启动周期内因重启失去布防的旧状态执行同样核对并从零开始采样；缺失或损坏的状态、身份漂移及无法确认的控制历史不自动认领容器。
 
 配置沿用下文的固定身份字段，但使用独立的 DeepInfer 路径：代码 `/opt/llmdeploy-deepinfer-recovery`、配置 `/etc/llmdeploy-deepinfer-recovery.json`、状态 `/var/lib/llmdeploy-deepinfer-recovery/state.json`。先核实 Python 路径并替换 service 中的解释器；安装 service 后执行 `systemctl daemon-reload` 和 `systemctl enable --now llmdeploy-deepinfer-recovery.service`。首次必须在已验收的运行容器上启用，不自动认领已有停止容器。旧 vLLM 恢复定时器保持关闭。
 
