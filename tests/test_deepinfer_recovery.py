@@ -1,10 +1,13 @@
 import copy
 import configparser
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
+from deploy_recovery import deepinfer as recovery
 from deploy_recovery.deepinfer import npu_observation, prepare_previous, sample_window, step
 from test_recovery import snapshot
 
@@ -33,20 +36,24 @@ class IdleWindowTests(unittest.TestCase):
             state, ready = sample_window(state, i * 60, 'IDLE')
             self.assertEqual(ready, i == 120, f'minute {i}')
 
-    def test_two_hours_required_and_failure_budget(self):
+    def test_unknown_observation_restarts_idle_window(self):
+        state, _ = self.collect(end=20)
+        state, ready = sample_window(state, 1260, 'UNKNOWN')
+        self.assertFalse(ready)
+        self.assertIsNone(state['idle_since'])
+        self.assertEqual(state['samples'], [])
+
+    def test_two_hours_required_without_unknown_samples(self):
         self.assertFalse(self.collect(end=119)[1])
         self.assertTrue(self.collect()[1])
-        tolerated, ready = self.collect(failures=range(10, 22))
-        self.assertTrue(ready)
-        self.assertAlmostEqual(tolerated['failure_ratio'], 12 / 121)
-        rejected, ready = self.collect(failures=range(10, 23))
+        rejected, ready = self.collect(failures=[10])
         self.assertFalse(ready)
-        self.assertGreater(rejected['failure_ratio'], 0.1)
+        self.assertEqual(rejected['idle_since'], 11 * 60)
 
-    def test_unknown_retains_window_busy_resets_it(self):
+    def test_unknown_and_busy_reset_window(self):
         state, _ = self.collect(end=20)
         unknown, ready = sample_window(state, 1260, 'UNKNOWN')
-        self.assertEqual(unknown['idle_since'], 0)
+        self.assertIsNone(unknown['idle_since'])
         self.assertFalse(ready)
         busy, ready = sample_window(state, 1260, 'BUSY')
         self.assertIsNone(busy['idle_since'])
@@ -56,13 +63,14 @@ class IdleWindowTests(unittest.TestCase):
     def test_last_sample_must_be_successful(self):
         self.assertFalse(self.collect(failures=[120])[1])
 
-    def test_missed_minutes_consume_budget(self):
+    def test_missed_minutes_restart_window(self):
         state = {'samples': [{'time': 0, 'value': 'IDLE'}], 'idle_since': 0}
         state, ready = sample_window(state, 7200, 'IDLE')
         self.assertFalse(ready)
-        self.assertEqual(sum(s['value'] == 'UNKNOWN' for s in state['samples']), 119)
+        self.assertEqual(state['samples'], [{'time': 7200, 'value': 'IDLE'}])
+        self.assertEqual(state['idle_since'], 7200)
 
-    def test_failure_ratio_uses_recent_window(self):
+    def test_fresh_two_hour_window_after_unknown(self):
         state, _ = self.collect(failures=range(10, 30))
         for i in range(121, 151):
             state, ready = sample_window(state, i * 60, 'IDLE')
@@ -83,7 +91,7 @@ class ControlTests(unittest.TestCase):
                     start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
                     clock=lambda: self.now, wall=lambda: 100000 + self.now)
 
-    def fail(self):
+    def stop_target(self):
         self.container.update(Running=False, Status='exited', ExitCode=137, FinishedAt='failure')
 
     def window(self, state):
@@ -94,7 +102,7 @@ class ControlTests(unittest.TestCase):
 
     def test_abnormal_death_waits_two_hours_and_persists_before_start(self):
         state = self.check({})
-        self.fail()
+        self.stop_target()
         for i in range(1, 121):
             self.now = i * 60
             state = self.check(state)
@@ -107,7 +115,7 @@ class ControlTests(unittest.TestCase):
 
     def test_alarm_idle_samples_allow_recovery_only_after_full_window(self):
         state = self.check({})
-        self.fail()
+        self.stop_target()
         def observe(_):
             return npu_observation({'npu_smi': '/usr/bin/npu-smi'})
         with patch('deploy_recovery.deepinfer.command', return_value=snapshot(alarm_card=5)):
@@ -136,23 +144,156 @@ class ControlTests(unittest.TestCase):
         for action in ['stop', 'kill', 'destroy']:
             with self.subTest(action=action):
                 self.setUp()
-                state = self.check({}); self.fail()
+                state = self.check({}); self.stop_target()
                 self.changes = [{'action': action}]
                 state = self.window(state)
                 self.assertEqual(state['state'], 'MANUAL_HOLD')
                 self.assertFalse(self.starts)
-        self.setUp(); self.fail()
+        self.setUp(); self.stop_target()
         self.assertEqual(self.window({})['state'], 'MANUAL_HOLD')
 
     def test_unknown_control_and_observer_gap_disarm(self):
-        state = self.check({}); self.fail()
+        state = self.check({}); self.stop_target()
         self.now = 180
         self.assertEqual(self.check(state)['state'], 'MANUAL_HOLD')
         def broken(_):
             raise ValueError('TARGET_CHANGED')
         state = self.check(state, inspect=broken)
         self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertTrue(state['armed'])
+        self.assertFalse(self.starts)
+
+    def test_verified_observer_gap_restarts_observation_without_disarming(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        self.now = 300
+        with patch('deploy_recovery.deepinfer.control_history_complete', create=True, return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 300)
+        self.assertFalse(self.starts)
+
+    def test_transient_control_error_retains_cursor_and_restarts_the_window(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        def unavailable(_):
+            raise RuntimeError('temporarily unavailable')
+        state = self.check(state, inspect=unavailable)
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['event_cursor'], 100000)
+        self.assertEqual(state['last_check'], 0)
+        self.now = 180
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 180)
+        self.assertFalse(self.starts)
+
+    def test_running_unrelated_container_blocks_an_idle_npu(self):
+        config = {'npu_smi': '/usr/bin/npu-smi', 'docker': '/usr/bin/docker',
+                  'container_id': 'a' * 64}
+        def command(args, *unused, **kwargs):
+            return snapshot() if args[0] == config['npu_smi'] else 'b' * 64 + '\n'
+        with patch('deploy_recovery.deepinfer.command', side_effect=command):
+            observe = getattr(recovery, 'machine_observation', npu_observation)
+            self.assertEqual(observe(config), 'BUSY')
+
+    def test_only_pinned_infrastructure_is_exempt(self):
+        config = {'npu_smi': '/usr/bin/npu-smi', 'docker': '/usr/bin/docker',
+                  'container_id': 'a' * 64,
+                  'non_workload_containers': [{'container_id': 'b' * 64, 'image_id': 'sha256:' + 'c' * 64}]}
+        def command(args, *unused, **kwargs):
+            if args[0] == config['npu_smi']:
+                return snapshot()
+            if args[1] == 'ps':
+                return 'b' * 64 + '\n'
+            return 'sha256:' + 'c' * 64
+        with patch('deploy_recovery.deepinfer.command', side_effect=command):
+            self.assertEqual(recovery.machine_observation(config), 'IDLE')
+            config['non_workload_containers'][0]['image_id'] = 'sha256:' + 'd' * 64
+            self.assertEqual(recovery.machine_observation(config), 'BUSY')
+        with patch('deploy_recovery.deepinfer.command', side_effect=[snapshot(), RuntimeError('docker unavailable')]):
+            self.assertEqual(recovery.machine_observation(config), 'UNKNOWN')
+
+    def test_infrastructure_config_rejects_unpinned_or_duplicate_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {'docker': str(root / 'docker'), 'npu_smi': str(root / 'npu-smi'),
+                      'state_file': str(root / 'state.json'), 'container_id': 'a' * 64,
+                      'container_name': 'model', 'image_id': 'sha256:' + 'b' * 64,
+                      'spec_sha256': 'c' * 64}
+            path = root / 'config.json'
+            infrastructure = {'container_id': 'd' * 64, 'image_id': 'sha256:' + 'e' * 64}
+            config['non_workload_containers'] = [infrastructure]
+            path.write_text(json.dumps(config), encoding='utf-8')
+            self.assertEqual(recovery.load_deepinfer_config(path)['non_workload_containers'], [infrastructure])
+            for invalid in ([{'container_id': 'd' * 64}], [infrastructure, infrastructure],
+                            [{'container_id': 'a' * 64, 'image_id': 'sha256:' + 'e' * 64}]):
+                with self.subTest(invalid=invalid):
+                    config['non_workload_containers'] = invalid
+                    path.write_text(json.dumps(config), encoding='utf-8')
+                    with self.assertRaises(ValueError):
+                        recovery.load_deepinfer_config(path)
+
+    def test_gap_history_requires_unchanged_daemon_and_complete_event_buffer(self):
+        config = {'docker': '/usr/bin/docker'}
+        previous = {'last_check': 100}
+        active = 'ActiveState=active\nExecMainStartTimestampMonotonic=20000000\n'
+        with patch('deploy_recovery.deepinfer.command', side_effect=[active, '1\n' * 255]):
+            self.assertTrue(recovery.control_history_complete(config, previous, 100000, 100300))
+        with patch('deploy_recovery.deepinfer.command', side_effect=[active, '1\n' * 256]):
+            self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
+        with patch('deploy_recovery.deepinfer.command', return_value=
+                   'ActiveState=active\nExecMainStartTimestampMonotonic=101000000\n'):
+            self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
+
+    def test_verified_gap_does_not_override_operator_stop(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 180
+        self.changes = [{'action': 'stop'}]
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
         self.assertFalse(state['armed'])
+        self.assertFalse(self.starts)
+
+    def test_operator_can_rearm_verified_stopped_target(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'boot', 'started': 'start',
+                    'event_cursor': 100000, 'manual_hold': False, 'armed': False,
+                    'state': 'MANUAL_HOLD', 'samples': [{'time': 1, 'value': 'IDLE'}]}
+        self.stop_target()
+        result = recovery.rearm_stopped({'container_id': 'fixed'}, previous, 'boot',
+                                        inspect=lambda _: copy.deepcopy(self.container), events=lambda *_: [],
+                                        clock=lambda: 300, wall=lambda: 100300)
+        self.assertTrue(result['armed'])
+        self.assertEqual(result['state'], 'REARMED')
+        self.assertEqual(result['samples'], [])
+        self.assertEqual(result['rearm_finished_at'], 'failure')
+        self.container['FinishedAt'] = 'changed-after-rearm'
+        self.now = 360
+        state = self.check(result)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertTrue(state['manual_hold'])
+        self.assertFalse(self.starts)
+        self.container['FinishedAt'] = 'failure'
+        for changed in ({**previous, 'manual_hold': True}, {**previous, 'target_id': 'other'},
+                        {**previous, 'boot_id': 'different'}):
+            with self.subTest(changed=changed):
+                with self.assertRaises(ValueError):
+                    recovery.rearm_stopped({'container_id': 'fixed'}, changed, 'boot',
+                                           inspect=lambda _: copy.deepcopy(self.container), events=lambda *_: [],
+                                           clock=lambda: 300, wall=lambda: 100300)
+        with self.assertRaises(ValueError):
+            recovery.rearm_stopped({'container_id': 'fixed'}, previous, 'boot',
+                                   inspect=lambda _: copy.deepcopy(self.container),
+                                   events=lambda *_: [{'action': 'stop'}],
+                                   clock=lambda: 300, wall=lambda: 100300)
 
     def test_running_target_never_samples_or_starts(self):
         def unexpected(_):
@@ -163,7 +304,7 @@ class ControlTests(unittest.TestCase):
 
     def test_final_probe_busy_unknown_and_manual_race_block_start(self):
         for last in ['BUSY', 'UNKNOWN']:
-            self.setUp(); state = self.check({}); self.fail()
+            self.setUp(); state = self.check({}); self.stop_target()
             for i in range(1, 121):
                 self.now = i * 60; state = self.check(state)
             self.now = 7260
@@ -171,9 +312,9 @@ class ControlTests(unittest.TestCase):
             out = self.check(state, observe=lambda c: next(values))
             self.assertFalse(self.starts)
             if last == 'UNKNOWN':
-                self.assertEqual(out['samples'][-1]['value'], 'UNKNOWN')
-                self.assertEqual(out['idle_since'], 60)
-        self.setUp(); state = self.check({}); self.fail()
+                self.assertEqual(out['samples'], [])
+                self.assertIsNone(out['idle_since'])
+        self.setUp(); state = self.check({}); self.stop_target()
         for i in range(1, 121):
             self.now = i * 60; state = self.check(state)
         self.now = 7260
@@ -182,7 +323,7 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(self.starts)
 
     def test_operator_action_during_slow_final_probe_is_preserved(self):
-        state = self.check({}); self.fail()
+        state = self.check({}); self.stop_target()
         for i in range(1, 121):
             self.now = i * 60; state = self.check(state)
         self.now = 7260

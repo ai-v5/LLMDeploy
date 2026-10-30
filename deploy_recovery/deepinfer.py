@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -12,34 +13,26 @@ from .watchdog import load_config, npu_idle, write_state
 
 INTERVAL = 60
 WINDOW = 7200
-MAX_FAILURE_RATIO = 0.10
 POLICY_VERSION = 2
 
 
 def sample_window(previous, now, observation):
-    """Unknown samples consume the failure budget; only busy resets idleness."""
-    if observation == 'BUSY':
+    """Require two hours of successfully observed idle samples."""
+    if observation != 'IDLE':
         return {'samples': [], 'idle_since': None, 'failure_ratio': None}, False
     samples = list(previous.get('samples', []))
     since = previous.get('idle_since')
     if samples:
         gap = now - samples[-1]['time']
-        if gap <= 0:
+        if gap <= 0 or gap >= INTERVAL * 2 or any(s['value'] != 'IDLE' for s in samples):
             samples, since = [], None
-        else:
-            # Missed whole sampling slots must not disappear from the denominator.
-            for i in range(1, max(1, math.floor(gap / INTERVAL))):
-                samples.append({'time': samples[-1]['time'] + INTERVAL, 'value': 'UNKNOWN'})
     samples.append({'time': now, 'value': observation})
     if since is None and observation == 'IDLE':
         since = now
     samples = [s for s in samples if s['time'] >= now - WINDOW]
-    failed = sum(s['value'] != 'IDLE' for s in samples)
-    ratio = failed / len(samples)
     ready = (since is not None and now - since >= WINDOW
-             and observation == 'IDLE' and ratio <= MAX_FAILURE_RATIO
              and len(samples) >= WINDOW // INTERVAL)
-    return {'samples': samples, 'idle_since': since, 'failure_ratio': ratio}, ready
+    return {'samples': samples, 'idle_since': since, 'failure_ratio': 0.0}, ready
 
 
 def command(args, timeout=20):
@@ -77,6 +70,93 @@ def npu_observation(config):
         return 'IDLE' if npu_idle(command([config['npu_smi'], 'info'])) else 'BUSY'
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return 'UNKNOWN'
+
+
+def load_deepinfer_config(path):
+    config = load_config(path, optional_fields=('non_workload_containers',))
+    exemptions = config.get('non_workload_containers', [])
+    if not isinstance(exemptions, list):
+        raise ValueError('INVALID_INFRASTRUCTURE')
+    seen = set()
+    for row in exemptions:
+        if (not isinstance(row, dict) or set(row) != {'container_id', 'image_id'}
+                or not isinstance(row['container_id'], str)
+                or not re.fullmatch('[0-9a-f]{64}', row['container_id'])
+                or not isinstance(row['image_id'], str)
+                or not re.fullmatch('sha256:[0-9a-f]{64}', row['image_id'])
+                or row['container_id'] == config['container_id'] or row['container_id'] in seen):
+            raise ValueError('INVALID_INFRASTRUCTURE')
+        seen.add(row['container_id'])
+    return config
+
+
+def machine_observation(config):
+    """Do not share a machine with another running workload container."""
+    observation = npu_observation(config)
+    if observation != 'IDLE':
+        return observation
+    try:
+        allowed = {row['container_id']: row['image_id'] for row in config.get('non_workload_containers', [])}
+        running = command([config['docker'], 'ps', '--no-trunc', '--format', '{{.ID}}']).splitlines()
+        for container_id in running:
+            if not re.fullmatch('[0-9a-f]{64}', container_id):
+                return 'UNKNOWN'
+            if container_id == config['container_id']:
+                continue
+            if container_id not in allowed:
+                return 'BUSY'
+            image = command([config['docker'], 'inspect', '--type', 'container', '--format',
+                             '{{.Image}}', container_id]).strip()
+            if image != allowed[container_id]:
+                return 'BUSY'
+        return 'IDLE'
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+        return 'UNKNOWN'
+
+
+def control_history_complete(config, previous, cursor, until):
+    """Accept an observer gap only when the Docker event history is bounded."""
+    try:
+        last_check = previous['last_check']
+        if not isinstance(last_check, (int, float)) or not math.isfinite(last_check):
+            return False
+        text = command(['systemctl', 'show', 'docker.service', '-p', 'ActiveState',
+                        '-p', 'ExecMainStartTimestampMonotonic'])
+        values = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+        started = int(values['ExecMainStartTimestampMonotonic']) / 1_000_000
+        if values['ActiveState'] != 'active' or started <= 0 or started > last_check:
+            return False
+        output = command([config['docker'], 'events', '--since', str(cursor - 1), '--until', str(until),
+                          '--format', '{{.TimeNano}}']).splitlines()
+        return len(output) < 256 and all(re.fullmatch(r'\d+', line) for line in output)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
+def rearm_stopped(config, previous, boot_id, *, inspect=inspect_target, events=docker_events,
+                  clock=time.monotonic, wall=time.time):
+    """Rearm one pinned stopped target after an explicit operator repair."""
+    if (not isinstance(previous, dict) or previous.get('version') != 1
+            or previous.get('target_id') != config['container_id']
+            or previous.get('boot_id') != boot_id or previous.get('manual_hold') is not False):
+        raise ValueError('REARM_REQUIRES_VERIFIED_STATE')
+    state = inspect(config)
+    if (state.get('Running') or state.get('Paused') or state.get('Restarting')
+            or state.get('Status') != 'exited' or state.get('StartedAt') != previous.get('started')):
+        raise ValueError('REARM_TARGET_CHANGED')
+    cursor = previous.get('event_cursor')
+    now = wall()
+    if not isinstance(cursor, (int, float)) or not math.isfinite(cursor) or cursor > now:
+        raise ValueError('REARM_UNKNOWN_CONTROL_HISTORY')
+    if any(e['action'] in ('start', 'stop', 'kill', 'destroy', 'restart')
+           for e in events(config, cursor - 1, now)):
+        raise ValueError('REARM_CONTROL_CHANGED')
+    current = dict(previous)
+    current.update(state='REARMED', armed=True, manual_hold=False, event_cursor=now,
+                   epoch=now, last_check=clock(), samples=[], idle_since=None, failure_ratio=None,
+                   boot_recovery_pending=False, boot_recovery=False, boot_finished_at=None,
+                   rearm_finished_at=state['FinishedAt'], policy_version=POLICY_VERSION)
+    return current
 
 
 def prepare_previous(previous, config, boot_id, boot_epoch):
@@ -123,7 +203,7 @@ def linux_boot_epoch():
 
 
 def step(config, previous, *, inspect=inspect_target, events=docker_events,
-         sample=npu_observation, start=None, persist=None, clock=time.monotonic, wall=time.time):
+         sample=machine_observation, start=None, persist=None, clock=time.monotonic, wall=time.time):
     """Single synchronous sample; never stop or kill a container or workload."""
     now = clock()
     current = dict(previous)
@@ -144,6 +224,7 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         if state['Running'] or state.get('Paused') or state.get('Restarting'):
             current.update(state='RUNNING', armed=not manual, boot_recovery_pending=False,
                            boot_recovery=False, boot_finished_at=None,
+                           rearm_finished_at=None,
                            samples=[], idle_since=None, failure_ratio=None)
             persist(current)
             return current
@@ -165,7 +246,15 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         elif boot_recovery and state['FinishedAt'] != previous.get('boot_finished_at'):
             manual = True
             current['manual_hold'] = True
-        if manual or gap or not armed or (state['ExitCode'] == 0 and not boot_recovery):
+        if previous.get('rearm_finished_at') is not None and state['FinishedAt'] != previous['rearm_finished_at']:
+            manual = True
+            current['manual_hold'] = True
+        if gap and armed and not manual and not any(e['action'] in ('start', 'restart') for e in changes):
+            if control_history_complete(config, previous, cursor, current['epoch']):
+                previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
+                gap = False
+        if (manual or gap or not armed
+                or (state['ExitCode'] == 0 and not boot_recovery and previous.get('rearm_finished_at') is None)):
             current.update(state='MANUAL_HOLD', armed=False, samples=[], idle_since=None, failure_ratio=None)
             persist(current)
             return current
@@ -205,14 +294,16 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
                 elif final_sample == 'BUSY':
                     current.update(state='BUSY', samples=[], idle_since=None, failure_ratio=None)
                 else:
-                    # One failed collection is one failed minute, including the final check.
-                    current['samples'][-1]['value'] = 'UNKNOWN'
-                    current['failure_ratio'] = sum(s['value'] != 'IDLE' for s in current['samples']) / len(current['samples'])
-                    current['observation'] = 'UNKNOWN'
+                    current.update(samples=[], idle_since=None, failure_ratio=None, observation='UNKNOWN')
         persist(current)
         return current
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
-        current.update(state='CONTROL_UNKNOWN', armed=False, samples=[], idle_since=None, failure_ratio=None)
+        current.update(state='CONTROL_UNKNOWN', armed=previous.get('armed') is True,
+                       samples=[], idle_since=None, failure_ratio=None)
+        if 'event_cursor' in previous:
+            current['event_cursor'] = previous['event_cursor']
+        if 'last_check' in previous:
+            current['last_check'] = previous['last_check']
         persist(current)
         return current
 
@@ -221,8 +312,9 @@ def main():
     import fcntl
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--rearm-stopped', action='store_true')
     args = parser.parse_args()
-    config = load_config(args.config)
+    config = load_deepinfer_config(args.config)
     path = Path(config['state_file'])
     with path.with_suffix('.lock').open('a') as lock:
         try:
@@ -235,6 +327,9 @@ def main():
             previous = json.loads(path.read_text()) if path.exists() else {}
         except (OSError, ValueError, AttributeError):
             previous = {}
+        if args.rearm_stopped:
+            write_state(path, rearm_stopped(config, previous, boot))
+            return
         previous = prepare_previous(previous, config, boot, linux_boot_epoch())
         while True:
             began = time.monotonic()

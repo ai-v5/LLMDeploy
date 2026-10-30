@@ -123,7 +123,7 @@ python3 scripts/smoke_deepinfer.py --base http://127.0.0.1:8900/v1
 
 外部访问必须走[共享服务池](deepinfer-pool.md)的认证网关，原生 loopback API 不独立校验 key。滚动变更先按[网关排空](../../../gateway.md)关闭新请求，确认在途、原生请求与连接均归零，保全旧实例后由操作者切换或回退。失败时只处理此次新实例，不自动恢复或抢占他人资源。
 
-验收后才按[DeepInfer 空闲恢复](../../../recovery.md#deepinfer-共享机器让机恢复)绑定精确容器/镜像/配置：每分钟串行采集、至少一小时空闲、失败占比不超过 10%，人工 stop/kill 保持停止。人工维护先停恢复观察器；新容器重新绑定。通知与去重见[通知文档](../../../notifications.md)。
+验收后才按[DeepInfer 空闲恢复](../../../recovery.md#deepinfer-共享机器让机恢复)绑定精确容器/镜像/配置：每分钟串行采集、连续确认空闲至少两小时，人工 stop/kill 保持停止。人工维护先停恢复观察器；新容器重新绑定。通知与去重见[通知文档](../../../notifications.md)。
 
 ## 验证状态
 
