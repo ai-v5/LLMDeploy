@@ -12,8 +12,20 @@ import time
 from .watchdog import load_config, npu_idle, write_state
 
 INTERVAL = 60
+IDLE_INTERVAL = 120
+BUSY_INTERVAL = 1200
 WINDOW = 7200
 POLICY_VERSION = 2
+
+
+def next_interval(state):
+    """Keep failure detection prompt; slow down only a stopped target's checks."""
+    name = state.get('state')
+    if name in ('BUSY', 'CONTROL_UNKNOWN'):
+        return BUSY_INTERVAL
+    if name in ('WAITING_IDLE', 'START_FAILED'):
+        return IDLE_INTERVAL if state.get('observation') == 'IDLE' else BUSY_INTERVAL
+    return INTERVAL
 
 
 def sample_window(previous, now, observation):
@@ -24,14 +36,14 @@ def sample_window(previous, now, observation):
     since = previous.get('idle_since')
     if samples:
         gap = now - samples[-1]['time']
-        if gap <= 0 or gap >= INTERVAL * 2 or any(s['value'] != 'IDLE' for s in samples):
+        if gap <= 0 or gap >= IDLE_INTERVAL * 2 or any(s['value'] != 'IDLE' for s in samples):
             samples, since = [], None
     samples.append({'time': now, 'value': observation})
     if since is None and observation == 'IDLE':
         since = now
     samples = [s for s in samples if s['time'] >= now - WINDOW]
     ready = (since is not None and now - since >= WINDOW
-             and len(samples) >= WINDOW // INTERVAL)
+             and len(samples) >= WINDOW // IDLE_INTERVAL)
     return {'samples': samples, 'idle_since': since, 'failure_ratio': 0.0}, ready
 
 
@@ -215,8 +227,10 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         if not isinstance(cursor, (int, float)) or not math.isfinite(cursor) or cursor > current['epoch']:
             raise ValueError('UNKNOWN_EVENT_CURSOR')
         changes = events(config, cursor if pending_boot else cursor - 1, current['epoch'])
-        # If the control history has a gap, a stopped target needs human re-arming.
-        gap = not pending_boot and bool(previous) and now - previous.get('last_check', now) > INTERVAL * 2
+        # Longer planned waits still need proof that Docker control history is intact.
+        elapsed = now - previous.get('last_check', now)
+        gap = not pending_boot and bool(previous) and elapsed > INTERVAL * 2
+        missed_check = elapsed > next_interval(previous) * 2
         manual = previous.get('manual_hold', False) or any(e['action'] in ('kill', 'stop', 'destroy') for e in changes)
         if state['Running'] and state['StartedAt'] != previous.get('started'):
             manual = False
@@ -251,7 +265,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
             current['manual_hold'] = True
         if gap and armed and not manual and not any(e['action'] in ('start', 'restart') for e in changes):
             if control_history_complete(config, previous, cursor, current['epoch']):
-                previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
+                if missed_check:
+                    previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
                 gap = False
         if (manual or gap or not armed
                 or (state['ExitCode'] == 0 and not boot_recovery and previous.get('rearm_finished_at') is None)):
@@ -337,7 +352,8 @@ def main():
                             start=lambda c: command([c['docker'], 'start', c['container_id']], timeout=45))
             elapsed = time.monotonic() - began
             # No overlapping requests, no catch-up burst after a slow cycle.
-            time.sleep(INTERVAL - elapsed if elapsed < INTERVAL else INTERVAL)
+            interval = next_interval(previous)
+            time.sleep(interval - elapsed if elapsed < interval else interval)
 
 
 if __name__ == '__main__':

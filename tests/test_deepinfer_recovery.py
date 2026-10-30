@@ -21,6 +21,35 @@ class ObserverServiceTests(unittest.TestCase):
         self.assertIn('-m deploy_recovery.deepinfer', unit['Service']['ExecStart'])
 
 
+class AdaptiveIntervalTests(unittest.TestCase):
+    def test_interval_follows_observation_and_keeps_running_checks(self):
+        cases = [
+            ({'state': 'RUNNING'}, 60),
+            ({'state': 'WAITING_IDLE', 'observation': 'IDLE'}, 120),
+            ({'state': 'BUSY', 'observation': 'BUSY'}, 1200),
+            ({'state': 'WAITING_IDLE', 'observation': 'UNKNOWN'}, 1200),
+            ({'state': 'CONTROL_UNKNOWN'}, 1200),
+            ({'state': 'MANUAL_HOLD'}, 60),
+        ]
+        for state, expected in cases:
+            with self.subTest(state=state):
+                self.assertEqual(recovery.next_interval(state), expected)
+
+    def test_two_minute_samples_need_two_full_hours(self):
+        state = {}
+        for i in range(61):
+            state, ready = sample_window(state, i * 120, 'IDLE')
+            self.assertEqual(ready, i == 60, f'sample {i}')
+
+    def test_missing_two_minute_observation_restarts_window(self):
+        state, _ = sample_window({}, 0, 'IDLE')
+        state, _ = sample_window(state, 120, 'IDLE')
+        state, ready = sample_window(state, 360, 'IDLE')
+        self.assertFalse(ready)
+        self.assertEqual(state['idle_since'], 360)
+        self.assertEqual(len(state['samples']), 1)
+
+
 class IdleWindowTests(unittest.TestCase):
     def collect(self, failures=(), busy=(), end=120):
         state = {}
@@ -93,6 +122,83 @@ class ControlTests(unittest.TestCase):
 
     def stop_target(self):
         self.container.update(Running=False, Status='exited', ExitCode=137, FinishedAt='failure')
+
+    def test_planned_busy_interval_rechecks_without_manual_hold(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda c: 'BUSY')
+        self.assertEqual(state['state'], 'BUSY')
+        self.now += 1200
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(len(state['samples']), 1)
+        self.assertFalse(self.starts)
+
+    def test_busy_then_two_hour_idle_window_before_start(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda c: 'BUSY')
+        self.now += 1200
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        for i in range(1, 61):
+            self.now = 1260 + i * 120
+            state = self.check(state)
+            self.assertEqual(len(self.starts), int(i == 60))
+        self.assertEqual(state['state'], 'START_REQUESTED')
+
+    def test_operator_stop_during_planned_busy_wait_is_respected(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda c: 'BUSY')
+        self.now += 1200
+        self.changes = [{'action': 'stop'}]
+        state = self.check(state)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_planned_busy_wait_requires_complete_control_history(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda c: 'BUSY')
+        self.now += 1200
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
+            state = self.check(state)
+        history.assert_called_once()
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_idle_wait_with_jitter_rejects_incomplete_history(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        self.now += 121
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
+            state = self.check(state)
+        history.assert_called_once()
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_idle_wait_with_jitter_preserves_window_when_history_is_complete(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        self.now += 121
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True) as history:
+            state = self.check(state)
+        history.assert_called_once()
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 60)
+        self.assertEqual(len(state['samples']), 2)
+        self.assertFalse(self.starts)
 
     def window(self, state):
         for i in range(1, 123):
