@@ -41,7 +41,10 @@ def sample_window(previous, now, observation):
     samples.append({'time': now, 'value': observation})
     if since is None and observation == 'IDLE':
         since = now
-    samples = [s for s in samples if s['time'] >= now - WINDOW]
+    # Keep a bounded count of successful samples even when a verified observer
+    # restart makes a few checks late. A busy, unknown, or too-large gap above
+    # still clears the entire window.
+    samples = samples[-(WINDOW // IDLE_INTERVAL + 1):]
     ready = (since is not None and now - since >= WINDOW
              and len(samples) >= WINDOW // IDLE_INTERVAL)
     return {'samples': samples, 'idle_since': since, 'failure_ratio': 0.0}, ready
@@ -171,8 +174,27 @@ def rearm_stopped(config, previous, boot_id, *, inspect=inspect_target, events=d
     return current
 
 
+def valid_idle_window(previous):
+    samples = previous.get('samples')
+    since, last = previous.get('idle_since'), previous.get('last_check')
+    if (not isinstance(samples, list) or not 0 < len(samples) <= WINDOW // IDLE_INTERVAL + 1
+            or type(since) not in (int, float) or not math.isfinite(since)
+            or type(last) not in (int, float) or not math.isfinite(last)):
+        return False
+    times = []
+    for sample in samples:
+        if (not isinstance(sample, dict) or sample.get('value') != 'IDLE'
+                or type(sample.get('time')) not in (int, float) or not math.isfinite(sample['time'])):
+            return False
+        times.append(sample['time'])
+    # last_check is captured before the potentially slow NPU/Docker probes;
+    # the successful sample timestamp can therefore be later than last_check.
+    return (0 <= since <= times[0] <= times[-1] and 0 <= last <= times[-1]
+            and all(0 < b - a < IDLE_INTERVAL * 2 for a, b in zip(times, times[1:])))
+
+
 def prepare_previous(previous, config, boot_id, boot_epoch):
-    """Reset the window and allow a verified pre-boot exit to be reconsidered."""
+    """Recover prior intent without trusting unverified control history."""
     valid = (isinstance(previous, dict) and previous.get('version') == 1
              and previous.get('target_id') == config['container_id']
              and isinstance(previous.get('boot_id'), str)
@@ -193,9 +215,35 @@ def prepare_previous(previous, config, boot_id, boot_epoch):
         current.update(boot_recovery_pending=False, boot_recovery=False, boot_finished_at=None,
                        event_cursor=boot_epoch, armed=False)
         current.pop('last_check', None)
-    current.update(boot_id=boot_id, policy_version=POLICY_VERSION,
-                   samples=[], idle_since=None, failure_ratio=None)
+    same_policy_boot = valid and not new_boot and current.get('policy_version') == POLICY_VERSION
+    preserve_idle = (same_policy_boot and current.get('state') == 'WAITING_IDLE'
+                     and current.get('observation') == 'IDLE' and current.get('armed') is True
+                     and current.get('manual_hold') is False and valid_idle_window(current))
+    if not preserve_idle:
+        current.update(samples=[], idle_since=None, failure_ratio=None)
+    if same_policy_boot and current.get('armed') is True and current.get('manual_hold') is False:
+        # A quick process restart can still hide a Docker daemon restart or a
+        # lost operator stop, even when the sampling gap is under two minutes.
+        current['restart_history_pending'] = True
+    else:
+        current.pop('restart_history_pending', None)
+    current.update(boot_id=boot_id, policy_version=POLICY_VERSION)
     return current
+
+
+def restart_delay(previous, config, boot_id, now):
+    """Keep the last stopped-target check's deadline after an observer restart."""
+    if (not isinstance(previous, dict) or previous.get('version') != 1
+            or previous.get('target_id') != config.get('container_id')
+            or previous.get('boot_id') != boot_id or previous.get('policy_version') != POLICY_VERSION
+            or previous.get('armed') is not True or previous.get('manual_hold') is not False
+            or previous.get('state') not in ('BUSY', 'WAITING_IDLE', 'START_FAILED', 'CONTROL_UNKNOWN')):
+        return 0
+    last = previous.get('last_attempt', previous.get('last_check'))
+    if (not isinstance(last, (int, float)) or not math.isfinite(last)
+            or not isinstance(now, (int, float)) or not math.isfinite(now) or now < last):
+        return 0
+    return max(0, next_interval(previous) - (now - last))
 
 
 def finished_before_boot(finished_at, boot_epoch):
@@ -219,7 +267,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
     """Single synchronous sample; never stop or kill a container or workload."""
     now = clock()
     current = dict(previous)
-    current.update(version=1, epoch=wall(), last_check=now, target_id=config.get('container_id'))
+    current.pop('restart_history_pending', None)
+    current.update(version=1, epoch=wall(), last_check=now, last_attempt=now, target_id=config.get('container_id'))
     try:
         state = inspect(config)
         pending_boot = previous.get('boot_recovery_pending') is True
@@ -229,7 +278,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         changes = events(config, cursor if pending_boot else cursor - 1, current['epoch'])
         # Longer planned waits still need proof that Docker control history is intact.
         elapsed = now - previous.get('last_check', now)
-        gap = not pending_boot and bool(previous) and elapsed > INTERVAL * 2
+        gap = (not pending_boot and bool(previous)
+               and (elapsed > INTERVAL * 2 or previous.get('restart_history_pending') is True))
         missed_check = elapsed > next_interval(previous) * 2
         manual = previous.get('manual_hold', False) or any(e['action'] in ('kill', 'stop', 'destroy') for e in changes)
         if state['Running'] and state['StartedAt'] != previous.get('started'):
@@ -315,6 +365,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         current.update(state='CONTROL_UNKNOWN', armed=previous.get('armed') is True,
                        samples=[], idle_since=None, failure_ratio=None)
+        if previous.get('restart_history_pending') is True:
+            current['restart_history_pending'] = True
         if 'event_cursor' in previous:
             current['event_cursor'] = previous['event_cursor']
         if 'last_check' in previous:
@@ -336,7 +388,8 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SystemExit('RECOVERY_ALREADY_RUNNING')
-        # A prompt observer restart can retain stop intent, never an idle window.
+        # Same-boot observer restarts retain only a validated candidate window;
+        # the next stopped-target check must verify control history first.
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         try:
             previous = json.loads(path.read_text()) if path.exists() else {}
@@ -345,7 +398,10 @@ def main():
         if args.rearm_stopped:
             write_state(path, rearm_stopped(config, previous, boot))
             return
+        delay = restart_delay(previous, config, boot, time.monotonic())
         previous = prepare_previous(previous, config, boot, linux_boot_epoch())
+        if delay:
+            time.sleep(delay)
         while True:
             began = time.monotonic()
             previous = step(config, previous, persist=lambda s: write_state(path, s),

@@ -123,6 +123,128 @@ class ControlTests(unittest.TestCase):
     def stop_target(self):
         self.container.update(Running=False, Status='exited', ExitCode=137, FinishedAt='failure')
 
+    def test_recent_idle_window_survives_restart_with_verified_history(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+                    'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
+                    'started': 'start', 'event_cursor': 100120, 'last_check': 120,
+                    'idle_since': 0, 'samples': [{'time': 0, 'value': 'IDLE'},
+                                                  {'time': 120, 'value': 'IDLE'}]}
+        resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
+        self.assertEqual(resumed['samples'], previous['samples'])
+        self.stop_target(); self.now = 180
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True) as history:
+            state = self.check(resumed)
+        history.assert_called_once()
+        self.assertEqual(state['idle_since'], 0)
+        self.assertEqual(len(state['samples']), 3)
+        self.assertFalse(self.starts)
+
+    def test_restart_requires_control_history_even_after_a_short_gap(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+                    'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
+                    'started': 'start', 'event_cursor': 100120, 'last_check': 120,
+                    'idle_since': 0, 'samples': [{'time': 0, 'value': 'IDLE'},
+                                                  {'time': 120, 'value': 'IDLE'}]}
+        resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
+        self.stop_target(); self.now = 180
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
+            state = self.check(resumed)
+        history.assert_called_once()
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_restart_after_missing_an_idle_check_resets_the_window(self):
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+                    'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
+                    'started':'start', 'event_cursor':100120, 'last_check':120, 'idle_since':0,
+                    'samples':[{'time':0,'value':'IDLE'},{'time':120,'value':'IDLE'}]}
+        resumed = prepare_previous(previous, {'container_id':'fixed'}, 'same', 99900)
+        self.stop_target(); self.now = 361
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(resumed)
+        self.assertEqual(state['idle_since'],361)
+        self.assertEqual(state['samples'],[{'time':361,'value':'IDLE'}])
+        self.assertFalse(self.starts)
+
+    def test_stopped_busy_observer_restart_keeps_the_next_check_deadline(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+                    'state': 'BUSY', 'observation': 'BUSY', 'armed': True, 'manual_hold': False,
+                    'last_check': 100}
+        for now, expected in [(400, 900), (700, 600), (1300, 0)]:
+            self.assertEqual(recovery.restart_delay(previous, {'container_id': 'fixed'}, 'same', now), expected)
+        self.assertEqual(recovery.restart_delay(previous, {'container_id': 'fixed'}, 'new-boot', 400), 0)
+
+    def test_sparse_but_valid_idle_samples_eventually_complete_the_window(self):
+        state = {}
+        for i in range(60):
+            state, ready = sample_window(state, i * 180, 'IDLE')
+            self.assertEqual(ready, i == 59)
+        self.assertGreaterEqual(59 * 180, recovery.WINDOW)
+
+    def test_repeated_verified_observer_restarts_eventually_allow_idle_recovery(self):
+        state = self.check({})
+        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        self.stop_target()
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            for i in range(60):
+                self.now = 60 + i * 180
+                if i:
+                    state = prepare_previous(state, {'container_id': 'fixed'}, 'same', 99900)
+                state = self.check(state)
+                self.assertEqual(len(self.starts), int(i == 59))
+        self.assertEqual(state['state'], 'START_REQUESTED')
+
+    def test_operator_stop_during_observer_restart_still_holds(self):
+        state = self.check({})
+        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        self.stop_target(); self.now = 60
+        state = self.check(state)
+        resumed = prepare_previous(state, {'container_id': 'fixed'}, 'same', 99900)
+        self.now = 120; self.changes = [{'action':'stop'}]
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(resumed)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
+
+    def test_restart_history_check_survives_transient_inspection_failure(self):
+        state = self.check({})
+        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        self.stop_target(); self.now = 60
+        state = self.check(state)
+        resumed = prepare_previous(state, {'container_id': 'fixed'}, 'same', 99900)
+        self.now = 120
+        state = self.check(resumed, inspect=lambda _: (_ for _ in ()).throw(RuntimeError('unavailable')))
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertTrue(state['restart_history_pending'])
+        self.assertEqual(state['last_check'], 60)
+        self.assertEqual(state['last_attempt'], 120)
+        self.assertEqual(recovery.restart_delay(state, {'container_id':'fixed'}, 'same', 140), 1180)
+        self.now = 180
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
+            state = self.check(state)
+        history.assert_called_once()
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+
+    def test_invalid_persisted_idle_samples_are_not_reused(self):
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+                    'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
+                    'last_check':120, 'idle_since':0}
+        for samples in ([], [{'time':120,'value':'IDLE'},{'time':120,'value':'IDLE'}],
+                        [{'time':120,'value':'BUSY'}], [{'time':float('nan'),'value':'IDLE'}]):
+            with self.subTest(samples=samples):
+                resumed = prepare_previous({**previous,'samples':samples}, {'container_id':'fixed'}, 'same', 99900)
+                self.assertEqual(resumed['samples'], [])
+                self.assertIsNone(resumed['idle_since'])
+
+    def test_restart_keeps_a_sample_taken_after_the_check_began(self):
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+                    'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
+                    'last_check':120, 'idle_since':2,
+                    'samples':[{'time':2,'value':'IDLE'},{'time':125,'value':'IDLE'}]}
+        resumed = prepare_previous(previous, {'container_id':'fixed'}, 'same', 99900)
+        self.assertEqual(resumed['samples'], previous['samples'])
+        self.assertEqual(resumed['idle_since'], 2)
+
     def test_planned_busy_interval_rechecks_without_manual_hold(self):
         state = self.check({})
         self.stop_target()
