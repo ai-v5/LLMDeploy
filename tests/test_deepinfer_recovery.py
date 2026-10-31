@@ -126,7 +126,7 @@ class ControlTests(unittest.TestCase):
     def test_recent_idle_window_survives_restart_with_verified_history(self):
         previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
                     'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
-                    'started': 'start', 'event_cursor': 100120, 'last_check': 120,
+                    'started': 'start', 'finished': 'failure', 'event_cursor': 100120, 'last_check': 120,
                     'idle_since': 0, 'samples': [{'time': 0, 'value': 'IDLE'},
                                                   {'time': 120, 'value': 'IDLE'}]}
         resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
@@ -194,7 +194,7 @@ class ControlTests(unittest.TestCase):
                 self.assertEqual(len(self.starts), int(i == 59))
         self.assertEqual(state['state'], 'START_REQUESTED')
 
-    def test_operator_stop_during_observer_restart_still_holds(self):
+    def test_operator_stop_during_observer_restart_restarts_idle_window(self):
         state = self.check({})
         state.update(boot_id='same', policy_version=2, manual_hold=False)
         self.stop_target(); self.now = 60
@@ -203,7 +203,9 @@ class ControlTests(unittest.TestCase):
         self.now = 120; self.changes = [{'action':'stop'}]
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
             state = self.check(resumed)
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 120)
         self.assertFalse(self.starts)
 
     def test_restart_history_check_survives_transient_inspection_failure(self):
@@ -273,14 +275,15 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(len(self.starts), int(i == 60))
         self.assertEqual(state['state'], 'START_REQUESTED')
 
-    def test_operator_stop_during_planned_busy_wait_is_respected(self):
+    def test_stop_during_busy_wait_requires_complete_history(self):
         state = self.check({})
         self.stop_target()
         self.now = 60
         state = self.check(state, observe=lambda c: 'BUSY')
         self.now += 1200
         self.changes = [{'action': 'stop'}]
-        state = self.check(state)
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
+            state = self.check(state)
         self.assertEqual(state['state'], 'MANUAL_HOLD')
         self.assertFalse(self.starts)
 
@@ -341,6 +344,113 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.saved[-2]['state'], 'START_PENDING')
         self.assertEqual(state['state'], 'START_REQUESTED')
 
+    def test_stop_and_kill_recover_after_a_fresh_two_hour_idle_window(self):
+        for action, exit_code in [('stop', 0), ('kill', 137)]:
+            with self.subTest(action=action):
+                self.setUp()
+                state = self.check({})
+                self.stop_target()
+                self.container['ExitCode'] = exit_code
+                self.changes = [{'action': action}]
+                self.now = 60
+                state = self.check(state)
+                self.assertEqual(state['state'], 'WAITING_IDLE')
+                self.assertTrue(state['armed'])
+                self.changes = []
+                for i in range(1, 60):
+                    self.now = 60 + i * 120
+                    with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+                        state = self.check(state)
+                self.assertFalse(self.starts)
+                self.now = 60 + 60 * 120
+                with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+                    state = self.check(state)
+                self.assertEqual(state['state'], 'START_REQUESTED')
+                self.assertEqual(len(self.starts), 1)
+
+    def test_manual_stop_busy_then_idle_starts_a_new_window(self):
+        state = self.check({})
+        self.stop_target()
+        self.container['ExitCode'] = 0
+        self.changes = [{'action': 'stop'}]
+        self.now = 60
+        state = self.check(state, observe=lambda _: 'BUSY')
+        self.assertEqual(state['state'], 'BUSY')
+        self.assertEqual(recovery.next_interval(state), 1200)
+        self.assertEqual(state['samples'], [])
+        self.changes = []
+        self.now = 1260
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['idle_since'], 1260)
+        self.assertEqual(recovery.next_interval(state), 120)
+        self.assertFalse(self.starts)
+
+    def test_old_manual_hold_is_rearmed_only_with_verified_history(self):
+        self.stop_target()
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+                    'state': 'MANUAL_HOLD', 'armed': False, 'manual_hold': True,
+                    'started': 'start', 'event_cursor': 100000, 'last_check': 0}
+        resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
+        self.assertTrue(resumed['legacy_hold_pending'])
+        self.now = 60
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
+            unknown = self.check(resumed)
+        self.assertEqual(unknown['state'], 'CONTROL_UNKNOWN')
+        self.assertFalse(unknown['armed'])
+        self.assertTrue(unknown['legacy_hold_pending'])
+        self.assertEqual(unknown['event_cursor'], 100000)
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(unknown)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertFalse(state['manual_hold'])
+        self.assertEqual(state['idle_since'], 60)
+        self.assertFalse(self.starts)
+
+    def test_old_hold_migration_rejects_destroy_and_missing_cursor(self):
+        self.stop_target()
+        prior = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+                 'state': 'MANUAL_HOLD', 'armed': False, 'manual_hold': True,
+                 'started': 'start', 'event_cursor': 100000, 'last_check': 0}
+        for change in ('destroy', 'missing_cursor'):
+            with self.subTest(change=change):
+                item = dict(prior)
+                self.changes = [{'action': 'destroy'}] if change == 'destroy' else []
+                if change == 'missing_cursor':
+                    del item['event_cursor']
+                state = prepare_previous(item, {'container_id': 'fixed'}, 'same', 99900)
+                with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+                    state = self.check(state)
+                self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+                self.assertFalse(state['armed'])
+                self.assertFalse(self.starts)
+
+    def test_old_idle_window_without_finish_time_is_not_reused(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        del state['finished']
+        self.now = 120
+        state = self.check(state)
+        self.assertEqual(state['idle_since'], 120)
+        self.assertEqual(len(state['samples']), 1)
+        self.assertFalse(self.starts)
+
+    def test_start_stop_between_checks_resets_the_idle_window(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        self.now = 120
+        self.container.update(StartedAt='second-start', FinishedAt='second-stop')
+        self.changes = [{'action': 'start', 'epoch': 100080}, {'action': 'stop', 'epoch': 100100}]
+        state = self.check(state)
+        self.assertEqual(state['idle_since'], 120)
+        self.assertTrue(state['armed'])
+        self.assertFalse(self.starts)
+
     def test_alarm_idle_samples_allow_recovery_only_after_full_window(self):
         state = self.check({})
         self.stop_target()
@@ -368,15 +478,12 @@ class ControlTests(unittest.TestCase):
                 with patch('deploy_recovery.deepinfer.command', return_value=payload):
                     self.assertEqual(npu_observation({'npu_smi': '/usr/bin/npu-smi'}), expected)
 
-    def test_manual_stop_kill_or_unarmed_stopped_container_never_starts(self):
-        for action in ['stop', 'kill', 'destroy']:
-            with self.subTest(action=action):
-                self.setUp()
-                state = self.check({}); self.stop_target()
-                self.changes = [{'action': action}]
-                state = self.window(state)
-                self.assertEqual(state['state'], 'MANUAL_HOLD')
-                self.assertFalse(self.starts)
+    def test_destroy_or_unarmed_stopped_container_never_starts(self):
+        state = self.check({}); self.stop_target()
+        self.changes = [{'action': 'destroy'}]
+        state = self.window(state)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(self.starts)
         self.setUp(); self.stop_target()
         self.assertEqual(self.window({})['state'], 'MANUAL_HOLD')
 
@@ -480,15 +587,16 @@ class ControlTests(unittest.TestCase):
                    'ActiveState=active\nExecMainStartTimestampMonotonic=101000000\n'):
             self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
 
-    def test_verified_gap_does_not_override_operator_stop(self):
+    def test_verified_gap_after_operator_stop_starts_fresh_idle_window(self):
         state = self.check({})
         self.stop_target()
         self.now = 180
         self.changes = [{'action': 'stop'}]
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
             state = self.check(state)
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
-        self.assertFalse(state['armed'])
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 180)
         self.assertFalse(self.starts)
 
     def test_operator_can_rearm_verified_stopped_target(self):
@@ -506,8 +614,9 @@ class ControlTests(unittest.TestCase):
         self.container['FinishedAt'] = 'changed-after-rearm'
         self.now = 360
         state = self.check(result)
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
-        self.assertTrue(state['manual_hold'])
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 360)
         self.assertFalse(self.starts)
         self.container['FinishedAt'] = 'failure'
         for changed in ({**previous, 'manual_hold': True}, {**previous, 'target_id': 'other'},
@@ -547,7 +656,10 @@ class ControlTests(unittest.TestCase):
             self.now = i * 60; state = self.check(state)
         self.now = 7260
         events = iter([[], [{'action': 'stop'}]])
-        self.assertEqual(self.check(state, events=lambda *args: next(events))['state'], 'MANUAL_HOLD')
+        out = self.check(state, events=lambda *args: next(events))
+        self.assertEqual(out['state'], 'WAITING_IDLE')
+        self.assertTrue(out['armed'])
+        self.assertEqual(out['samples'], [])
         self.assertFalse(self.starts)
 
     def test_operator_action_during_slow_final_probe_is_preserved(self):
@@ -563,7 +675,9 @@ class ControlTests(unittest.TestCase):
                 self.changes = [{'action': 'start'}, {'action': 'kill'}, {'action': 'stop'}]
             return 'IDLE'
         out = self.check(state, observe=probe)
-        self.assertEqual(out['state'], 'MANUAL_HOLD')
+        self.assertEqual(out['state'], 'WAITING_IDLE')
+        self.assertTrue(out['armed'])
+        self.assertEqual(out['samples'], [])
         self.assertFalse(self.starts)
 
 
@@ -630,6 +744,15 @@ class BootRecoveryTests(unittest.TestCase):
         self.assertTrue(state['boot_recovery'])
         self.assertFalse(self.starts)
 
+    def test_reboot_discards_unfinished_legacy_migration(self):
+        prior = {**self.prior, 'policy_version': 3, 'state': 'CONTROL_UNKNOWN',
+                 'manual_hold': True, 'armed': False, 'legacy_hold_pending': True}
+        state = self.check(self.prepare(prior))
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertFalse(state.get('legacy_hold_pending', False))
+        self.assertFalse(self.starts)
+
     def test_known_manual_hold_is_preserved_within_current_boot(self):
         prior = {**self.prior, 'boot_id': 'new', 'state': 'MANUAL_HOLD',
                  'armed': False, 'manual_hold': True}
@@ -638,25 +761,37 @@ class BootRecoveryTests(unittest.TestCase):
         self.assertTrue(state['manual_hold'])
         self.assertFalse(self.starts)
 
-    def test_postboot_operator_action_or_newer_exit_prevents_claim(self):
-        for action in ('stop', 'kill', 'destroy', 'start'):
+    def test_postboot_stop_or_kill_starts_a_fresh_window(self):
+        for action in ('stop', 'kill'):
             with self.subTest(action=action):
-                self.changes = [{'action': action}]
+                self.setUp()
+                self.container['FinishedAt'] = self.finished(1)
+                self.changes = [{'action': 'start'}, {'action': action}]
                 state = self.check(self.prepare())
-                self.assertEqual(state['state'], 'MANUAL_HOLD')
+                self.assertEqual(state['state'], 'WAITING_IDLE')
+                self.assertEqual(state['idle_since'], 0)
+                self.assertTrue(state['armed'])
                 self.assertFalse(self.starts)
-        self.changes = []
-        self.container['FinishedAt'] = self.finished(1)
+                self.changes = []
+                for i in range(1, 121):
+                    self.now = i * 60
+                    state = self.check(state)
+                self.assertEqual(state['state'], 'START_REQUESTED')
+                self.assertEqual(len(self.starts), 1)
+
+    def test_postboot_destroy_does_not_claim_the_target(self):
+        self.changes = [{'action': 'destroy'}]
         self.assertEqual(self.check(self.prepare())['state'], 'MANUAL_HOLD')
         self.assertFalse(self.starts)
 
-    def test_changed_finish_time_during_window_blocks_recovery(self):
+    def test_changed_finish_time_during_window_restarts_observation(self):
         state = self.check(self.prepare())
         self.now = 60
         self.container['FinishedAt'] = self.finished(1)
         state = self.check(state)
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
-        self.assertTrue(state['manual_hold'])
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 60)
         self.assertFalse(self.starts)
 
     def test_missing_mismatched_or_unknown_prior_intent_is_not_claimed(self):
