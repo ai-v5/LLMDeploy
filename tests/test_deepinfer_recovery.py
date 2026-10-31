@@ -153,6 +153,33 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(state['state'], 'MANUAL_HOLD')
         self.assertFalse(self.starts)
 
+    def test_missing_event_cursor_cannot_reuse_an_idle_window_after_restart(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 3,
+                    'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
+                    'started': 'start', 'finished': 'failure', 'last_check': 7200, 'idle_since': 0,
+                    'samples': [{'time': i * 120, 'value': 'IDLE'} for i in range(61)]}
+        resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
+        self.stop_target()
+        self.now = 7320
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(resumed)
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertEqual(state['samples'], [])
+        self.assertFalse(self.starts)
+        self.now += 1200
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertFalse(self.starts)
+
+    def test_running_pinned_target_can_observe_from_a_new_cursor(self):
+        previous = {'armed': True, 'manual_hold': False, 'started': 'start'}
+        state = self.check(previous)
+        self.assertEqual(state['state'], 'RUNNING')
+        self.assertEqual(state['event_cursor'], 100000)
+        self.assertTrue(state['armed'])
+        self.assertFalse(self.starts)
+
     def test_restart_after_missing_an_idle_check_resets_the_window(self):
         previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
                     'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,

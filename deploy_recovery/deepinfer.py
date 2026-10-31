@@ -268,6 +268,11 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
     try:
         state = inspect(config)
         pending_boot = previous.get('boot_recovery_pending') is True
+        if (not pending_boot and previous.get('armed') is True and not state['Running']
+                and 'event_cursor' not in previous):
+            # A stopped target cannot inherit a window when its control
+            # history's starting point is missing from the saved state.
+            raise ValueError('MISSING_EVENT_CURSOR')
         cursor = previous.get('boot_epoch') if pending_boot else previous.get('event_cursor', current['epoch'] - 1)
         if not isinstance(cursor, (int, float)) or not math.isfinite(cursor) or cursor > current['epoch']:
             raise ValueError('UNKNOWN_EVENT_CURSOR')
