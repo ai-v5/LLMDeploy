@@ -18,6 +18,12 @@ Docker `stop`/`kill` 停止目标后同样进入空闲恢复，包括退出码�
 
 可选 `non_workload_containers` 仅用于经过操作者确认的系统基础容器；每项必须同时固定 `container_id` 和 `image_id`。其他运行容器、替换后的基础容器或身份无法核实均阻止启动。对已授权的旧版停止目标或需要修复的未布防状态，先停观察器并保存原状态；核实该机器与固定容器确实属于恢复池后，执行 `python3 -B -m deploy_recovery.deepinfer --config <配置路径> --rearm-stopped`，再启动观察器。该动作核对固定身份、启动周期、上次运行时间及后续 Docker 控制事件，记录可信身份并从零计时，不启动模型；身份不匹配或控制事件变化时拒绝布防。
 
+## DeepInfer 的 SSH 登录提示
+
+对使用 cgroupfs v1 的共享机器，可根据恢复配置中固定的 DeepInfer 容器身份安装登录提示。安装前核实配置指向目标实例，然后在宿主机以 root 执行 `python3 -m deploy_recovery.ssh_notice --config <恢复配置路径> --install`。每次查询 Docker 前会检查 Docker 服务处于 active 且 `docker.socket` 未运行，状态不满足时拒绝连接；检查与连接之间仍可能发生状态变化。安装器读取容器身份和进程状态，在 `/etc/profile.d/llmdeploy-deepinfer-notice.sh` 原子创建提示；已有同名文件时拒绝覆盖。无需修改 SSH 配置、授予 Docker 权限或重启服务。
+
+提示仅对读取 `/etc/profile` 的交互式 SSH 登录生效；远程命令、文件传输和非 SSH 会话不输出提示。普通用户通过容器 cgroup 和进程命名空间只读检查该固定容器的存活状态，容器停止后不显示；这不等同于 HTTP 健康检查。重建容器会改变其固定身份，须重新核对并更新恢复配置和登录提示。
+
 ## 旧 vLLM 配方
 
 可选本机 systemd timer 每 10 分钟运行 `python3 -B -m deploy_recovery --config /etc/llmdeploy-vllm-recovery.json`。目标容器已停止时，连续至少 7 次检查、跨度至少 1 小时，8 张 950DT 卡状态均为 `OK` 或 `Alarm`、利用率为 0 且逐卡确认无 NPU 进程，才启动原容器。`Alarm` 本身不阻塞恢复；其他设备状态仍按未知处理。运行、暂停或初始化中的容器不重启；本模块没有 stop/kill 操作。
