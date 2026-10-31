@@ -8,8 +8,9 @@ import re
 import shlex
 import shutil
 import stat
-import subprocess
 import tempfile
+
+from .deepinfer import docker_command
 
 
 NOTICE = '当前deepinfer服务为卡空闲时使用，如果你需要使用NPU可直接杀死。'
@@ -60,9 +61,7 @@ def verify_target(config):
     container_id = config['container_id']
     container_name = config['container_name']
     render_notice(container_id, container_name)  # Validate before passing arguments to Docker.
-    result = subprocess.run([config['docker'], 'inspect', '--type', 'container', container_id],
-                            capture_output=True, text=True, timeout=15, check=True)
-    rows = json.loads(result.stdout)
+    rows = json.loads(docker_command(config, ['inspect', '--type', 'container', container_id], timeout=15))
     if len(rows) != 1:
         raise ValueError('TARGET_CHANGED')
     row = rows[0]
@@ -71,8 +70,7 @@ def verify_target(config):
     if (row['Id'] != container_id or row['Name'] != '/' + container_name
             or row['Image'] != config['image_id'] or digest != config['spec_sha256']):
         raise ValueError('TARGET_CHANGED')
-    driver = subprocess.run([config['docker'], 'info', '--format', '{{.CgroupDriver}}'],
-                            capture_output=True, text=True, timeout=15, check=True).stdout.strip()
+    driver = docker_command(config, ['info', '--format', '{{.CgroupDriver}}'], timeout=15).strip()
     if driver != 'cgroupfs' or not Path(CGROUP_ROOT).is_dir():
         raise ValueError('UNSUPPORTED_CGROUP_LAYOUT')
     for directory in (Path(CGROUP_ROOT), *Path(CGROUP_ROOT).parents, Path('/proc')):

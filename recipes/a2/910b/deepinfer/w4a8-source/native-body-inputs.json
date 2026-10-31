@@ -1,0 +1,23 @@
+{
+  "scope": "FOUR_BODY_IDENTITIES_ONLY_NOT_A_DEPLOYMENT_RECIPE",
+  "ara_base_sha256": "888c2eb97f8017e386ffc4a1352f2b451c8c464cff5a2b7bc48716bee6f09eec",
+  "ara_base_symbol": "reduce_installed_ara_r532_82100900",
+  "bodies": {
+    "indexer_schedule_rows_r1264.cce": {
+      "file": "indexer_schedule_rows_r1264.cce.part",
+      "sha256": "cec01e886371742e4b469f5953ed331456a8439bbe2a9991db89f6a28456c3f2"
+    },
+    "indexer_gather_r722.cce": {
+      "file": "indexer_gather_r722.cce.part",
+      "sha256": "2e5429b9fd6c9b2db1822f357a6d818704a3d52a594477f70c3d0705fcd82977"
+    },
+    "indexer_select_r760.cce": {
+      "file": "indexer_select_r760.cce.part",
+      "sha256": "d393a6a90dce1a143bb0e28c55f5f7dca0e581fc3d406f98d1d0dc4f80c5a270"
+    },
+    "indexer_prefill_gather_r798.cce": {
+      "file": "indexer_prefill_gather_r798.cce.part",
+      "sha256": "ff8e8fa143b9e4568af315802c35a28550da2a202ed7970b7ea6fe8db9184e6d"
+    }
+  }
+}

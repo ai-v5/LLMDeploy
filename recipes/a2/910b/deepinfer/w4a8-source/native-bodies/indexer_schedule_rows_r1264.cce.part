@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Task-local fixed-capacity metadata preparation, no score arithmetic.
+#ifdef __CCE_KT_TEST__
+#define __aicore__
+#else
+#define __aicore__ [aicore]
+#endif
+
+static __aicore__ inline void load_i32(__ubuf__ int32_t* dst, __gm__ int32_t* src, int64_t bytes) {
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  copy_gm_to_ubuf_align_b32(dst, src, 0, 1, bytes, 0, 0, 0, 0);
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+}
+
+static __aicore__ inline void store_i64(__gm__ int64_t* dst, __ubuf__ int64_t* src, int64_t bytes) {
+  set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b32(dst, src, 0, 1, bytes, 0, 0, 0, 0);
+  // A single metadata block reuses its small staging buffers only after DMA.
+  set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+}
+
+// A row can start inside an existing32-byte compact-output block. B8
+// copies preserve its exact byte ownership; no rounded or overlapping writes.
+static __aicore__ inline void store_compact_i64(__gm__ int64_t* dst, __ubuf__ int64_t* src, int64_t bytes) {
+  set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b8((__gm__ uint8_t*)dst, (__ubuf__ uint8_t*)src, 0, 1, bytes, 0, 0, 0, 0);
+  set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+}
+
+extern "C" __global__ __aicore__ void indexer_schedule_rows_r1264__kernel0(
+    __gm__ int32_t* blocks, __gm__ int32_t* lengths, __gm__ int32_t* tables,
+    __gm__ uint8_t* active, __gm__ int64_t* counts, __gm__ int64_t* columns,
+    __gm__ int64_t* offsets, __gm__ int64_t* lookup, __gm__ uint8_t* errors,
+    __gm__ int64_t* meta, __gm__ int64_t* restore, int64_t Q, int64_t C, int64_t T, int64_t R,
+    int64_t P, int64_t page_size, int64_t block_size, int64_t page_stride,
+    int64_t storage_offset, int64_t storage_elements, int64_t cache_pages) {
+  set_vector_mask((uint64_t)-1, (uint64_t)-1);
+  set_mask_norm();
+  set_atomic_none();
+  __ubuf__ int32_t* bu = (__ubuf__ int32_t*)get_imm(0);       // 4096 entries
+  __ubuf__ int32_t* tu = (__ubuf__ int32_t*)get_imm(16384);   // 4096 entries
+  __ubuf__ int32_t* lu = (__ubuf__ int32_t*)get_imm(32768);   // 8 entries
+  __ubuf__ uint8_t* au = (__ubuf__ uint8_t*)get_imm(32800);   // 32 bytes
+  __ubuf__ int64_t* cu = (__ubuf__ int64_t*)get_imm(32832);   // 1024 entries
+  __ubuf__ uint8_t* eu = (__ubuf__ uint8_t*)get_imm(41024);   // 32 bytes
+  __ubuf__ int64_t* mu = (__ubuf__ int64_t*)get_imm(41056);   // 8 entries
+  __ubuf__ int64_t* map = (__ubuf__ int64_t*)get_imm(41120);  // 128 entries
+  __ubuf__ int64_t* cb = (__ubuf__ int64_t*)get_imm(42144);   // 128 entries
+  __ubuf__ int64_t* ob = (__ubuf__ int64_t*)get_imm(43168);   // 128 entries
+  __ubuf__ int64_t* restored = (__ubuf__ int64_t*)get_imm(44192); // 256 entries
+  const int64_t owning_row = (int64_t)block_idx;
+  if (owning_row >= Q) return;
+  // Every block independently validates all rows. No block consumes another
+  // block's workspace or flags; later stream kernels wait for the whole launch.
+  const int64_t G = Q * R;
+  const int64_t width = C * block_size;
+  for (int64_t g = 0; g <= G; ++g) cu[g] = 0;
+  for (int32_t i = 0; i < 32; ++i) eu[i] = 0;
+  load_i32(lu, lengths, Q * 4);
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  copy_gm_to_ubuf_align_b8(au, active, 0, 1, Q, 0, 0, 0, 0);
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  int64_t total = 0, capacity_total = 0;
+  // First pass validates complete rows before any key address is consumed.
+  for (int64_t q = 0; q < Q; ++q) {
+    const bool enabled = au[q] != 0;
+    int32_t bad = (enabled && lu[q] < 0) ? 1 : 0;
+    bool oversized = false;
+    int64_t run = -1, prev = -1, row_total = 0;
+    load_i32(bu, blocks + q * C, C * 4);
+    if (T != 0) load_i32(tu, tables + q * T, T * 4);
+    if (enabled && lu[q] > 0) {
+      for (int64_t b = 0; b < C; ++b) {
+        const int64_t id = bu[b];
+        const int64_t first = id * block_size; // int32 IDs widened before multiply
+        int64_t n = (id >= 0 && first < lu[q]) ? (lu[q] - first) : 0;
+        if (n > block_size) n = block_size;
+        if (n == 0) continue;
+        const int64_t logical = first / page_size;
+        if (run < 0 || logical != prev) { ++run; prev = logical; }
+        if (run >= R) bad = 1;
+        else {
+          cu[q * R + run] += n;
+          // The real decode consumer rejects runs above128 before selection.
+          if (cu[q * R + run] > 128) oversized = true;
+        }
+        row_total += n;
+        if (logical < 0 || logical >= T) { bad = 1; continue; }
+        const int64_t physical = tu[logical];
+        if (physical < 0 || physical >= cache_pages) { bad = 1; continue; }
+        const int64_t address = physical * page_stride + (first % page_size) * 128 + storage_offset;
+        if (address < 0 || address + (n - 1) * 128 + 128 > storage_elements) bad = 1;
+      }
+    }
+    // Original prepare counts otherwise-valid oversized runs for capacity
+    // before the reducer rejects them. Preserve that overflow precedence.
+    if (!bad) capacity_total += row_total;
+    bad = bad || oversized;
+    eu[q] = bad != 0;
+    if (bad) {
+      for (int64_t r = 0; r < R; ++r) cu[q * R + r] = 0;
+    } else total += row_total;
+  }
+  const bool overflow = capacity_total > P;
+  if (overflow) {
+    total = 0;
+    for (int64_t q = 0; q < Q; ++q) eu[q] = 1;
+    for (int64_t g = 0; g < G; ++g) cu[g] = 0;
+  }
+  cu[G] = P - total;
+  mu[0] = total; mu[1] = overflow ? 1 : 0; mu[2] = G; mu[3] = P;
+  if (owning_row == 0) {
+  store_i64(counts, cu, (G + 1) * 8);
+  store_i64(meta, mu, 32);
+  set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b8(errors, eu, 0, 1, Q, 0, 0, 0, 0);
+  set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+  }
+  int64_t packed = 0, buffered = 0;
+  // Global compact prefix uses the fully validated counts, after the original
+  // capacity-before-oversize rule and global overflow handling above.
+  for (int64_t g = 0; g < owning_row * R; ++g) packed += cu[g];
+  // Only this row's compact columns/offsets, lookup and restore are written.
+  // Empty/error rows own no compact elements; bridge zeros remain unchanged.
+  for (int64_t q = owning_row; q < owning_row + 1; ++q) {
+    if (eu[q] || !au[q] || lu[q] <= 0) continue;
+    load_i32(bu, blocks + q * C, C * 4);
+    if (T != 0) load_i32(tu, tables + q * T, T * 4);
+    int64_t run = -1, prev = -1, within = 0;
+    // Restore slots have a fixed candidate domain, including holes. Write
+    // sixteen complete blocks per DMA; zeros preserve the bridge's padding.
+    for (int64_t chunk = 0; chunk < C; chunk += 16) {
+      const int64_t chunk_end = (chunk + 16 < C) ? chunk + 16 : C;
+      for (int64_t j = 0; j < 16 * block_size; ++j) restored[j] = 0;
+      for (int64_t b = chunk; b < chunk_end; ++b) {
+        const int64_t id = bu[b];
+        const int64_t first = id * block_size;
+        int64_t n = (id >= 0 && first < lu[q]) ? (lu[q] - first) : 0;
+        if (n > block_size) n = block_size;
+        if (n == 0) continue;
+        const int64_t logical = first / page_size;
+        if (run < 0 || logical != prev) {
+          if (run >= 0) store_i64(lookup + (q * R + run) * 128, map, 1024);
+          ++run; prev = logical; within = 0;
+          for (int32_t j = 0; j < 128; ++j) map[j] = 0;
+        }
+        const int64_t base = ((int64_t)tu[logical]) * page_stride + (first % page_size) * 128 + storage_offset;
+        for (int64_t j = 0; j < n; ++j) {
+          cb[buffered] = q * width + b * block_size + j;
+          ob[buffered] = base + j * 128;
+          restored[(b - chunk) * block_size + j] = (q * R + run) * 128 + within + 1;
+          map[within++] = packed + 1;
+          ++packed; ++buffered;
+          if (buffered == 128) {
+            store_compact_i64(columns + packed - 128, cb, 1024);
+            store_compact_i64(offsets + packed - 128, ob, 1024);
+            buffered = 0;
+          }
+        }
+      }
+      store_i64(restore + q * width + chunk * block_size, restored, (chunk_end - chunk) * block_size * 8);
+    }
+    if (run >= 0) store_i64(lookup + (q * R + run) * 128, map, 1024);
+  }
+  if (buffered != 0) {
+    store_compact_i64(columns + packed - buffered, cb, buffered * 8);
+    store_compact_i64(offsets + packed - buffered, ob, buffered * 8);
+  }
+  pipe_barrier(PIPE_ALL);
+}

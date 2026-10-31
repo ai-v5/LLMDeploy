@@ -1,14 +1,66 @@
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from deploy_recovery.ssh_notice import NOTICE, install_atomic, render_notice
+from deploy_recovery.ssh_notice import NOTICE, install_atomic, render_notice, verify_target
 
 
 class NoticeRenderingTests(unittest.TestCase):
+    def test_install_refuses_to_connect_to_unavailable_or_socket_activated_docker(self):
+        config = {'docker': 'docker', 'container_id': 'a' * 64, 'container_name': 'target'}
+        for service_state, socket_state in [('inactive', 'active'), ('active', 'active')]:
+            with self.subTest(service=service_state, socket=socket_state):
+                calls = []
+
+                def fake_run(args, **kwargs):
+                    calls.append(args)
+                    if args[:3] == ['systemctl', 'show', 'docker.service']:
+                        return SimpleNamespace(returncode=0, stdout=f'LoadState=loaded\nActiveState={service_state}\n')
+                    if args[:3] == ['systemctl', 'show', 'docker.socket']:
+                        return SimpleNamespace(returncode=0, stdout=f'LoadState=loaded\nActiveState={socket_state}\n')
+                    self.fail('Docker must not be contacted in this state')
+
+                with patch('subprocess.run', side_effect=fake_run):
+                    with self.assertRaisesRegex(RuntimeError, 'DOCKER_UNAVAILABLE_OR_SOCKET_ACTIVATED'):
+                        verify_target(config)
+                self.assertEqual([args[2] for args in calls], ['docker.service', 'docker.socket'])
+
+    def test_install_rechecks_docker_before_reading_cgroup_driver(self):
+        identity = 'a' * 64
+        row = {'Id': identity, 'Name': '/target', 'Image': 'image', 'Config': {}, 'HostConfig': {}}
+        spec_sha = hashlib.sha256(json.dumps({'config': row['Config'], 'hostconfig': row['HostConfig']},
+                                             sort_keys=True).encode()).hexdigest()
+        config = {'docker': 'docker', 'container_id': identity, 'container_name': 'target',
+                  'image_id': 'image', 'spec_sha256': spec_sha}
+        socket_checks = 0
+        docker_calls = []
+
+        def fake_run(args, **kwargs):
+            nonlocal socket_checks
+            if args[:3] == ['systemctl', 'show', 'docker.service']:
+                return SimpleNamespace(returncode=0, stdout='LoadState=loaded\nActiveState=active\n')
+            if args[:3] == ['systemctl', 'show', 'docker.socket']:
+                socket_checks += 1
+                state = 'inactive' if socket_checks == 1 else 'active'
+                return SimpleNamespace(returncode=0, stdout=f'LoadState=loaded\nActiveState={state}\n')
+            docker_calls.append(args)
+            if args[:2] == ['docker', 'inspect']:
+                return SimpleNamespace(returncode=0, stdout=json.dumps([row]))
+            self.fail('Docker info must not be contacted after the socket activates')
+
+        with patch('subprocess.run', side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, 'DOCKER_UNAVAILABLE_OR_SOCKET_ACTIVATED'):
+                verify_target(config)
+        self.assertEqual(socket_checks, 2)
+        self.assertEqual(len(docker_calls), 1)
+
     def test_rejects_invalid_identity_and_paths(self):
         for identity in ('short', 'g' * 64, 'a' * 63 + "'", None):
             with self.subTest(identity=identity), self.assertRaises(ValueError):

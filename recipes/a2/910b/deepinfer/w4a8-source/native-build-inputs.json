@@ -1,0 +1,34 @@
+{
+  "scope": "NATIVE_INPUT_IDENTITIES_ONLY_NOT_A_DEPLOYMENT_RECIPE",
+  "source_sha256": {
+    "weighted_gather128_r664.cce": "e5812e3c7cad36dbe55578dae150f9a73340863277a52ca1497a8296ca98bda2",
+    "weighted_gather1_r664.cce": "9598b581d88b4b87d36690f3c657276d6a0ef337702090261a60821d355c1296",
+    "weighted_gather_binding_r664.cpp": "b85d7a76081c33d952965e55064777f39f59c2de7158adde545211ae133dadab",
+    "indexer_schedule_rows_r1264.cce": "7d9f727e37bc0f0d7bfec2db0c2bffe80a4ca6f72047fcac91dd948da0c3a9b6",
+    "indexer_gather_r722.cce": "9681f0dd574b4be45dd2f819fce14038020bdca72785c4942cf2f738896cb50a",
+    "indexer_select_r760.cce": "7544e58190cce739ffd23a7bf6178af10e42662f5fbf99162b48eb46e62bcc9a",
+    "indexer_prepare_binding_rows_r1264.cpp": "f1ed8a0449bac4f8047789b1c324978276df73fae682731d557c78ac3a17898b",
+    "indexer_prefill_gather_r798.cce": "6760ccdfdf4855704e20e954e60e67187b7e1bce341bc20339094c4c2e3e7d15",
+    "indexer_prefill_gather_binding_r827.cpp": "7d6566585c956fd2a10ce598d2a8ce32e49c8345a8db2202fe48911225039aca"
+  },
+  "artifact_sha256": {
+    "_weighted_gather910b/gather128.o": "dc12d0f3eede101dfd251f4fcc0c457fd439a63079cb2858b358b6ee5c2d4c32",
+    "_weighted_gather910b/gather1.o": "3a0885d42b99adba3193475dddca219b83cdd73711fc14ef1844a83474642e2b",
+    "_weighted_gather910b/gather_bridge.so": "17d4323fff773ffdc6932cb13b7b9bc9bdb948e3e165553ddf42d459f1582e40",
+    "_native_prepare910b/indexer_schedule_rows_r1264.o": "474da886ebd1c12085a60a893c7a66eed41d489090619334759b6c6710cb6c2d",
+    "_native_prepare910b/indexer_gather_r722.o": "c5f18858d0516ceece3ac1bfe0eda0c16a26e61df66b1999ba0879d864c3a70c",
+    "_native_prepare910b/indexer_select_r760.o": "695a61fbe38d3a9dfab46ec3d495a3c3f4dcd8670c0a62cf3d585ca1685d8ef5",
+    "_native_prepare910b/deepinfer_indexer_prepare_rows_r1264.so": "4d8d31c4b460ae9af860ef54a4386132981f89170793d03916db6997a7d9278b",
+    "_native_prefill_gather910b/prefill_gather.o": "40dd95dea83fac75e660f6370141f186619cca13053239ea22aeaeb684290302",
+    "_native_prefill_gather910b/prefill_gather_bridge.so": "edecd4cc090a7ad6347385415c55e76fa41c175e949317ab76ac8003c643ce7a"
+  },
+  "toolchain": {
+    "cxx_sha256": "3a06a717e91b05b5766359e70dcfd0072b8337a380c48ba84907ed2d43e15895",
+    "ccec_sha256": "1cb33347c991d8ec143c0ba080ca126d9cc84167c4edea3e4953ff5865c5f60a",
+    "tbe_ccec_module_sha256": "f3ea6d9336a3311c1c9363e74e21195b5b042e5e4e4941b0b1c5e68cbe29cbed",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post4",
+    "torch_npu_git_version": "5dd8ef3f9b375b5ae4a83538d5785754148c3302",
+    "capture_header_sha256": "84054ef102fffdc76092e9066b39b9ef124206329a8a02a3440148278803acd4"
+  }
+}
