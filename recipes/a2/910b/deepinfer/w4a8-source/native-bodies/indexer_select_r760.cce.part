@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Task-local native score selection; device and rounding gates are pending.
+#ifdef __CCE_KT_TEST__
+#define __aicore__
+#else
+#define __aicore__ [aicore]
+#endif
+
+extern "C" __global__ __aicore__ void indexer_select_r760__kernel0(
+    __gm__ float* native, __gm__ float* singleton, __gm__ int64_t* lengths,
+    __gm__ int64_t* restore, __gm__ uint8_t* row_errors,
+    __gm__ float* fp32, __gm__ bfloat16_t* bf16, __gm__ int32_t* errors,
+    int64_t Q, int64_t width, int64_t G) {
+  set_vector_mask((uint64_t)-1, (uint64_t)-1);
+  set_mask_norm();
+  set_atomic_none();
+  __ubuf__ int64_t* positions = (__ubuf__ int64_t*)get_imm(0); // 16 entries
+  __ubuf__ int64_t* count = (__ubuf__ int64_t*)get_imm(128);   // one DMA slot
+  __ubuf__ uint8_t* disabled = (__ubuf__ uint8_t*)get_imm(160);
+  __ubuf__ float* selected = (__ubuf__ float*)get_imm(192);    // 16 FP32
+  __ubuf__ bfloat16_t* converted = (__ubuf__ bfloat16_t*)get_imm(256);
+  __ubuf__ int32_t* failure = (__ubuf__ int32_t*)get_imm(288);
+  const int64_t begin = ((int64_t)block_idx) * 16;
+  const int64_t total = Q * width;
+  const int64_t n = total - begin < 16 ? total - begin : 16;
+  __ubuf__ uint32_t* words = (__ubuf__ uint32_t*)selected;
+  for (int32_t j = 0; j < 16; ++j) words[j] = 0xff800000U;
+  for (int32_t j = 0; j < 16; ++j) failure[j] = 0;
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  copy_gm_to_ubuf_align_b32(positions, restore + begin, 0, 1, n * 8, 0, 0, 0, 0);
+  copy_gm_to_ubuf_align_b8(disabled, row_errors, 0, 1, Q, 0, 0, 0, 0);
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  // Every native candidate block has8/16 columns. Each half-tile is therefore
+  // wholly within a row and one run, with a valid prefix followed by zeros.
+  // Validate that private map contract before issuing any score DMA.
+  for (int64_t half = 0; half < n; half += 8) {
+    const int64_t q = (begin + half) / width;
+    if (disabled[q]) continue;
+    const int64_t first = positions[half];
+    if (first == 0) {
+      for (int64_t j = 0; j < 8; ++j) if (positions[half + j] != 0) failure[half] = 1;
+      continue;
+    }
+    if (first < 1 || first > G * 128) { failure[half] = 1; continue; }
+    const int64_t group = (first - 1) / 128;
+    const int64_t within = (first - 1) % 128;
+    if (group / (G / Q) != q) { failure[half] = 1; continue; }
+    set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    copy_gm_to_ubuf_align_b32(count, lengths + group, 0, 1, 8, 0, 0, 0, 0);
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    int64_t valid = 0;
+    bool hole = false, bad = count[0] < 1 || count[0] > 128;
+    for (int64_t j = 0; j < 8; ++j) {
+      const int64_t position = positions[half + j];
+      if (position == 0) hole = true;
+      else if (hole || position != first + j || within + j >= count[0]) bad = true;
+      else ++valid;
+    }
+    if (count[0] == 1 && (within != 0 || valid != 1)) bad = true;
+    if (bad) { failure[half] = 1; continue; }
+    set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    if (count[0] == 1) {
+      copy_gm_to_ubuf_align_b32(selected + half, singleton + group * 8, 0, 1, 4, 0, 0, 0, 0);
+    } else {
+      copy_gm_to_ubuf_align_b32(selected + half, native + group * 128 + within, 0, 1, valid * 4, 0, 0, 0, 0);
+    }
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    // Short GM->UB DMA can overwrite the rest of this32-byte slot with
+    // alignment dummy data. Restore only invalid lanes after DMA completes.
+    for (int64_t j = valid; j < 8; ++j) words[half + j] = 0xff800000U;
+  }
+  set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  set_vector_mask(0x0, 0xffff);
+  vconv_f322bf16r(converted, selected, 1, 1, 1, 4, 8);
+  set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b32(fp32 + begin, selected, 0, 1, n * 4, 0, 0, 0, 0);
+  copy_ubuf_to_gm_align_b16(bf16 + begin, converted, 0, 1, n * 2, 0, 0, 0, 0);
+  set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b32(errors + ((int64_t)block_idx) * 16, failure, 0, 1, n * 4, 0, 0, 0, 0);
+  pipe_barrier(PIPE_ALL);
+}

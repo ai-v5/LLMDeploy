@@ -1,0 +1,831 @@
+diff --git a/deepinfer/hugging_face/modelslim_loading.py b/deepinfer/hugging_face/modelslim_loading.py
+--- a/deepinfer/hugging_face/modelslim_loading.py
++++ b/deepinfer/hugging_face/modelslim_loading.py
+@@ -144,8 +144,18 @@
+     with interleave_memory():
+         for name,prefix in plan.moe_modules.items():
+             owner=model.get_submodule(name)
+-            owner.modelslim_backend=ModelSlimMoE(checkpoint,prefix,owner.cfg,group=owner.ep_group,offload=True)
+-            logger.info(f'ModelSlim fixed EP CPU weights loaded: {prefix}')
++            owner.modelslim_backend=ModelSlimMoE(checkpoint,prefix,owner.cfg,group=owner.ep_group,offload=False)
++            backend=owner.modelslim_backend
++            resident_bytes=0
++            for expert in [*backend.routed.experts.values(),backend.shared]:
++                for linear in (expert.w1,expert.w2,expert.w3):
++                    if linear.offload or linear._resident is None or hasattr(linear,'weight_cache'):
++                        raise RuntimeError('EP16 requires all routed/shared main/MTP projections resident')
++                    for value in (linear.weight,linear.scale):
++                        if value.device.type!='npu':
++                            raise RuntimeError('EP16 expert weight or scale remains on the host')
++                        resident_bytes+=value.numel()*value.element_size()
++            logger.info(f'ModelSlim fixed EP HBM experts loaded: {prefix} bytes={resident_bytes}')
+     for name,prefix in plan.engram_modules.items():
+         owner=model.get_submodule(name)
+         owner.modelslim_backend=ModelSlimEngram(checkpoint,prefix,cfg.gpt)
+diff --git a/deepinfer/model_executor/models/decoder_layer.py b/deepinfer/model_executor/models/decoder_layer.py
+--- a/deepinfer/model_executor/models/decoder_layer.py
++++ b/deepinfer/model_executor/models/decoder_layer.py
+@@ -104,6 +104,8 @@
+         cross_layer_runtime: CrossLayerRuntime | None = None,
+         dflash_input: torch.Tensor | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | HCLazyPostData | None]:
++        self._910b_decode_active=not input_metadata.is_prompt
++        self.self_attn._910b_decode_active=self._910b_decode_active
+         hidden_states = hidden_states.move() if isinstance(hidden_states, Movable) else hidden_states
+         if cross_layer_runtime is None:
+             cross_layer_runtime = CrossLayerRuntime()
+diff --git a/deepinfer/model_executor/models/deepseek.py b/deepinfer/model_executor/models/deepseek.py
+--- a/deepinfer/model_executor/models/deepseek.py
++++ b/deepinfer/model_executor/models/deepseek.py
+@@ -101,6 +101,13 @@
+             ]
+         )
+         self.num_layers = len(self.layers)
++        import os
++        if cfg.get("modelslim_w8a8",False) and os.environ.get("DEEPINFER_910B_MAIN_SEGMENTED_GRAPH")=="1":
++            # Only main-model modules: DSpark/MTP retains its eager path.
++            for layer in self.layers:
++                layer._910b_main_graph_enabled=True
++                layer.self_attn._910b_main_graph_enabled=True
++                layer.mlp.modelslim_backend._910b_main_graph_enabled=True
+ 
+         assert isinstance(head_module, MainPredictHeadHC), f"{type(head_module)=}"
+         self.hc_head = HCHead(head_module) if not self.hc_shifted else None
+diff --git a/deepinfer/model_executor/models/v4_modules/attn.py b/deepinfer/model_executor/models/v4_modules/attn.py
+--- a/deepinfer/model_executor/models/v4_modules/attn.py
++++ b/deepinfer/model_executor/models/v4_modules/attn.py
+@@ -479,7 +479,13 @@
+         wait_kv_swa = userbuffer.cp.all_gather(kv_swa) if use_cp else None
+         return kv_swa, wait_kv_swa
+ 
+-    def _project_q_b(
++    def _project_q_b(self,q_a,positions):
++        if getattr(self,"_910b_main_graph_enabled",False) and getattr(self,"_910b_decode_active",False):
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            return main_graph_call(self,"q_b_norm_rope",self._project_q_b_eager,q_a,positions)
++        return self._project_q_b_eager(q_a,positions)
++
++    def _project_q_b_eager(
+         self,
+         q_a: torch.Tensor,
+         positions: torch.Tensor,
+diff --git a/deepinfer/model_executor/models/v4_modules/hc.py b/deepinfer/model_executor/models/v4_modules/hc.py
+--- a/deepinfer/model_executor/models/v4_modules/hc.py
++++ b/deepinfer/model_executor/models/v4_modules/hc.py
+@@ -318,7 +318,21 @@
+             return (y_fp8, y_sf), y_bf16, lazy_data
+         return y_bf16, y_bf16, lazy_data
+ 
+-    def _hc_pre(
++    def _hc_pre(self,residual,hc_modules,prev_pre_layer_mix,cast_kwargs=None):
++        if (getattr(self,"_910b_main_graph_enabled",False) and getattr(self,"_910b_decode_active",False)
++                and not cast_kwargs and mhc910b.is_910b_tensor(residual)):
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            def compute(value,*previous):
++                normalized,bf16,lazy=self._hc_pre_eager(value,hc_modules,previous[0] if previous else None,None)
++                return normalized,bf16,lazy.residual,lazy.post_layer_mix,lazy.comb_res_mix,lazy.pre_layer_mix
++            inputs=(residual,) if prev_pre_layer_mix is None else (residual,prev_pre_layer_mix)
++            name="hc_attn_pre_norm" if hc_modules.layer_norm is self.attn_layernorm else "hc_ffn_pre_norm"
++            values=main_graph_call(self,name,compute,*inputs)
++            # The consumer clears its lazy bundle: never expose the cached object.
++            return values[0],values[1],HCLazyPostData(*values[2:])
++        return self._hc_pre_eager(residual,hc_modules,prev_pre_layer_mix,cast_kwargs)
++
++    def _hc_pre_eager(
+         self,
+         residual: torch.Tensor,  # [n, hc_mult, hidden_size]
+         hc_modules: HCSubmodules,
+diff --git a/deepinfer/model_executor/models/v4_modules/index_attn.py b/deepinfer/model_executor/models/v4_modules/index_attn.py
+--- a/deepinfer/model_executor/models/v4_modules/index_attn.py
++++ b/deepinfer/model_executor/models/v4_modules/index_attn.py
+@@ -385,6 +385,7 @@
+                     output_idx_offset=ks[chunk] if candidate_blocks is None else None,
+                     idx_oob_fill_value=-1,
+                     return_value=False,
++                    **({"inplace": True} if self.bf16_index else {}),
+                 )
+                 if candidate_blocks is not None:
+                     restore_candidate_indices_inplace(topk_index[chunk], candidate_blocks[chunk], candidate_block_size, ks[chunk])
+@@ -525,6 +526,7 @@
+                 sorted_index=True,
+                 idx_oob_fill_value=-1,
+                 return_value=False,
++                **({"inplace": True} if self.bf16_index else {}),
+             )[1]
+             if candidate_blocks is not None:
+                 restore_candidate_indices_inplace(topk_index, candidate_blocks, candidate_block_size)
+diff --git a/deepinfer/npu_ops/indexer910b.py b/deepinfer/npu_ops/indexer910b.py
+--- a/deepinfer/npu_ops/indexer910b.py
++++ b/deepinfer/npu_ops/indexer910b.py
+@@ -17,7 +17,7 @@
+ 
+ 
+ @torch.inference_mode()
+-def prefill(q, keys, weights, starts, ends, max_len, blocks=None, block_size=0, valid_mask=None):
++def _reference_prefill(q, keys, weights, starts, ends, max_len, blocks=None, block_size=0, valid_mask=None):
+     starts = starts.cpu().tolist()
+     ends = ends.cpu().tolist()
+     candidates = None if blocks is None else blocks.cpu()
+@@ -72,29 +72,48 @@
+ 
+ @torch.inference_mode()
+ def decode(q,cache,weights,lengths,tables,max_len,blocks=None,block_size=0,valid_mask=None):
+-    if cache.ndim==4:
+-        assert cache.shape[-2]==1
+-        cache=cache.squeeze(-2)
+-    lengths=lengths.cpu().tolist();tables=tables.cpu().tolist()
+-    candidates=None if blocks is None else blocks.cpu()
+-    valid=[True]*q.shape[0] if valid_mask is None else valid_mask.cpu().tolist()
+-    width=max_len if blocks is None else blocks.shape[1]*block_size
+-    out=torch.full((q.shape[0],width),-torch.inf,dtype=torch.bfloat16,device=q.device)
+-    page_size=cache.shape[1]
+-    for row,(length,active) in enumerate(zip(lengths,valid)):
+-        if not active:continue
+-        positions,columns=_positions(length,None if candidates is None else candidates[row],block_size)
+-        # Work page by page: scalar page views retain the 64-bit byte base,
+-        # including when the shared physical block stride crosses 2 GiB.
+-        page_ids=positions//page_size
+-        pages,counts=torch.unique_consecutive(page_ids,return_counts=True)
+-        cursor=0
+-        for page,count in zip(pages.tolist(),counts.tolist()):
+-            selected_columns=slice(cursor,cursor+count);cursor+=count
+-            pos=positions[selected_columns]
+-            physical=tables[row][page]
+-            if not 0<=physical<cache.shape[0]:raise ValueError('Invalid physical index-cache page')
+-            keys=cache[physical].index_select(0,(pos%page_size).to(q.device))
+-            col=columns[selected_columns].to(q.device)
+-            out[row].index_copy_(0,col,_scores(q[row],keys,weights[row]))
+-    return out
++    if blocks is None:
++        from deepinfer.npu_ops.indexer_decode910b import decode as implementation
++    else:
++        from deepinfer.npu_ops.indexer_candidate_decode910b import decode as implementation
++    return implementation(q,cache,weights,lengths,tables,max_len,blocks,block_size,valid_mask)
++
++
++@torch.inference_mode()
++def prefill(q, keys, weights, starts, ends, max_len, blocks=None, block_size=0, valid_mask=None):
++    if blocks is not None:
++        from deepinfer.npu_ops.indexer_candidate910b import prefill as candidate_prefill
++        return candidate_prefill(q, keys, weights, starts, ends, max_len, blocks, block_size, valid_mask)
++    if q.shape[0] == 0:
++        return _reference_prefill(q, keys, weights, starts, ends, max_len, blocks, block_size, valid_mask)
++    starts_cpu, ends_cpu = starts.cpu().tolist(), ends.cpu().tolist()
++    if len(set(starts_cpu)) != 1:
++        return _reference_prefill(q, keys, weights, starts, ends, max_len, blocks, block_size, valid_mask)
++    import torch_npu
++    active = [True] * q.shape[0] if valid_mask is None else valid_mask.cpu().tolist()
++    output = torch.full((q.shape[0], max_len), -torch.inf, dtype=torch.bfloat16, device=q.device)
++    base = starts_cpu[0]
++    for begin in range(0, q.shape[0], 32):
++        stop = min(begin + 32, q.shape[0])
++        lengths = [ends_cpu[i] - base if active[i] else 0 for i in range(begin, stop)]
++        maximum = max(lengths, default=0)
++        for offset in range(0, maximum, 4096):
++            counts = [max(0, min(4096, length - offset)) for length in lengths]
++            if 4096 in counts:
++                complete = torch.tensor([v == 4096 for v in counts], device=q.device)
++                query = torch.where(complete[:, None, None], q[begin:stop], 0)
++                head_weights = torch.where(complete[:, None], weights[begin:stop], 0)
++                index, values = torch_npu.npu_lightning_indexer(query[None],
++                    keys[base + offset:base + offset + 4096][None, :, None], head_weights[None],
++                    layout_query='BSND', layout_key='BSND', sparse_count=4096,
++                    sparse_mode=0, return_value=True)
++                index, values = index.reshape(stop - begin, 4096), values.reshape(stop - begin, 4096)
++                values = torch.empty_like(values).scatter_(1, index.long(), values)
++                output[begin:stop, offset:offset + 4096].copy_(values.masked_fill(~complete[:, None], -torch.inf))
++            for row, count in enumerate(counts):
++                if 0 < count < 4096:
++                    selected = keys[base + offset:base + offset + count]
++                    # Preserve the reference's contiguous gather layout for partial tiling.
++                    selected = selected.contiguous()
++                    output[begin + row, offset:offset + count] = _scores(q[begin + row], selected, weights[begin + row])
++    return output
+diff --git a/deepinfer/npu_ops/indexer_candidate910b.py b/deepinfer/npu_ops/indexer_candidate910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/indexer_candidate910b.py
+@@ -0,0 +1,48 @@
++"""BF16 candidate-block indexer with device-generated gather addresses.
++
++Full score columns preserve candidate holes and duplicates for the caller's
++top-k and restore operations. Native fused scoring uses32-query tiles with
++bounded scratch; dense prefill and paged decode use their separate paths.
++"""
++import torch
++
++@torch.inference_mode()
++def prefill(q,keys,weights,starts,ends,max_len,blocks=None,block_size=0,valid_mask=None):
++    if blocks is None:raise ValueError('Experiment only supports candidate-block scoring')
++    if block_size not in (8,16):raise ValueError('Expected8 or16 token candidate blocks')
++    width=blocks.shape[1]*block_size
++    output=torch.full((q.shape[0],width),-torch.inf,dtype=torch.bfloat16,device=q.device)
++    if q.shape[0]==0 or width==0:return output
++    starts=starts.to(device=q.device,dtype=torch.int64);ends=ends.to(device=q.device,dtype=torch.int64)
++    active=torch.ones(q.shape[0],dtype=torch.bool,device=q.device) if valid_mask is None else valid_mask.to(device=q.device,dtype=torch.bool)
++    if keys.shape[0]==0:
++        if bool((active&(ends>starts)).any()):raise ValueError('Nonempty logical key range without keys')
++        return output
++    import torch_npu
++    tile=4096
++    within=torch.arange(block_size,device=q.device,dtype=torch.int64)
++    for begin in range(0,q.shape[0],32):
++        stop=min(begin+32,q.shape[0]);batch=stop-begin
++        candidate=blocks[begin:stop].to(device=q.device,dtype=torch.int64)
++        relative=(candidate[:,:,None]*block_size+within).reshape(batch,width)
++        valid=((candidate[:,:,None]>=0).expand(-1,-1,block_size).reshape(batch,width)
++            &(relative<(ends[begin:stop]-starts[begin:stop])[:,None])&active[begin:stop,None])
++        addresses=torch.where(valid,relative+starts[begin:stop,None],0)
++        query=q[begin:stop].unsqueeze(1).contiguous().masked_fill(~active[begin:stop,None,None,None],0)
++        head_weights=weights[begin:stop].unsqueeze(1).contiguous().masked_fill(~active[begin:stop,None,None],0)
++        for offset in range(0,width,tile):
++            count=min(tile,width-offset);mask=valid[:,offset:offset+count]
++            address=addresses[:,offset:offset+count]
++            if count<tile:
++                address=torch.cat((address,torch.zeros((batch,tile-count),dtype=address.dtype,device=q.device)),1)
++                padded_mask=torch.cat((mask,torch.zeros((batch,tile-count),dtype=torch.bool,device=q.device)),1)
++            else:padded_mask=mask
++            selected=keys.index_select(0,address.reshape(-1)).reshape(batch,tile,1,keys.shape[-1])
++            selected.masked_fill_(~padded_mask[:,:,None,None],0)
++            indices,values=torch_npu.npu_lightning_indexer(query,selected,head_weights,
++                layout_query='BSND',layout_key='BSND',sparse_count=tile,sparse_mode=0,return_value=True)
++            indices=indices.reshape(batch,tile).long();values=values.reshape(batch,tile)
++            restored=torch.full((batch,tile+1),-torch.inf,dtype=values.dtype,device=q.device)
++            restored.scatter_(1,indices.masked_fill(indices<0,tile),values)
++            output[begin:stop,offset:offset+count].copy_(restored[:,:count].masked_fill(~mask,-torch.inf))
++    return output
+diff --git a/deepinfer/npu_ops/indexer_candidate_decode910b.py b/deepinfer/npu_ops/indexer_candidate_decode910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/indexer_candidate_decode910b.py
+@@ -0,0 +1,59 @@
++"""Candidate decode: batch equal-length page runs without changing reductions."""
++import torch
++
++
++def _gather(cache, physical, within, dim):
++    offsets=physical[:,None]*cache.stride(0)+within*cache.stride(1)+cache.storage_offset()
++    elements=cache.untyped_storage().nbytes()//cache.element_size()
++    if cache.stride(0)%dim==0 and cache.stride(1)%dim==0 and cache.storage_offset()%dim==0:
++        storage=cache.as_strided((elements//dim,dim),(dim,1),storage_offset=0)
++        return storage.index_select(0,(offsets//dim).reshape(-1))
++    storage=cache.as_strided((elements,),(1,),storage_offset=0)
++    addresses=offsets.reshape(-1,1)+torch.arange(dim,device=cache.device,dtype=torch.int64)
++    return storage.index_select(0,addresses.reshape(-1)).reshape(-1,dim)
++
++
++@torch.inference_mode()
++def decode(q,cache,weights,lengths,tables,max_len,blocks=None,block_size=0,valid_mask=None):
++    if blocks is None or block_size not in (8,16):raise ValueError('Expected8/16-token candidate blocks')
++    if cache.ndim==4:
++        if cache.shape[-2]!=1:raise ValueError('Expected one KV head')
++        cache=cache.squeeze(-2)
++    tokens,heads,dim=q.shape
++    if cache.ndim!=3 or cache.shape[-1]!=dim or cache.stride(-1)!=1:raise ValueError('Expected paged key rows')
++    if weights.shape!=(tokens,heads) or lengths.shape!=(tokens,) or tables.shape[0]!=tokens or blocks.shape[0]!=tokens:raise ValueError('Metadata shape mismatch')
++    width=blocks.shape[1]*block_size
++    output=torch.full((tokens,width),-torch.inf,dtype=torch.bfloat16,device=q.device)
++    if tokens==0 or width==0:return output
++    sizes=lengths.cpu().tolist();page_tables=tables.cpu().tolist();candidates=blocks.cpu()
++    active=[True]*tokens if valid_mask is None else valid_mask.cpu().tolist()
++    page_size=cache.shape[1];groups={}
++    within=torch.arange(block_size,device='cpu',dtype=torch.int64)
++    for row,(size,enabled) in enumerate(zip(sizes,active)):
++        if not enabled:continue
++        positions=(candidates[row].long()[:,None]*block_size+within).reshape(-1)
++        valid=(candidates[row][:,None]>=0).expand(-1,block_size).reshape(-1)&(positions<size)
++        columns=torch.arange(width,device='cpu',dtype=torch.int64)[valid];positions=positions[valid]
++        pages,counts=torch.unique_consecutive(positions//page_size,return_counts=True)
++        cursor=0
++        for page,count in zip(pages.tolist(),counts.tolist()):
++            physical=page_tables[row][page]
++            if not 0<=physical<cache.shape[0]:raise ValueError('Invalid physical index-cache page')
++            end=cursor+count
++            groups.setdefault(count,[]).append((row,physical,positions[cursor:end]%page_size,columns[cursor:end]))
++            cursor=end
++    for count,runs in groups.items():
++        for start in range(0,len(runs),32):
++            batch=runs[start:start+32]
++            rows=torch.tensor([run[0] for run in batch],device=q.device,dtype=torch.int64)
++            physical=torch.tensor([run[1] for run in batch],device=q.device,dtype=torch.int64)
++            offsets=torch.stack([run[2] for run in batch]).to(q.device)
++            keys=_gather(cache,physical,offsets,dim).reshape(len(batch),count,dim)
++            dots=torch.bmm(q.index_select(0,rows).float(),keys.float().transpose(1,2))
++            dots.relu_().mul_(weights.index_select(0,rows).float().unsqueeze(-1))
++            # Retain each original contiguous[heads,count] reduction shape.
++            values=torch.stack([score.contiguous().sum(0).bfloat16() for score in dots])
++            columns=torch.stack([run[3] for run in batch]).to(q.device)
++            destinations=rows[:,None]*width+columns
++            output.view(-1).index_copy_(0,destinations.reshape(-1),values.reshape(-1))
++    return output
+diff --git a/deepinfer/npu_ops/indexer_decode910b.py b/deepinfer/npu_ops/indexer_decode910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/indexer_decode910b.py
+@@ -0,0 +1,71 @@
++"""Paged dense decode with batched FP32 dots and reference2D head reduction.
++
++Full physical pages are gathered through64-bit storage addresses. Partial
++pages retain scalar projection/reduction shapes. Candidate-block decode
++and all prefill paths remain in their separate operators.
++"""
++import torch
++
++def _gather(cache, physical_pages, page_size, dim):
++    within=torch.arange(page_size,device=cache.device,dtype=torch.int64)
++    offsets=(physical_pages.reshape(-1,1)*cache.stride(0)+within[None,:]*cache.stride(1)+cache.storage_offset())
++    elements=cache.untyped_storage().nbytes()//cache.element_size()
++    if cache.stride(0)%dim==0 and cache.stride(1)%dim==0 and cache.storage_offset()%dim==0:
++        physical=cache.as_strided((elements//dim,dim),(dim,1),storage_offset=0)
++        return physical.index_select(0,(offsets//dim).reshape(-1))
++    physical=cache.as_strided((elements,),(1,),storage_offset=0)
++    scalar=offsets.reshape(-1,1)+torch.arange(dim,device=cache.device,dtype=torch.int64)
++    return physical.index_select(0,scalar.reshape(-1)).reshape(-1,dim)
++
++@torch.inference_mode()
++def decode(q,cache,weights,lengths,tables,max_len,blocks=None,block_size=0,valid_mask=None):
++    if blocks is not None:raise ValueError('Dense decode candidate only')
++    if cache.ndim==4:
++        if cache.shape[-2]!=1:raise ValueError('Expected one KV head')
++        cache=cache.squeeze(-2)
++    tokens,heads,dim=q.shape
++    if cache.ndim!=3 or cache.shape[-1]!=dim or cache.stride(-1)!=1:raise ValueError('Expected paged dense key rows')
++    if weights.shape!=(tokens,heads) or lengths.shape!=(tokens,) or tables.ndim!=2 or tables.shape[0]!=tokens:raise ValueError('Metadata shape mismatch')
++    output=torch.full((tokens,max_len),-torch.inf,dtype=torch.bfloat16,device=q.device)
++    if tokens==0:return output
++    active=torch.ones(tokens,dtype=torch.bool,device=q.device) if valid_mask is None else valid_mask.to(device=q.device,dtype=torch.bool)
++    lengths=lengths.to(device=q.device,dtype=torch.int64);tables=tables.to(device=q.device,dtype=torch.int64)
++    if bool((active&((lengths<0)|(lengths>max_len))).any()):raise ValueError('Invalid key length')
++    page_size=cache.shape[1]
++    # One small metadata transfer per call; never transfer the page table.
++    sizes=torch.where(active,lengths,0).cpu().tolist()
++    maximum=max((size//page_size for size in sizes),default=0)
++    if any((size+page_size-1)//page_size>tables.shape[1] for size in sizes):raise ValueError('Page table too short')
++    needed=torch.arange(tables.shape[1],device=q.device)[None,:] < torch.div(lengths+page_size-1,page_size,rounding_mode='floor')[:,None]
++    needed&=active[:,None]
++    if bool((needed&((tables<0)|(tables>=cache.shape[0]))).any()):raise ValueError('Invalid physical key page')
++    for begin in range(0,tokens,8):
++        stop=min(begin+8,tokens);batch=stop-begin
++        query=q[begin:stop].float().masked_fill(~active[begin:stop,None,None],0)
++        head_weights=weights[begin:stop].float().masked_fill(~active[begin:stop,None],0)
++        for offset in range(0,maximum,32):
++            pages=min(32,maximum-offset)
++            logical=torch.arange(offset,offset+pages,device=q.device,dtype=torch.int64)
++            visible=(logical[None,:] < torch.div(lengths[begin:stop],page_size,rounding_mode='floor')[:,None])&active[begin:stop,None]
++            physical=tables[begin:stop,offset:offset+pages].masked_fill(~visible,0)
++            keys=_gather(cache,physical,page_size,dim).reshape(batch,pages,page_size,dim)
++            keys.masked_fill_(~visible[:,:,None,None],0)
++            matrices=query[:,None].expand(-1,pages,-1,-1).contiguous().reshape(batch*pages,heads,dim)
++            scores=torch.bmm(matrices,keys.float().reshape(batch*pages,page_size,dim).transpose(1,2))
++            scores.relu_().mul_(head_weights[:,None,:,None].expand(-1,pages,-1,-1).reshape(batch*pages,heads,1))
++            # Keep each reference [heads,page_size] reduction shape/stride.
++            # NPU3D reduction differs on cancellation-sensitive FP32 sums.
++            values=torch.stack([score.contiguous().sum(0).bfloat16() for score in scores]).reshape(batch,pages*page_size)
++            values.masked_fill_(~visible[:,:,None].expand(-1,-1,page_size).reshape(batch,-1),-torch.inf)
++            end=min((offset+pages)*page_size,max_len)
++            output[begin:stop,offset*page_size:end]=values[:,:end-offset*page_size]
++    # Preserve the old scalar shape/reduction for every partial final page.
++    for row,size in enumerate(sizes):
++        count=size%page_size
++        if count:
++            page=size//page_size
++            physical=int(tables[row,page].item())
++            keys=cache[physical,:count].contiguous()
++            values=((q[row].float()@keys.float().T).relu()*weights[row,:,None].float()).sum(0).bfloat16()
++            output[row,page*page_size:size]=values
++    return output
+diff --git a/deepinfer/npu_ops/main_decode_graph910b.py b/deepinfer/npu_ops/main_decode_graph910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/main_decode_graph910b.py
+@@ -0,0 +1,65 @@
++"""Fixed-shape NPUGraph for an explicitly pure, tensor-only main-model slice."""
++import torch
++
++
++class FixedTensorGraph:
++    def __init__(self, function, examples, workspace=None):
++        if not examples or any(not isinstance(x,torch.Tensor) or x.device.type!='npu' or not x.numel() for x in examples):
++            raise ValueError('Explicit nonempty NPU tensor inputs are required')
++        if len({x.device for x in examples})!=1:
++            raise ValueError('A graph slice owns exactly one device')
++        self.inputs=tuple(torch.empty_like(x,memory_format=torch.contiguous_format) for x in examples)
++        self.specs=tuple((x.shape,x.dtype,x.device) for x in examples)
++        for static,example in zip(self.inputs,examples):static.copy_(example)
++        self.pool,self.stream=workspace if workspace is not None else (torch.npu.graph_pool_handle(),torch.npu.Stream(device=examples[0].device))
++        self.stream.wait_stream(torch.npu.current_stream())
++        with torch.npu.stream(self.stream):
++            for _ in range(2):function(*self.inputs)
++        self.stream.synchronize()
++        self.graph=torch.npu.NPUGraph()
++        with torch.npu.graph(self.graph,pool=self.pool,stream=self.stream):
++            self.output=function(*self.inputs)
++        torch.npu.current_stream().wait_stream(self.stream)
++        self.replays=0
++
++    @torch.inference_mode()
++    def __call__(self,*inputs):
++        if len(inputs)!=len(self.specs) or any((x.shape,x.dtype,x.device)!=spec for x,spec in zip(inputs,self.specs)):
++            raise ValueError('Graph replay requires the captured shapes, dtypes and device')
++        for static,value in zip(self.inputs,inputs):static.copy_(value)
++        self.graph.replay()
++        self.replays+=1
++        return self.output
++
++
++_MAIN_WORKSPACES={}
++
++
++def graph_workspace(device, q):
++    # Single main forward thread. Each exact-Q path captures and replays its
++    # main layers in order; no pool is shared across different Q buckets.
++    key=(device,q)
++    if key not in _MAIN_WORKSPACES:
++        _MAIN_WORKSPACES[key]=(torch.npu.graph_pool_handle(),torch.npu.Stream(device=device))
++    return _MAIN_WORKSPACES[key]
++
++
++def main_graph_call(owner, name, function, *inputs):
++    # Experimental first slice: exact local decode Q1..6; never pad routing.
++    if not 1 <= inputs[0].shape[0] <= 6:
++        return function(*inputs)
++    key=(name,tuple((tuple(x.shape),x.dtype,x.device) for x in inputs))
++    cache=owner.__dict__.setdefault('_910b_main_graph_cache',{})
++    if key not in cache:
++        cache[key]=FixedTensorGraph(function,inputs,graph_workspace(inputs[0].device,inputs[0].shape[0]))
++    return cache[key](*inputs)
++
++
++def main_graph_stats(model):
++    stats={'graphs':0,'replays':0,'by_slice':{}}
++    for module in model.modules():
++        for key,graph in module.__dict__.get('_910b_main_graph_cache',{}).items():
++            stats['graphs']+=1;stats['replays']+=graph.replays
++            item=stats['by_slice'].setdefault(key[0],{'graphs':0,'replays':0})
++            item['graphs']+=1;item['replays']+=graph.replays
++    return stats
+diff --git a/deepinfer/npu_ops/memory910b.py b/deepinfer/npu_ops/memory910b.py
+new file mode 100644
+--- /dev/null
++++ b/deepinfer/npu_ops/memory910b.py
+@@ -0,0 +1,11 @@
++"""KV allocation bound for the colocated API's live sequences plus one prefix."""
++
++
++def kv_block_budget(runtime_max_model_len: int, max_num_seqs: int, block_size: int) -> int:
++    if min(runtime_max_model_len, max_num_seqs, block_size) <= 0:
++        raise ValueError('Positive runtime length, sequence count and block size required')
++    per_sequence = (runtime_max_model_len + block_size - 1) // block_size
++    # One distinct full-length immutable prefix can outlive the live requests.
++    demand = (max_num_seqs + 1) * per_sequence + 1
++    # Preserve the engine's 80% capacity admission margin and even-block alignment.
++    return ((5 * demand + 7) // 8) * 2
+diff --git a/deepinfer/npu_ops/moe910b.py b/deepinfer/npu_ops/moe910b.py
+--- a/deepinfer/npu_ops/moe910b.py
++++ b/deepinfer/npu_ops/moe910b.py
+@@ -5,7 +5,22 @@
+ import torch.distributed as dist
+ from torch import nn
+ 
+-from deepinfer.npu_ops.w8a8 import W8A8Expert, W8A8ExpertParallel, W8A8Linear
++from deepinfer.npu_ops.w8a8 import W8A8Expert, W8A8ExpertParallel, W8A8Linear, WeightCache
++
++
++_WEIGHT_CACHES = {}
++
++
++def weight_cache(device):
++    key = device.index
++    if key not in _WEIGHT_CACHES:
++        _WEIGHT_CACHES[key] = WeightCache(8 * 1024**3, device)
++    return _WEIGHT_CACHES[key]
++
++
++def transfer_stats(device):
++    cache = _WEIGHT_CACHES.get(device.index)
++    return {} if cache is None else cache.stats()
+ 
+ 
+ class ModelSlimMoE(nn.Module):
+@@ -35,22 +50,24 @@
+             # Widening BF16 here is exact; neither bias is quantized.
+             self.register_buffer(name, bias.to(device=device, dtype=torch.float32), persistent=False)
+ 
+-        def expert(path):
++        def expert(path, offload_weights):
+             projections = []
+             for part in ["w1", "w2", "w3"]:
+                 weight, scale = checkpoint.linear(path + "." + part)
+-                linear = W8A8Linear(weight, scale, offload=offload)
+-                if not offload:
++                linear = W8A8Linear(weight, scale, offload=offload_weights)
++                if offload_weights:
++                    linear.weight_cache = weight_cache(device)
++                if not offload_weights:
+                     linear.materialize(device)
+                 projections.append(linear)
+             return W8A8Expert(*projections, swiglu_limit=cfg.swiglu_limit)
+ 
+         local = self.num_experts // world
+-        experts = {i: expert(f"{prefix}.experts.{i}") for i in range(rank * local, (rank + 1) * local)}
++        experts = {i: expert(f"{prefix}.experts.{i}", offload) for i in range(rank * local, (rank + 1) * local)}
+         self.routed = W8A8ExpertParallel(experts, num_experts=self.num_experts, group=group)
+         if moe.n_shared_experts != 1:
+             raise ValueError("910B ModelSlim currently requires exactly one shared expert")
+-        self.shared = expert(prefix + ".shared_experts")
++        self.shared = expert(prefix + ".shared_experts", False)
+ 
+     @torch.inference_mode()
+     def gate_forward(self, hidden, metadata, out=None):
+@@ -85,7 +102,11 @@
+             raise ValueError("Normalized and routing inputs must have matching shapes/devices")
+         indices, weights = self.gate_forward(hidden_bf16, metadata)
+         routed = self.routed(hidden, indices, weights)
+-        shared = self.shared(hidden)
++        if getattr(self,"_910b_main_graph_enabled",False) and not metadata.is_prompt:
++            from deepinfer.npu_ops.main_decode_graph910b import main_graph_call
++            shared = main_graph_call(self,"shared_expert",self.shared,hidden)
++        else:
++            shared = self.shared(hidden)
+         valid = getattr(metadata, "valid_token_mask", None)
+         if valid is not None:
+             shared = shared.masked_fill(~valid.reshape(-1, 1), 0)
+diff --git a/deepinfer/npu_ops/sparse_attention910b.py b/deepinfer/npu_ops/sparse_attention910b.py
+--- a/deepinfer/npu_ops/sparse_attention910b.py
++++ b/deepinfer/npu_ops/sparse_attention910b.py
+@@ -1,7 +1,7 @@
+ """Eager BF16 sparse MLA for native 910B prefill and paged decode.
+ 
+-Only selected KV rows are gathered; temporary storage is bounded by eight
+-query tokens, independent of total context length. LSE excludes attention
++Only selected KV rows are gathered; temporary storage is bounded by64
++prefill or8 decode queries, independent of total context length. LSE excludes attention
+ sinks and empty rows return +inf, matching the FlashMLA caller contract.
+ """
+ from __future__ import annotations
+@@ -68,8 +68,11 @@
+         output.zero_()
+         lse.fill_(float("inf"))
+         return output, lse
+-    for start in range(0, tokens, 8):
+-        end = min(tokens, start + 8)
++    single_prefill_bank = not strict_decode and len(prepared) == 1
++    # Batch only the single-bank prefill path; decode keeps its8-query bound.
++    query_chunk = 64 if single_prefill_bank else 8
++    for start in range(0, tokens, query_chunk):
++        end = min(tokens, start + query_chunk)
+         rows, masks = [], []
+         for cache, indices, valid in prepared:
+             mask = valid[start:end]
+@@ -83,14 +86,15 @@
+             else:
+                 rows.append(query.new_zeros((end-start, indices.shape[1], dim),dtype=torch.float32))
+             masks.append(mask)
+-        keys = torch.cat(rows, dim=1)
+-        valid = torch.cat(masks, dim=1)
++        keys = rows[0] if single_prefill_bank else torch.cat(rows, dim=1)
++        valid = masks[0] if single_prefill_bank else torch.cat(masks, dim=1)
+         scores = torch.bmm(query[start:end].float(), keys.transpose(1, 2)) * softmax_scale
+         scores.masked_fill_(~valid.unsqueeze(1), float("-inf"))
+         raw_lse = scores.logsumexp(-1)
+         denominator = raw_lse if sink is None else torch.logaddexp(raw_lse, sink)
+         denominator = denominator.masked_fill(torch.isneginf(denominator), float("inf"))
+-        weights = torch.exp(scores - denominator.unsqueeze(-1))
++        # Scores are private scratch; LSE and denominator have already read them.
++        weights = scores.sub_(denominator.unsqueeze(-1)).exp_() if single_prefill_bank else torch.exp(scores - denominator.unsqueeze(-1))
+         output[start:end] = torch.bmm(weights, keys).bfloat16()
+         lse[start:end] = raw_lse.masked_fill(torch.isneginf(raw_lse), float("inf"))
+     return output, lse
+diff --git a/deepinfer/npu_ops/topk910b.py b/deepinfer/npu_ops/topk910b.py
+--- a/deepinfer/npu_ops/topk910b.py
++++ b/deepinfer/npu_ops/topk910b.py
+@@ -3,7 +3,7 @@
+ 
+ 
+ def topk(input,topk,sorted=False,indices_type=torch.int64,*,end=None,sorted_index=False,
+-         output_idx=None,output_idx_offset=None,idx_oob_fill_value=-1,return_value=True):
++         output_idx=None,output_idx_offset=None,idx_oob_fill_value=-1,return_value=True,inplace=False):
+     width=input.shape[-1]
+     if topk<0:raise ValueError('topk must be nonnegative')
+     if end is None:
+@@ -11,7 +11,10 @@
+     else:
+         lengths=end.long().reshape(input.shape[:-1]).clamp(0,width)
+     column=torch.arange(width,device=input.device)
+-    values=input.masked_fill(column>=lengths.unsqueeze(-1),-torch.inf)
++    # Only callers that own and consume their score scratch may opt into mutation.
++    mask=column>=lengths.unsqueeze(-1)
++    values=input.masked_fill_(mask,-torch.inf) if inplace else input.masked_fill(mask,-torch.inf)
++    del mask
+     count=min(topk,width)
+     data,index=torch.topk(values,count,dim=-1,sorted=sorted)
+     valid=index<lengths.unsqueeze(-1)
+diff --git a/deepinfer/npu_ops/w8a8.py b/deepinfer/npu_ops/w8a8.py
+--- a/deepinfer/npu_ops/w8a8.py
++++ b/deepinfer/npu_ops/w8a8.py
+@@ -8,6 +8,7 @@
+ 
+ import torch
+ from torch import nn
++from collections import OrderedDict
+ 
+ 
+ class W8A8Linear(nn.Module):
+@@ -42,21 +43,66 @@
+             raise ValueError("Expected BF16 NPU activations with the projection input width")
+         if x.numel() == 0:
+             return x.new_empty((*x.shape[:-1], self.out_features))
++        codes, token_scale = torch_npu.npu_dynamic_quant(x.reshape(-1, self.in_features), dst_type=torch.int8)
++        return self.quantized(codes, token_scale, x.shape)
++
++    def quantized(self, codes, token_scale, input_shape):
++        import torch_npu
+         if self._resident is not None:
+             weight, scale = self._resident
+-            if weight.device != x.device:
++            if weight.device != codes.device:
+                 raise ValueError("A resident projection cannot change NPU devices")
++        elif self.offload:
++            cache = getattr(self, 'weight_cache', None)
++            if cache is None:
++                weight, scale = self.weight.to(codes.device), self.scale.to(codes.device)
++            else:
++                weight, scale = cache.get(self.weight, self.scale, codes.device)
+         else:
+-            if self.offload:
+-                weight = self.weight.to(x.device)
+-                scale = self.scale.to(x.device)
+-            else:
+-                self.materialize(x.device)
+-                weight, scale = self._resident
+-        codes, token_scale = torch_npu.npu_dynamic_quant(x.reshape(-1, self.in_features), dst_type=torch.int8)
++            self.materialize(codes.device)
++            weight, scale = self._resident
+         output = torch_npu.npu_quant_matmul(codes, weight, scale, pertoken_scale=token_scale,
+                                           output_dtype=torch.bfloat16)
+-        return output.reshape(*x.shape[:-1], self.out_features)
++        return output.reshape(*input_shape[:-1], self.out_features)
++
++
++class WeightCache:
++    """Task-local bounded LRU of immutable INT8 weights and FP32 scales on one NPU."""
++    def __init__(self, budget_bytes, device):
++        if budget_bytes < 0:
++            raise ValueError('Cache budget must be nonnegative')
++        self.budget_bytes = budget_bytes
++        self.device = torch.device(device)
++        self.entries = OrderedDict()
++        self.used_bytes = self.hits = self.misses = self.h2d_bytes = self.evictions = 0
++
++    def get(self, weight, scale, device):
++        if torch.device(device) != self.device or weight.device.type != 'cpu' or scale.device.type != 'cpu':
++            raise ValueError('Cache device/storage mismatch')
++        key = (id(weight), id(scale))
++        if key in self.entries:
++            self.hits += 1
++            host_weight, host_scale, device_weight, device_scale, size = self.entries.pop(key)
++            assert host_weight is weight and host_scale is scale
++            self.entries[key] = (host_weight, host_scale, device_weight, device_scale, size)
++            return device_weight, device_scale
++        self.misses += 1
++        size = weight.numel() * weight.element_size() + scale.numel() * scale.element_size()
++        while self.entries and self.used_bytes + size > self.budget_bytes:
++            *_, removed_size = self.entries.popitem(last=False)[1]
++            self.used_bytes -= removed_size
++            self.evictions += 1
++        device_weight, device_scale = weight.to(device), scale.to(device)
++        self.h2d_bytes += size
++        if size <= self.budget_bytes:
++            self.entries[key] = (weight, scale, device_weight, device_scale, size)
++            self.used_bytes += size
++        assert self.used_bytes <= self.budget_bytes
++        return device_weight, device_scale
++
++    def stats(self):
++        return {name: getattr(self, name) for name in ('budget_bytes', 'used_bytes', 'hits', 'misses', 'h2d_bytes', 'evictions')}
++
+ 
+ 
+ class W8A8Expert(nn.Module):
+@@ -73,8 +119,11 @@
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         import torch_npu
+ 
+-        gate = self.w1(x).clamp(max=self.swiglu_limit)
+-        up = self.w3(x).clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
++        if x.numel() == 0:
++            return x.new_empty(x.shape)
++        codes, token_scale = torch_npu.npu_dynamic_quant(x.reshape(-1, self.w1.in_features), dst_type=torch.int8)
++        gate = self.w1.quantized(codes, token_scale, x.shape).clamp(max=self.swiglu_limit)
++        up = self.w3.quantized(codes, token_scale, x.shape).clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
+         hidden = torch_npu.npu_swiglu(torch.cat((gate, up), dim=-1))
+         return self.w2(hidden)
+ 
+@@ -117,9 +166,9 @@
+         if not valid.item():
+             raise ValueError("Invalid expert indices, scores, dtypes or devices on an EP rank")
+         count = torch.tensor([x.shape[0]], device=x.device, dtype=torch.int32)
+-        counts = [torch.empty_like(count) for _ in range(self.world)]
+-        dist.all_gather(counts, count, group=self.group)
+-        counts_cpu = [int(value.item()) for value in counts]
++        counts = torch.empty(self.world, device=x.device, dtype=torch.int32)
++        dist.all_gather_into_tensor(counts, count, group=self.group)
++        counts_cpu = counts.cpu().tolist()
+         padded = max(counts_cpu)
+         if padded == 0:
+             return x.clone()
+@@ -129,18 +178,23 @@
+             buffer[:value.shape[0]].copy_(value)
+             buffers = [torch.empty_like(buffer) for _ in range(self.world)]
+             dist.all_gather(buffers, buffer, group=self.group)
+-            return torch.cat(buffers)
++            # Remove transport-only padding before expert computation/reduction.
++            # All ranks share counts_cpu, so the compact row order is identical.
++            return torch.cat([buffer[:count] for buffer, count in zip(buffers, counts_cpu)])
+ 
+         all_x = gather(x, 0)
+         all_indices = gather(indices, -1)
+         all_scores = gather(scores.float(), 0)
+         output = torch.zeros_like(all_x, dtype=torch.float32)
++        active_experts = set(torch.unique(all_indices).cpu().tolist())
+         for name, expert in self.experts.items():
++            if int(name) not in active_experts:
++                continue
+             token_rows, choices = torch.where(all_indices == int(name))
+             if token_rows.numel():
+                 value = expert(all_x.index_select(0, token_rows)).float()
+                 value.mul_(all_scores[token_rows, choices].unsqueeze(1))
+                 output.index_add_(0, token_rows, value)
+         dist.all_reduce(output, group=self.group)
+-        start = self.rank * padded
++        start = sum(counts_cpu[:self.rank])
+         return output[start:start + x.shape[0]].to(x.dtype)
+diff --git a/deepinfer/platform.py b/deepinfer/platform.py
+--- a/deepinfer/platform.py
++++ b/deepinfer/platform.py
+@@ -106,7 +106,7 @@
+         os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+ 
+         # Disable task queue
+-        os.environ["TASK_QUEUE_ENABLE"] = "0"
++        os.environ["TASK_QUEUE_ENABLE"] = "1"
+ 
+         # HCCL envs
+         os.environ["HCCL_BUFFSIZE"] = "16"
+diff --git a/deepinfer/worker/base.py b/deepinfer/worker/base.py
+--- a/deepinfer/worker/base.py
++++ b/deepinfer/worker/base.py
+@@ -253,6 +253,14 @@
+         available_kv_cache_memory -= state_size
+         num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
+         num_gpu_blocks = max(num_gpu_blocks, 0)
++        if self.model_config.model_cfg.gpt.get("modelslim_w8a8", False):
++            from deepinfer.npu_ops.memory910b import kv_block_budget
++            bound = kv_block_budget(self.model_config.runtime_max_model_len,
++                                    self.model_config.max_num_seqs, self.cache_config.block_size)
++            logger.info(f"910B KV block bound: available={num_gpu_blocks}, selected={min(num_gpu_blocks, bound)}, "
++                        f"runtime_max_model_len={self.model_config.runtime_max_model_len}, "
++                        f"live_sequences={self.model_config.max_num_seqs}, immutable_prefix_entries=1")
++            num_gpu_blocks = min(num_gpu_blocks, bound)
+ 
+         end_time = time.time()
+         GiB_bytes = 1 << 30
+diff --git a/deepinfer/worker/worker.py b/deepinfer/worker/worker.py
+--- a/deepinfer/worker/worker.py
++++ b/deepinfer/worker/worker.py
+@@ -8,6 +8,9 @@
+ from collections.abc import Callable
+ from dataclasses import dataclass
+ from typing import NamedTuple
++
++import json
++import os
+ 
+ import numpy as np
+ import torch
+@@ -110,6 +113,10 @@
+         Returns:
+             Request outputs (serialized as uint64 pointers) ready to send back.
+         """
++        trace_weights = self.model_config.model_cfg.gpt.get("modelslim_w8a8", False) and os.getenv("DEEPINFER_910B_TRANSFER_STATS") == "1"
++        if trace_weights:
++            from deepinfer.npu_ops.moe910b import transfer_stats
++            transfer_before = transfer_stats(self.device)
+         # 1. forward curr step
+         total_q = None
+         correction: _SeqlensCorrection | None = None
+@@ -186,6 +193,14 @@
+         else:
+             self.prev_step_state = curr_step_state
+ 
++        if trace_weights:
++            after = transfer_stats(self.device)
++            logger.info("910B_TRANSFER_STATS " + json.dumps({"rank": self.local_rank, "prompt": is_prompt,
++                "placeholder": is_placeholder, "before": transfer_before, "after": after,
++                "h2d_weight_bytes": after.get("h2d_bytes", 0) - transfer_before.get("h2d_bytes", 0),
++                "torch_allocated_bytes": torch.cuda.memory_allocated(),
++                "torch_reserved_bytes": torch.cuda.memory_reserved(),
++                "torch_peak_allocated_bytes": torch.cuda.max_memory_allocated()}, sort_keys=True))
+         return request_outputs
+ 
+     def _correct_seqlens_qk(
