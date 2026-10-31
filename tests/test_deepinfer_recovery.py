@@ -4,12 +4,15 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deploy_recovery import deepinfer as recovery
 from deploy_recovery.deepinfer import npu_observation, prepare_previous, sample_window, step
 from test_recovery import snapshot
+
+TRUST_FIXED = recovery.target_fingerprint({'container_id': 'fixed'})
 
 
 class ObserverServiceTests(unittest.TestCase):
@@ -19,6 +22,11 @@ class ObserverServiceTests(unittest.TestCase):
         self.assertEqual(unit['Service']['Restart'], 'always')
         self.assertEqual(unit['Service']['RestartSec'], '60')
         self.assertIn('-m deploy_recovery.deepinfer', unit['Service']['ExecStart'])
+        self.assertNotIn('docker.service', unit['Unit'].get('Requires', '').split())
+        self.assertNotIn('docker.service', unit['Unit'].get('Wants', '').split())
+        self.assertIn('docker.service', unit['Unit']['After'].split())
+        self.assertIn('docker.service', unit['Unit']['PartOf'].split())
+        self.assertIn('docker.service', unit['Install']['WantedBy'].split())
 
 
 class AdaptiveIntervalTests(unittest.TestCase):
@@ -115,16 +123,22 @@ class ControlTests(unittest.TestCase):
         self.saved, self.starts = [], []
 
     def check(self, previous, *, observe=lambda c: 'IDLE', inspect=None, events=None):
-        return step({'container_id': 'fixed'}, previous, inspect=inspect or (lambda c: copy.deepcopy(self.container)),
-                    events=events or (lambda c, a, b: self.changes), sample=observe,
-                    start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
-                    clock=lambda: self.now, wall=lambda: 100000 + self.now)
+        def run():
+            return step({'container_id': 'fixed'}, previous, inspect=inspect or (lambda c: copy.deepcopy(self.container)),
+                        events=events or (lambda c, a, b: self.changes), sample=observe,
+                        start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
+                        clock=lambda: self.now, wall=lambda: 100000 + self.now)
+        if isinstance(recovery.control_history_complete, Mock):
+            return run()
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            return run()
 
     def stop_target(self):
         self.container.update(Running=False, Status='exited', ExitCode=137, FinishedAt='failure')
 
     def test_recent_idle_window_survives_restart_with_verified_history(self):
-        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
                     'started': 'start', 'finished': 'failure', 'event_cursor': 100120, 'last_check': 120,
                     'idle_since': 0, 'samples': [{'time': 0, 'value': 'IDLE'},
@@ -139,8 +153,9 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(len(state['samples']), 3)
         self.assertFalse(self.starts)
 
-    def test_restart_requires_control_history_even_after_a_short_gap(self):
-        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
+    def test_restart_discards_window_when_control_history_is_incomplete(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
                     'started': 'start', 'event_cursor': 100120, 'last_check': 120,
                     'idle_since': 0, 'samples': [{'time': 0, 'value': 'IDLE'},
@@ -150,11 +165,13 @@ class ControlTests(unittest.TestCase):
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
             state = self.check(resumed)
         history.assert_called_once()
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 180)
         self.assertFalse(self.starts)
 
     def test_missing_event_cursor_cannot_reuse_an_idle_window_after_restart(self):
-        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 3,
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
                     'started': 'start', 'finished': 'failure', 'last_check': 7200, 'idle_since': 0,
                     'samples': [{'time': i * 120, 'value': 'IDLE'} for i in range(61)]}
@@ -163,15 +180,100 @@ class ControlTests(unittest.TestCase):
         self.now = 7320
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
             state = self.check(resumed)
-        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(state['armed'])
         self.assertEqual(state['samples'], [])
         self.assertFalse(self.starts)
         self.now += 1200
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
             state = self.check(state)
-        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
         self.assertFalse(self.starts)
 
+    def test_corrupt_early_idle_since_cannot_shorten_the_sampled_window(self):
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 4,
+                    'trusted_fingerprint': TRUST_FIXED,
+                    'state': 'WAITING_IDLE', 'observation': 'IDLE', 'armed': True, 'manual_hold': False,
+                    'started': 'start', 'finished': 'failure', 'event_cursor': 107080,
+                    'last_check': 7080, 'idle_since': 0,
+                    'samples': [{'time': i * 120, 'value': 'IDLE'} for i in range(1, 60)]}
+        resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
+        self.stop_target()
+        self.now = 7200
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(resumed)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertFalse(self.starts)
+        self.now = 7320
+        state = self.check(state)
+        self.assertEqual(state['state'], 'START_REQUESTED')
+        self.assertEqual(len(self.starts), 1)
+
+    def test_incomplete_history_restarts_the_full_window_without_disarming(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda _: 'BUSY')
+        self.now = 1260
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
+            state = self.check(state)
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertTrue(state['armed'])
+        self.assertEqual(state['idle_since'], 1260)
+        for i in range(1, 61):
+            self.now = 1260 + i * 120
+            with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+                state = self.check(state)
+            self.assertEqual(len(self.starts), int(i == 60))
+
+    def test_history_is_checked_at_the_exact_two_minute_interval(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state)
+        self.now = 180
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
+            state = self.check(state)
+        history.assert_called_once()
+        self.assertEqual(state['idle_since'], 180)
+        self.assertEqual(len(state['samples']), 1)
+        self.assertFalse(self.starts)
+
+    def test_history_rebase_requires_an_unchanged_stopped_target(self):
+        state = self.check({})
+        self.stop_target()
+        self.now = 60
+        state = self.check(state, observe=lambda _: 'BUSY')
+        self.now = 1260
+        changed = dict(self.container, StartedAt='other-run', FinishedAt='other-exit')
+        targets = iter([copy.deepcopy(self.container), changed])
+        def unexpected(_):
+            self.fail('changed target must not be sampled')
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
+            out = self.check(state, inspect=lambda _: next(targets), observe=unexpected)
+        self.assertEqual(out['state'], 'CONTROL_UNKNOWN')
+        self.assertEqual(out['samples'], [])
+        self.assertFalse(self.starts)
+
+    def test_changed_config_never_inherits_stopped_target_trust(self):
+        old = {'container_id': 'fixed', 'container_name': 'one', 'image_id': 'image',
+               'spec_sha256': 'old'}
+        previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 4,
+                    'trusted_fingerprint': recovery.target_fingerprint(old), 'state': 'WAITING_IDLE',
+                    'armed': True, 'manual_hold': False, 'started': 'start', 'finished': 'failure',
+                    'event_cursor': 100000, 'last_check': 0, 'samples': [], 'idle_since': None}
+        self.stop_target()
+        for key, new_value in [('container_name', 'two'), ('image_id', 'other'), ('spec_sha256', 'new')]:
+            with self.subTest(key=key):
+                config = {**old, key: new_value}
+                resumed = prepare_previous(previous, config, 'same', 99900)
+                self.assertFalse(resumed['armed'])
+                self.assertIsNone(resumed['trusted_fingerprint'])
+                state = step(config, resumed, inspect=lambda _: copy.deepcopy(self.container),
+                             events=lambda *_: [], sample=lambda _: self.fail('untrusted target sampled'),
+                             start=self.starts.append, persist=lambda _: None, clock=lambda: 60, wall=lambda: 100060)
+                self.assertEqual(state['state'], 'MANUAL_HOLD')
+                self.assertFalse(self.starts)
     def test_running_pinned_target_can_observe_from_a_new_cursor(self):
         previous = {'armed': True, 'manual_hold': False, 'started': 'start'}
         state = self.check(previous)
@@ -181,7 +283,8 @@ class ControlTests(unittest.TestCase):
         self.assertFalse(self.starts)
 
     def test_restart_after_missing_an_idle_check_resets_the_window(self):
-        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
                     'started':'start', 'event_cursor':100120, 'last_check':120, 'idle_since':0,
                     'samples':[{'time':0,'value':'IDLE'},{'time':120,'value':'IDLE'}]}
@@ -210,7 +313,7 @@ class ControlTests(unittest.TestCase):
 
     def test_repeated_verified_observer_restarts_eventually_allow_idle_recovery(self):
         state = self.check({})
-        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        state.update(boot_id='same', policy_version=4, manual_hold=False)
         self.stop_target()
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
             for i in range(60):
@@ -223,7 +326,7 @@ class ControlTests(unittest.TestCase):
 
     def test_operator_stop_during_observer_restart_restarts_idle_window(self):
         state = self.check({})
-        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        state.update(boot_id='same', policy_version=4, manual_hold=False)
         self.stop_target(); self.now = 60
         state = self.check(state)
         resumed = prepare_previous(state, {'container_id': 'fixed'}, 'same', 99900)
@@ -237,7 +340,7 @@ class ControlTests(unittest.TestCase):
 
     def test_restart_history_check_survives_transient_inspection_failure(self):
         state = self.check({})
-        state.update(boot_id='same', policy_version=2, manual_hold=False)
+        state.update(boot_id='same', policy_version=4, manual_hold=False)
         self.stop_target(); self.now = 60
         state = self.check(state)
         resumed = prepare_previous(state, {'container_id': 'fixed'}, 'same', 99900)
@@ -252,10 +355,12 @@ class ControlTests(unittest.TestCase):
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
             state = self.check(state)
         history.assert_called_once()
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 180)
 
     def test_invalid_persisted_idle_samples_are_not_reused(self):
-        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
                     'last_check':120, 'idle_since':0}
         for samples in ([], [{'time':120,'value':'IDLE'},{'time':120,'value':'IDLE'}],
@@ -266,9 +371,10 @@ class ControlTests(unittest.TestCase):
                 self.assertIsNone(resumed['idle_since'])
 
     def test_restart_keeps_a_sample_taken_after_the_check_began(self):
-        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':2,
+        previous = {'version':1, 'target_id':'fixed', 'boot_id':'same', 'policy_version':4,
+                    'trusted_fingerprint': TRUST_FIXED,
                     'state':'WAITING_IDLE', 'observation':'IDLE', 'armed':True, 'manual_hold':False,
-                    'last_check':120, 'idle_since':2,
+                    'event_cursor':100120, 'last_check':120, 'idle_since':2,
                     'samples':[{'time':2,'value':'IDLE'},{'time':125,'value':'IDLE'}]}
         resumed = prepare_previous(previous, {'container_id':'fixed'}, 'same', 99900)
         self.assertEqual(resumed['samples'], previous['samples'])
@@ -311,10 +417,10 @@ class ControlTests(unittest.TestCase):
         self.changes = [{'action': 'stop'}]
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
             state = self.check(state)
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
         self.assertFalse(self.starts)
 
-    def test_planned_busy_wait_requires_complete_control_history(self):
+    def test_planned_busy_wait_restarts_after_incomplete_control_history(self):
         state = self.check({})
         self.stop_target()
         self.now = 60
@@ -323,10 +429,11 @@ class ControlTests(unittest.TestCase):
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
             state = self.check(state)
         history.assert_called_once()
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 1260)
         self.assertFalse(self.starts)
 
-    def test_idle_wait_with_jitter_rejects_incomplete_history(self):
+    def test_idle_wait_with_jitter_restarts_incomplete_history(self):
         state = self.check({})
         self.stop_target()
         self.now = 60
@@ -335,7 +442,8 @@ class ControlTests(unittest.TestCase):
         with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False) as history:
             state = self.check(state)
         history.assert_called_once()
-        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertEqual(state['state'], 'WAITING_IDLE')
+        self.assertEqual(state['idle_since'], 181)
         self.assertFalse(self.starts)
 
     def test_idle_wait_with_jitter_preserves_window_when_history_is_complete(self):
@@ -413,26 +521,25 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(recovery.next_interval(state), 120)
         self.assertFalse(self.starts)
 
-    def test_old_manual_hold_is_rearmed_only_with_verified_history(self):
+    def test_old_manual_hold_requires_explicit_rearm(self):
         self.stop_target()
         previous = {'version': 1, 'target_id': 'fixed', 'boot_id': 'same', 'policy_version': 2,
                     'state': 'MANUAL_HOLD', 'armed': False, 'manual_hold': True,
                     'started': 'start', 'event_cursor': 100000, 'last_check': 0}
         resumed = prepare_previous(previous, {'container_id': 'fixed'}, 'same', 99900)
-        self.assertTrue(resumed['legacy_hold_pending'])
         self.now = 60
-        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=False):
-            unknown = self.check(resumed)
-        self.assertEqual(unknown['state'], 'CONTROL_UNKNOWN')
-        self.assertFalse(unknown['armed'])
-        self.assertTrue(unknown['legacy_hold_pending'])
-        self.assertEqual(unknown['event_cursor'], 100000)
-        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
-            state = self.check(unknown)
+        state = self.check(resumed)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(state['armed'])
+        result = recovery.rearm_stopped({'container_id': 'fixed'}, resumed, 'same',
+                                        inspect=lambda _: copy.deepcopy(self.container), events=lambda *_: [],
+                                        clock=lambda: 60, wall=lambda: 100060)
+        self.now = 120
+        state = self.check(result)
         self.assertEqual(state['state'], 'WAITING_IDLE')
         self.assertTrue(state['armed'])
         self.assertFalse(state['manual_hold'])
-        self.assertEqual(state['idle_since'], 60)
+        self.assertEqual(state['idle_since'], 120)
         self.assertFalse(self.starts)
 
     def test_old_hold_migration_rejects_destroy_and_missing_cursor(self):
@@ -446,11 +553,10 @@ class ControlTests(unittest.TestCase):
                 self.changes = [{'action': 'destroy'}] if change == 'destroy' else []
                 if change == 'missing_cursor':
                     del item['event_cursor']
-                state = prepare_previous(item, {'container_id': 'fixed'}, 'same', 99900)
-                with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
-                    state = self.check(state)
-                self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
-                self.assertFalse(state['armed'])
+                with self.assertRaises(ValueError):
+                    recovery.rearm_stopped({'container_id': 'fixed'}, item, 'same',
+                        inspect=lambda _: copy.deepcopy(self.container), events=lambda *_: self.changes,
+                        clock=lambda: 60, wall=lambda: 100060)
                 self.assertFalse(self.starts)
 
     def test_old_idle_window_without_finish_time_is_not_reused(self):
@@ -514,10 +620,10 @@ class ControlTests(unittest.TestCase):
         self.setUp(); self.stop_target()
         self.assertEqual(self.window({})['state'], 'MANUAL_HOLD')
 
-    def test_unknown_control_and_observer_gap_disarm(self):
+    def test_observer_gap_resets_and_unknown_target_never_starts(self):
         state = self.check({}); self.stop_target()
         self.now = 180
-        self.assertEqual(self.check(state)['state'], 'MANUAL_HOLD')
+        self.assertEqual(self.check(state)['state'], 'WAITING_IDLE')
         def broken(_):
             raise ValueError('TARGET_CHANGED')
         state = self.check(state, inspect=broken)
@@ -559,27 +665,62 @@ class ControlTests(unittest.TestCase):
     def test_running_unrelated_container_blocks_an_idle_npu(self):
         config = {'npu_smi': '/usr/bin/npu-smi', 'docker': '/usr/bin/docker',
                   'container_id': 'a' * 64}
-        def command(args, *unused, **kwargs):
-            return snapshot() if args[0] == config['npu_smi'] else 'b' * 64 + '\n'
-        with patch('deploy_recovery.deepinfer.command', side_effect=command):
+        with patch('deploy_recovery.deepinfer.command', return_value=snapshot()), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value='b' * 64 + '\n'):
             observe = getattr(recovery, 'machine_observation', npu_observation)
             self.assertEqual(observe(config), 'BUSY')
+
+    def test_inactive_or_socket_activated_docker_is_never_contacted(self):
+        for service, socket in [('inactive', 'inactive'), ('active', 'active')]:
+            with self.subTest(service=service, socket=socket):
+                calls = []
+                def run(args, **kwargs):
+                    calls.append(args)
+                    if args[0] != 'systemctl':
+                        self.fail('Docker CLI must not run for this service state')
+                    name = args[2]
+                    value = service if name == 'docker.service' else socket
+                    return SimpleNamespace(returncode=0, stdout=f'LoadState=loaded\nActiveState={value}\n')
+                with patch('deploy_recovery.deepinfer.subprocess.run', side_effect=run):
+                    state = step({'container_id': 'fixed', 'docker': '/usr/bin/docker'}, {},
+                                 persist=lambda _: None, start=self.starts.append,
+                                 clock=lambda: 1, wall=lambda: 100001)
+                self.assertEqual(state['state'], 'CONTROL_UNKNOWN')
+                self.assertTrue(calls)
+                self.assertTrue(all(args[0] == 'systemctl' for args in calls))
+                self.assertFalse(self.starts)
+
+    def test_active_docker_with_inactive_or_absent_socket_can_be_queried(self):
+        for load, active in [('loaded', 'inactive'), ('not-found', 'inactive')]:
+            with self.subTest(load=load, active=active):
+                calls = []
+                def run(args, **kwargs):
+                    calls.append(args)
+                    if args[0] != 'systemctl':
+                        return SimpleNamespace(returncode=0, stdout='ok')
+                    text = ('LoadState=loaded\nActiveState=active\n' if args[2] == 'docker.service'
+                            else f'LoadState={load}\nActiveState={active}\n')
+                    return SimpleNamespace(returncode=0, stdout=text)
+                with patch('deploy_recovery.deepinfer.subprocess.run', side_effect=run):
+                    out = recovery.docker_command({'docker': '/usr/bin/docker'}, ['ps'])
+                self.assertEqual(out, 'ok')
+                self.assertEqual(calls[-1], ['/usr/bin/docker', 'ps'])
 
     def test_only_pinned_infrastructure_is_exempt(self):
         config = {'npu_smi': '/usr/bin/npu-smi', 'docker': '/usr/bin/docker',
                   'container_id': 'a' * 64,
                   'non_workload_containers': [{'container_id': 'b' * 64, 'image_id': 'sha256:' + 'c' * 64}]}
-        def command(args, *unused, **kwargs):
-            if args[0] == config['npu_smi']:
-                return snapshot()
-            if args[1] == 'ps':
+        def docker_command(_, args, *unused, **kwargs):
+            if args[0] == 'ps':
                 return 'b' * 64 + '\n'
             return 'sha256:' + 'c' * 64
-        with patch('deploy_recovery.deepinfer.command', side_effect=command):
+        with patch('deploy_recovery.deepinfer.command', return_value=snapshot()), \
+             patch('deploy_recovery.deepinfer.docker_command', side_effect=docker_command):
             self.assertEqual(recovery.machine_observation(config), 'IDLE')
             config['non_workload_containers'][0]['image_id'] = 'sha256:' + 'd' * 64
             self.assertEqual(recovery.machine_observation(config), 'BUSY')
-        with patch('deploy_recovery.deepinfer.command', side_effect=[snapshot(), RuntimeError('docker unavailable')]):
+        with patch('deploy_recovery.deepinfer.command', return_value=snapshot()), \
+             patch('deploy_recovery.deepinfer.docker_command', side_effect=RuntimeError('docker unavailable')):
             self.assertEqual(recovery.machine_observation(config), 'UNKNOWN')
 
     def test_infrastructure_config_rejects_unpinned_or_duplicate_entries(self):
@@ -606,12 +747,23 @@ class ControlTests(unittest.TestCase):
         config = {'docker': '/usr/bin/docker'}
         previous = {'last_check': 100}
         active = 'ActiveState=active\nExecMainStartTimestampMonotonic=20000000\n'
-        with patch('deploy_recovery.deepinfer.command', side_effect=[active, '1\n' * 255]):
+        with patch('deploy_recovery.deepinfer.command', side_effect=[active, active]), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value='1\n' * 255):
             self.assertTrue(recovery.control_history_complete(config, previous, 100000, 100300))
-        with patch('deploy_recovery.deepinfer.command', side_effect=[active, '1\n' * 256]):
+        with patch('deploy_recovery.deepinfer.command', return_value=active), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value='1\n' * 256):
             self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
         with patch('deploy_recovery.deepinfer.command', return_value=
                    'ActiveState=active\nExecMainStartTimestampMonotonic=101000000\n'):
+            self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
+
+    def test_daemon_restart_during_event_query_invalidates_history(self):
+        config = {'docker': '/usr/bin/docker'}
+        previous = {'last_check': 100}
+        before = 'ActiveState=active\nExecMainStartTimestampMonotonic=20000000\n'
+        after = 'ActiveState=active\nExecMainStartTimestampMonotonic=30000000\n'
+        with patch('deploy_recovery.deepinfer.command', side_effect=[before, after]), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value=''):
             self.assertFalse(recovery.control_history_complete(config, previous, 100000, 100300))
 
     def test_verified_gap_after_operator_stop_starts_fresh_idle_window(self):
@@ -646,7 +798,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(state['idle_since'], 360)
         self.assertFalse(self.starts)
         self.container['FinishedAt'] = 'failure'
-        for changed in ({**previous, 'manual_hold': True}, {**previous, 'target_id': 'other'},
+        for changed in ({**previous, 'manual_hold': None}, {**previous, 'target_id': 'other'},
                         {**previous, 'boot_id': 'different'}):
             with self.subTest(changed=changed):
                 with self.assertRaises(ValueError):
@@ -715,6 +867,8 @@ class BootRecoveryTests(unittest.TestCase):
         self.now = 0
         self.prior = {'version': 1, 'target_id': 'fixed', 'boot_id': 'old',
                       'state': 'RUNNING', 'armed': True, 'manual_hold': False,
+                      'policy_version': 4, 'trusted_fingerprint': TRUST_FIXED,
+                      'event_cursor': self.boot_epoch - 300, 'last_check': 120,
                       'started': 'old-start', 'samples': [{'time': 123, 'value': 'IDLE'}]}
         self.container = {'Running': False, 'Status': 'exited', 'ExitCode': 0,
                           'StartedAt': 'old-start', 'FinishedAt': self.finished(-120)}
@@ -729,10 +883,15 @@ class BootRecoveryTests(unittest.TestCase):
                                 self.config, boot_id, self.boot_epoch)
 
     def check(self, previous, *, inspect=None, events=None, sample=lambda c: 'IDLE'):
-        return step(self.config, previous, inspect=inspect or (lambda c: copy.deepcopy(self.container)),
-                    events=events or (lambda c, a, b: self.changes), sample=sample,
-                    start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
-                    clock=lambda: self.now, wall=lambda: self.boot_epoch + 10 + self.now)
+        def run():
+            return step(self.config, previous, inspect=inspect or (lambda c: copy.deepcopy(self.container)),
+                        events=events or (lambda c, a, b: self.changes), sample=sample,
+                        start=self.starts.append, persist=lambda s: self.saved.append(copy.deepcopy(s)),
+                        clock=lambda: self.now, wall=lambda: self.boot_epoch + 10 + self.now)
+        if isinstance(recovery.control_history_complete, Mock):
+            return run()
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            return run()
 
     def test_rebooted_clean_exit_requires_fresh_two_hour_window(self):
         state = self.prepare()
@@ -745,6 +904,37 @@ class BootRecoveryTests(unittest.TestCase):
         self.assertEqual(state['state'], 'START_REQUESTED')
         self.assertEqual(self.saved[-2]['state'], 'START_PENDING')
 
+    def test_unclaimed_stopped_container_stays_unclaimed_after_reboot(self):
+        initial = prepare_previous({}, self.config, 'old', self.boot_epoch - 1000)
+        first = self.check(initial)
+        self.assertEqual(first['state'], 'MANUAL_HOLD')
+        self.assertFalse(first['armed'])
+        state = self.prepare(first)
+        for i in range(121):
+            self.now = i * 60
+            state = self.check(state)
+        self.assertFalse(state['armed'])
+        self.assertFalse(self.starts)
+
+    def test_incomplete_trusted_state_does_not_recover_after_reboot(self):
+        for missing in ('armed', 'manual_hold', 'state', 'event_cursor', 'last_check'):
+            with self.subTest(missing=missing):
+                prior = dict(self.prior)
+                del prior[missing]
+                state = self.check(self.prepare(prior))
+                self.assertFalse(state['armed'])
+                self.assertFalse(self.starts)
+
+    def test_legacy_unverified_stopped_armed_state_is_not_grandfathered(self):
+        prior = {**self.prior, 'boot_id': 'new', 'policy_version': 3, 'state': 'WAITING_IDLE',
+                 'armed': True, 'manual_hold': False, 'event_cursor': self.boot_epoch,
+                 'last_check': 0, 'started': self.container['StartedAt'],
+                 'finished': self.container['FinishedAt'], 'samples': [], 'idle_since': None}
+        with patch('deploy_recovery.deepinfer.control_history_complete', return_value=True):
+            state = self.check(self.prepare(prior, boot_id='new'))
+        self.assertFalse(state['armed'])
+        self.assertFalse(self.starts)
+
     def test_boot_preflight_reads_control_events_from_current_boot(self):
         ranges = []
         def events(_, since, until):
@@ -754,13 +944,12 @@ class BootRecoveryTests(unittest.TestCase):
         self.assertEqual(state['state'], 'WAITING_IDLE')
         self.assertEqual(ranges[0][0], self.boot_epoch)
 
-    def test_legacy_unarmed_post_reboot_state_can_start_a_fresh_window(self):
-        prior = {**self.prior, 'boot_id': 'new', 'state': 'MANUAL_HOLD', 'armed': False}
+    def test_unarmed_same_boot_state_is_not_automatically_claimed(self):
+        prior = {**self.prior, 'boot_id': 'new', 'state': 'MANUAL_HOLD', 'armed': False,
+                 'trusted_fingerprint': None}
         state = self.check(self.prepare(prior))
-        self.assertEqual(state['state'], 'WAITING_IDLE')
-        self.assertTrue(state['armed'])
-        self.assertTrue(state['boot_recovery'])
-        self.assertEqual(state['idle_since'], 0)
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(state['armed'])
         self.assertFalse(self.starts)
 
     def test_host_reboot_starts_new_window_after_previous_manual_hold(self):
@@ -771,12 +960,12 @@ class BootRecoveryTests(unittest.TestCase):
         self.assertTrue(state['boot_recovery'])
         self.assertFalse(self.starts)
 
-    def test_reboot_discards_unfinished_legacy_migration(self):
+    def test_reboot_does_not_trust_unfinished_legacy_migration(self):
         prior = {**self.prior, 'policy_version': 3, 'state': 'CONTROL_UNKNOWN',
                  'manual_hold': True, 'armed': False, 'legacy_hold_pending': True}
         state = self.check(self.prepare(prior))
-        self.assertEqual(state['state'], 'WAITING_IDLE')
-        self.assertTrue(state['armed'])
+        self.assertEqual(state['state'], 'MANUAL_HOLD')
+        self.assertFalse(state['armed'])
         self.assertFalse(state.get('legacy_hold_pending', False))
         self.assertFalse(self.starts)
 

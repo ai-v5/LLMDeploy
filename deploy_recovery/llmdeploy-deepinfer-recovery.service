@@ -1,7 +1,7 @@
 [Unit]
 Description=Recover the pinned DeepInfer container after sampled NPU idleness
 After=docker.service
-Requires=docker.service
+PartOf=docker.service
 
 [Service]
 Type=simple
@@ -12,4 +12,4 @@ RestartSec=60
 TimeoutStopSec=25
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target docker.service

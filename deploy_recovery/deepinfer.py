@@ -14,7 +14,8 @@ INTERVAL = 60
 IDLE_INTERVAL = 120
 BUSY_INTERVAL = 1200
 WINDOW = 7200
-POLICY_VERSION = 3
+POLICY_VERSION = 4
+MAX_SAMPLES = WINDOW // INTERVAL + 1
 
 
 def next_interval(state):
@@ -32,20 +33,16 @@ def sample_window(previous, now, observation):
     if observation != 'IDLE':
         return {'samples': [], 'idle_since': None, 'failure_ratio': None}, False
     samples = list(previous.get('samples', []))
-    since = previous.get('idle_since')
     if samples:
         gap = now - samples[-1]['time']
         if gap <= 0 or gap >= IDLE_INTERVAL * 2 or any(s['value'] != 'IDLE' for s in samples):
-            samples, since = [], None
+            samples = []
     samples.append({'time': now, 'value': observation})
-    if since is None and observation == 'IDLE':
-        since = now
-    # Keep a bounded count of successful samples even when a verified observer
-    # restart makes a few checks late. A busy, unknown, or too-large gap above
-    # still clears the entire window.
-    samples = samples[-(WINDOW // IDLE_INTERVAL + 1):]
-    ready = (since is not None and now - since >= WINDOW
-             and len(samples) >= WINDOW // IDLE_INTERVAL)
+    # Only retained samples prove the elapsed time; a corrupt or stale
+    # idle_since must not make a shorter observed window ready.
+    samples = samples[-MAX_SAMPLES:]
+    since = samples[0]['time']
+    ready = now - since >= WINDOW and len(samples) >= WINDOW // IDLE_INTERVAL
     return {'samples': samples, 'idle_since': since, 'failure_ratio': 0.0}, ready
 
 
@@ -56,8 +53,27 @@ def command(args, timeout=20):
     return result.stdout
 
 
+def docker_command(config, args, timeout=20):
+    """Do not connect to an inactive or socket-activated Docker daemon."""
+    def unit(name):
+        text = command(['systemctl', 'show', name, '-p', 'LoadState', '-p', 'ActiveState'])
+        return dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+    service, socket = unit('docker.service'), unit('docker.socket')
+    if (service.get('LoadState') != 'loaded' or service.get('ActiveState') != 'active'
+            or socket.get('LoadState') not in ('loaded', 'not-found')
+            or socket.get('ActiveState') not in ('inactive', 'failed')):
+        raise RuntimeError('DOCKER_UNAVAILABLE_OR_SOCKET_ACTIVATED')
+    return command([config['docker'], *args], timeout=timeout)
+
+
+def target_fingerprint(config):
+    fields = ('container_id', 'container_name', 'image_id', 'spec_sha256')
+    data = {key: config.get(key) for key in fields}
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def inspect_target(config):
-    rows = json.loads(command([config['docker'], 'inspect', '--type', 'container', config['container_id']]))
+    rows = json.loads(docker_command(config, ['inspect', '--type', 'container', config['container_id']]))
     if len(rows) != 1:
         raise ValueError('TARGET_CHANGED')
     row = rows[0]
@@ -70,8 +86,8 @@ def inspect_target(config):
 
 
 def docker_events(config, since, until):
-    text = command([config['docker'], 'events', '--since', str(since), '--until', str(until),
-                    '--filter', 'container=' + config['container_id'], '--format', '{{json .}}'])
+    text = docker_command(config, ['events', '--since', str(since), '--until', str(until),
+                                   '--filter', 'container=' + config['container_id'], '--format', '{{json .}}'])
     events = []
     for line in text.splitlines():
         e = json.loads(line)
@@ -111,7 +127,7 @@ def machine_observation(config):
         return observation
     try:
         allowed = {row['container_id']: row['image_id'] for row in config.get('non_workload_containers', [])}
-        running = command([config['docker'], 'ps', '--no-trunc', '--format', '{{.ID}}']).splitlines()
+        running = docker_command(config, ['ps', '--no-trunc', '--format', '{{.ID}}']).splitlines()
         for container_id in running:
             if not re.fullmatch('[0-9a-f]{64}', container_id):
                 return 'UNKNOWN'
@@ -119,8 +135,8 @@ def machine_observation(config):
                 continue
             if container_id not in allowed:
                 return 'BUSY'
-            image = command([config['docker'], 'inspect', '--type', 'container', '--format',
-                             '{{.Image}}', container_id]).strip()
+            image = docker_command(config, ['inspect', '--type', 'container', '--format',
+                                            '{{.Image}}', container_id]).strip()
             if image != allowed[container_id]:
                 return 'BUSY'
         return 'IDLE'
@@ -132,17 +148,23 @@ def control_history_complete(config, previous, cursor, until):
     """Accept an observer gap only when the Docker event history is bounded."""
     try:
         last_check = previous['last_check']
-        if not isinstance(last_check, (int, float)) or not math.isfinite(last_check):
+        if type(last_check) not in (int, float) or not math.isfinite(last_check):
             return False
-        text = command(['systemctl', 'show', 'docker.service', '-p', 'ActiveState',
-                        '-p', 'ExecMainStartTimestampMonotonic'])
-        values = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
-        started = int(values['ExecMainStartTimestampMonotonic']) / 1_000_000
-        if values['ActiveState'] != 'active' or started <= 0 or started > last_check:
+        def daemon_start():
+            text = command(['systemctl', 'show', 'docker.service', '-p', 'ActiveState',
+                            '-p', 'ExecMainStartTimestampMonotonic'])
+            values = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+            if values['ActiveState'] != 'active':
+                raise ValueError('DOCKER_NOT_ACTIVE')
+            return int(values['ExecMainStartTimestampMonotonic']) / 1_000_000
+        started = daemon_start()
+        if started <= 0 or started > last_check:
             return False
-        output = command([config['docker'], 'events', '--since', str(cursor - 1), '--until', str(until),
-                          '--format', '{{.TimeNano}}']).splitlines()
-        return len(output) < 256 and all(re.fullmatch(r'\d+', line) for line in output)
+        output = docker_command(config, ['events', '--since', str(cursor - 1), '--until', str(until),
+                                         '--format', '{{.TimeNano}}']).splitlines()
+        if len(output) >= 256 or not all(re.fullmatch(r'\d+', line) for line in output):
+            return False
+        return daemon_start() == started
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
         return False
 
@@ -152,7 +174,7 @@ def rearm_stopped(config, previous, boot_id, *, inspect=inspect_target, events=d
     """Rearm one pinned stopped target after an explicit operator repair."""
     if (not isinstance(previous, dict) or previous.get('version') != 1
             or previous.get('target_id') != config['container_id']
-            or previous.get('boot_id') != boot_id or previous.get('manual_hold') is not False):
+            or previous.get('boot_id') != boot_id or not isinstance(previous.get('manual_hold'), bool)):
         raise ValueError('REARM_REQUIRES_VERIFIED_STATE')
     state = inspect(config)
     if (state.get('Running') or state.get('Paused') or state.get('Restarting')
@@ -169,14 +191,15 @@ def rearm_stopped(config, previous, boot_id, *, inspect=inspect_target, events=d
     current.update(state='REARMED', armed=True, manual_hold=False, event_cursor=now,
                    epoch=now, last_check=clock(), samples=[], idle_since=None, failure_ratio=None,
                    boot_recovery_pending=False, boot_recovery=False, boot_finished_at=None,
-                   rearm_finished_at=state['FinishedAt'], policy_version=POLICY_VERSION)
+                   rearm_finished_at=state['FinishedAt'], policy_version=POLICY_VERSION,
+                   trusted_fingerprint=target_fingerprint(config))
     return current
 
 
 def valid_idle_window(previous):
     samples = previous.get('samples')
     since, last = previous.get('idle_since'), previous.get('last_check')
-    if (not isinstance(samples, list) or not 0 < len(samples) <= WINDOW // IDLE_INTERVAL + 1
+    if (not isinstance(samples, list) or not 0 < len(samples) <= MAX_SAMPLES
             or type(since) not in (int, float) or not math.isfinite(since)
             or type(last) not in (int, float) or not math.isfinite(last)):
         return False
@@ -197,17 +220,29 @@ def prepare_previous(previous, config, boot_id, boot_epoch):
     valid = (isinstance(previous, dict) and previous.get('version') == 1
              and previous.get('target_id') == config['container_id']
              and isinstance(previous.get('boot_id'), str)
-             and previous.get('policy_version') in (None, 2, POLICY_VERSION))
+             and previous.get('policy_version') in (None, 2, 3, POLICY_VERSION))
     current = dict(previous) if valid else {}
     new_boot = valid and current['boot_id'] != boot_id
-    if new_boot:
-        current.pop('legacy_hold_pending', None)
-    legacy_boot_hold = (valid and not new_boot and current.get('policy_version') not in (2, POLICY_VERSION)
-                        and current.get('state') == 'MANUAL_HOLD' and current.get('armed') is False)
+    cursor = current.get('event_cursor')
+    last = current.get('last_check')
+    valid_states = ('RUNNING', 'WAITING_IDLE', 'BUSY', 'CONTROL_UNKNOWN', 'MANUAL_HOLD',
+                    'REARMED', 'START_PENDING', 'START_REQUESTED', 'START_FAILED')
+    trusted = (valid and isinstance(current.get('manual_hold'), bool)
+               and isinstance(current.get('armed'), bool) and current.get('state') in valid_states
+               and type(cursor) in (int, float) and math.isfinite(cursor)
+               and type(last) in (int, float) and math.isfinite(last) and last >= 0
+               and current.get('policy_version') == POLICY_VERSION
+               and current.get('trusted_fingerprint') == target_fingerprint(config))
+    current.pop('legacy_hold_pending', None)
+    if not trusted:
+        # Legacy stopped states cannot prove that the prior watcher ever
+        # observed this exact container identity running.
+        current.update(armed=False, trusted_fingerprint=None)
     # A host reboot starts a new recovery window. Missing or corrupt state
     # must not silently claim an existing stopped container.
-    if ((new_boot and isinstance(current.get('manual_hold'), bool))
-            or (legacy_boot_hold and current.get('manual_hold') is False)):
+    can_resume = (current.get('armed') is True or
+                  (current.get('state') == 'CONTROL_UNKNOWN' and current.get('boot_recovery_pending') is True))
+    if new_boot and trusted and can_resume:
         current.update(boot_recovery_pending=True, boot_recovery=False, boot_finished_at=None,
                        boot_epoch=boot_epoch, event_cursor=boot_epoch, armed=False, manual_hold=False)
         current.pop('last_check', None)
@@ -215,12 +250,7 @@ def prepare_previous(previous, config, boot_id, boot_epoch):
         current.update(boot_recovery_pending=False, boot_recovery=False, boot_finished_at=None,
                        event_cursor=boot_epoch, armed=False)
         current.pop('last_check', None)
-    same_policy_boot = valid and not new_boot and current.get('policy_version') in (2, POLICY_VERSION)
-    if (same_policy_boot and current.get('policy_version') == 2
-            and current.get('state') == 'MANUAL_HOLD' and current.get('manual_hold') is True):
-        # Version 2 held observed stop/kill events. Only rearm that known
-        # legacy state after checking the pinned target and complete history.
-        current['legacy_hold_pending'] = True
+    same_policy_boot = valid and not new_boot and trusted
     preserve_idle = (same_policy_boot and current.get('state') == 'WAITING_IDLE'
                      and current.get('observation') == 'IDLE' and current.get('armed') is True
                      and current.get('manual_hold') is False and valid_idle_window(current))
@@ -240,7 +270,7 @@ def restart_delay(previous, config, boot_id, now):
     """Keep the last stopped-target check's deadline after an observer restart."""
     if (not isinstance(previous, dict) or previous.get('version') != 1
             or previous.get('target_id') != config.get('container_id')
-            or previous.get('boot_id') != boot_id or previous.get('policy_version') not in (2, POLICY_VERSION)
+            or previous.get('boot_id') != boot_id or previous.get('policy_version') not in (2, 3, POLICY_VERSION)
             or previous.get('armed') is not True or previous.get('manual_hold') is not False
             or previous.get('state') not in ('BUSY', 'WAITING_IDLE', 'START_FAILED', 'CONTROL_UNKNOWN')):
         return 0
@@ -269,7 +299,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         state = inspect(config)
         pending_boot = previous.get('boot_recovery_pending') is True
         if (not pending_boot and previous.get('armed') is True and not state['Running']
-                and 'event_cursor' not in previous):
+                and ('event_cursor' not in previous or type(previous.get('last_check')) not in (int, float)
+                     or not math.isfinite(previous['last_check']) or not 0 <= previous['last_check'] <= now)):
             # A stopped target cannot inherit a window when its control
             # history's starting point is missing from the saved state.
             raise ValueError('MISSING_EVENT_CURSOR')
@@ -279,33 +310,19 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         changes = events(config, cursor if pending_boot else cursor - 1, current['epoch'])
         # Longer planned waits still need proof that Docker control history is intact.
         elapsed = now - previous.get('last_check', now)
-        gap = (not pending_boot and bool(previous)
-               and (elapsed > INTERVAL * 2 or previous.get('restart_history_pending') is True))
+        gap = not pending_boot and bool(previous) and previous.get('armed') is True
         missed_check = elapsed > next_interval(previous) * 2
-        legacy_hold = previous.get('legacy_hold_pending') is True
-        if legacy_hold and (previous.get('manual_hold') is not True or previous.get('armed') is not False
-                            or previous.get('state') not in ('MANUAL_HOLD', 'CONTROL_UNKNOWN')):
-            raise ValueError('INVALID_LEGACY_HOLD')
         destroyed = any(e['action'] == 'destroy' for e in changes)
-        verified_history = False
-        if legacy_hold and not state['Running']:
-            if (destroyed or 'event_cursor' not in previous
-                    or not control_history_complete(config, previous, cursor, current['epoch'])):
-                raise ValueError('LEGACY_HOLD_HISTORY_UNKNOWN')
-            verified_history = True
-            previous = dict(previous, armed=True, manual_hold=False, samples=[], idle_since=None,
-                            failure_ratio=None)
-            current.update(armed=True, manual_hold=False, legacy_hold_pending=False)
-        elif legacy_hold and state['Running']:
-            previous = dict(previous, manual_hold=False)
-            current['legacy_hold_pending'] = False
+        trusted = previous.get('trusted_fingerprint') == target_fingerprint(config)
         manual = previous.get('manual_hold', False) or destroyed
-        if state['Running'] and state['StartedAt'] != previous.get('started'):
+        if state['Running'] and not state.get('Paused') and not state.get('Restarting') and not destroyed:
+            trusted = True
             manual = False
         current.update(event_cursor=current['epoch'], started=state['StartedAt'],
-                       finished=state['FinishedAt'], manual_hold=manual)
+                       finished=state['FinishedAt'], manual_hold=manual,
+                       trusted_fingerprint=target_fingerprint(config) if trusted and not destroyed else None)
         if state['Running'] or state.get('Paused') or state.get('Restarting'):
-            current.update(state='RUNNING', armed=not manual, boot_recovery_pending=False,
+            current.update(state='RUNNING', armed=trusted and not manual, boot_recovery_pending=False,
                            boot_recovery=False, boot_finished_at=None,
                            rearm_finished_at=None,
                            samples=[], idle_since=None, failure_ratio=None)
@@ -313,11 +330,11 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
             return current
         if state['Status'] != 'exited':
             raise ValueError('UNEXPECTED_CONTAINER_STATE')
-        armed = previous.get('armed') is True
+        armed = previous.get('armed') is True and trusted
         boot_recovery = previous.get('boot_recovery') is True
         if pending_boot:
             current['boot_recovery_pending'] = False
-            if manual:
+            if manual or not trusted:
                 current.update(state='MANUAL_HOLD', armed=False, boot_recovery=False,
                                samples=[], idle_since=None, failure_ratio=None)
                 persist(current)
@@ -341,10 +358,20 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
             previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
             current.update(boot_recovery=False, boot_finished_at=None, rearm_finished_at=None)
         if gap and armed and not manual:
-            if verified_history or control_history_complete(config, previous, cursor, current['epoch']):
-                if missed_check:
-                    previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
-                gap = False
+            complete = control_history_complete(config, previous, cursor, current['epoch'])
+            if not complete:
+                # No old sample survives an unverified gap. Establish the new
+                # baseline only while the exact stopped target remains stable.
+                fresh = inspect(config)
+                recent = events(config, current['epoch'] - 1, wall())
+                if (fresh['Running'] or fresh.get('Paused') or fresh.get('Restarting')
+                        or fresh['Status'] != 'exited' or fresh['StartedAt'] != state['StartedAt']
+                        or fresh['FinishedAt'] != state['FinishedAt']
+                        or any(e['action'] in ('start', 'stop', 'kill', 'restart', 'destroy') for e in recent)):
+                    raise ValueError('CONTROL_CHANGED_DURING_REBASE')
+            if not complete or missed_check:
+                previous = dict(previous, samples=[], idle_since=None, failure_ratio=None)
+            gap = False
         if manual or gap or not armed:
             current.update(state='MANUAL_HOLD', armed=False, samples=[], idle_since=None, failure_ratio=None)
             persist(current)
@@ -396,7 +423,8 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         persist(current)
         return current
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
-        current.update(state='CONTROL_UNKNOWN', armed=previous.get('armed') is True,
+        current.update(state='CONTROL_UNKNOWN', armed=(previous.get('armed') is True
+                       and previous.get('trusted_fingerprint') == target_fingerprint(config)),
                        samples=[], idle_since=None, failure_ratio=None)
         if previous.get('restart_history_pending') is True:
             current['restart_history_pending'] = True
@@ -438,7 +466,7 @@ def main():
         while True:
             began = time.monotonic()
             previous = step(config, previous, persist=lambda s: write_state(path, s),
-                            start=lambda c: command([c['docker'], 'start', c['container_id']], timeout=45))
+                            start=lambda c: docker_command(c, ['start', c['container_id']], timeout=45))
             elapsed = time.monotonic() - began
             # No overlapping requests, no catch-up burst after a slow cycle.
             interval = next_interval(previous)
