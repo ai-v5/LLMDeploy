@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Task-local BF16 prefill row-map/address/gather fusion, not device admitted.
+#ifdef __CCE_KT_TEST__
+#define __aicore__
+#else
+#define __aicore__ [aicore]
+#endif
+
+extern "C" __global__ __aicore__ void indexer_prefill_gather_r798__kernel0(
+    __gm__ bfloat16_t* physical, __gm__ int64_t* load_rows,
+    __gm__ int64_t* geometry, __gm__ int32_t* logical_count,
+    __gm__ int64_t* logical, __gm__ bfloat16_t* keys,
+    __gm__ int32_t* flags, int64_t P, int64_t F) {
+  set_vector_mask((uint64_t)-1, (uint64_t)-1);
+  set_mask_norm();
+  set_atomic_none();
+  __ubuf__ bfloat16_t* values = (__ubuf__ bfloat16_t*)get_imm(0);  // 16*128 BF16
+  __ubuf__ int64_t* ids = (__ubuf__ int64_t*)get_imm(4096);      // 16 ids
+  __ubuf__ int64_t* geo = (__ubuf__ int64_t*)get_imm(4224);      // 5 words,64B
+  __ubuf__ int32_t* count = (__ubuf__ int32_t*)get_imm(4288);    // 32B slot
+  __ubuf__ int64_t* pair = (__ubuf__ int64_t*)get_imm(4320);    // 2 words,32B
+  __ubuf__ int32_t* bad = (__ubuf__ int32_t*)get_imm(4352);     // 8 words
+  __ubuf__ float* converted = (__ubuf__ float*)get_imm(4384); // 2048 FP32, ends12576
+  __ubuf__ uint32_t* words = (__ubuf__ uint32_t*)values;
+  for (int32_t j = 0; j < 1024; ++j) words[j] = 0;
+  for (int32_t j = 0; j < 8; ++j) bad[j] = 0;
+  const int64_t begin = ((int64_t)block_idx) * 16;
+  const int64_t n = P - begin < 16 ? P - begin : 16;
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  copy_gm_to_ubuf_align_b32(geo, geometry, 0, 1, 40, 0, 0, 0, 0);
+  copy_gm_to_ubuf_align_b32(count, logical_count, 0, 1, 4, 0, 0, 0, 0);
+  if (n > 0) copy_gm_to_ubuf_align_b32(ids, logical + begin, 0, 1, n * 8, 0, 0, 0, 0);
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  // Geometry is created from the host-validated actual positive-stride view.
+  // Check device values before products so malformed metadata cannot wrap an
+  // int64 address into an apparently in-bounds physical row.
+  const bool header_bad = geo[0] <= 0 || geo[0] > F || geo[1] <= 0 || geo[1] > F ||
+      geo[2] <= 0 || geo[3] <= 0 || geo[4] < 0 || geo[4] >= F;
+  if (header_bad || count[0] <= 0 || count[0] > 32768) bad[0] = 1;
+  for (int64_t j = 0; j < n; ++j) {
+    const int64_t id = ids[j];
+    if (header_bad || id < 0 || id >= count[0] || id >= 32768) {
+      bad[0] = 1;
+      continue;
+    }
+    set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    copy_gm_to_ubuf_align_b32(pair, load_rows + id * 2, 0, 1, 16, 0, 0, 0, 0);
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    const int64_t block = pair[0], row = pair[1];
+    if (block < -1 || block >= geo[0] || row < 0 || row >= geo[1]) {
+      bad[0] = 1;
+      continue;
+    }
+    if (block == -1) continue;  // A legal logical hole is exact positive zero.
+    const int64_t remaining = F - 1 - geo[4];
+    if (block > remaining / geo[2]) { bad[0] = 1; continue; }
+    const int64_t prefix = geo[4] + block * geo[2];
+    if (row > (F - 1 - prefix) / geo[3]) { bad[0] = 1; continue; }
+    const int64_t address = prefix + row * geo[3];
+    set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+    copy_gm_to_ubuf_align_b32(values + j * 128, physical + address * 128, 0, 1, 256, 0, 0, 0, 0);
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  }
+  // Original BF16 masked_fill passes unmasked values through numeric
+  // conversion too. Match that consumer's NaN encoding without changing KV.
+  // All2048 BF16 lanes, including unused tail, are initialized above.
+  set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+  set_vector_mask(0x0, 0xffffffffffffffff);
+  vconv_bf162f32(converted, values, 32, 1, 1, 8, 4);
+  pipe_barrier(PIPE_V);
+  vconv_f322bf16r(values, converted, 32, 1, 1, 4, 8);
+  set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  if (n > 0) copy_ubuf_to_gm_align_b32(keys + begin * 128, values, 0, 1, n * 256, 0, 0, 0, 0);
+  set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b32(flags + ((int64_t)block_idx) * 8, bad, 0, 1, 32, 0, 0, 0, 0);
+  pipe_barrier(PIPE_ALL);
+}
