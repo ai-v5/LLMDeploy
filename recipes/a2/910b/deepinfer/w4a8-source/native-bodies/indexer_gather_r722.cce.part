@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Pinned FP32 cast of validated paged BF16 rows; padding never reads KV.
+#ifdef __CCE_KT_TEST__
+#define __aicore__
+#else
+#define __aicore__ [aicore]
+#endif
+
+extern "C" __global__ __aicore__ void indexer_gather_r722__kernel0(
+    __gm__ bfloat16_t* cache, __gm__ int64_t* offsets, __gm__ int64_t* meta,
+    __gm__ float* keys, int64_t P) {
+  set_vector_mask((uint64_t)-1, (uint64_t)-1);
+  set_mask_norm();
+  set_atomic_none();
+  __ubuf__ bfloat16_t* input = (__ubuf__ bfloat16_t*)get_imm(0); // 2048 BF16
+  __ubuf__ float* output = (__ubuf__ float*)get_imm(4096);      // 2048 FP32
+  __ubuf__ int64_t* off = (__ubuf__ int64_t*)get_imm(12288);    // 16 offsets
+  __ubuf__ int64_t* info = (__ubuf__ int64_t*)get_imm(12416);   // 4 words
+  const int64_t begin = ((int64_t)block_idx) * 16;
+  const int64_t rows = P - begin < 16 ? P - begin : 16;
+  // Initialize all4096 input bytes as exact+0 before any partial gather.
+  // Scalar bit stores follow the admitted synthetic-zero reducer pattern.
+  __ubuf__ uint32_t* zero_words = (__ubuf__ uint32_t*)input;
+  for (int32_t word = 0; word < 1024; ++word) zero_words[word] = 0;
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  copy_gm_to_ubuf_align_b32(info, meta, 0, 1, 32, 0, 0, 0, 0);
+  copy_gm_to_ubuf_align_b32(off, offsets + begin, 0, 1, rows * 8, 0, 0, 0, 0);
+  set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+  const int64_t total = info[0];
+  set_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  wait_flag(PIPE_S, PIPE_MTE2, EVENT_ID0);
+  for (int64_t row = 0; row < rows; ++row) {
+    if (begin + row < total) {
+      copy_gm_to_ubuf_align_b32(input + row * 128, cache + off[row], 0, 1, 256, 0, 0, 0, 0);
+    }
+  }
+  set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+  wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+  set_vector_mask(0x0, 0xffffffffffffffff);
+  vconv_bf162f32(output, input, 32, 1, 1, 8, 4);
+  set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+  copy_ubuf_to_gm_align_b32(keys + begin * 128, output, 0, 1, rows * 512, 0, 0, 0, 0);
+  pipe_barrier(PIPE_ALL);
+}
