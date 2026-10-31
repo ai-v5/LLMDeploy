@@ -143,9 +143,10 @@ def check(config, previous, now, boot_id, *, observe=probe, start=None, persist=
     return current
 
 
-def load_config(path):
+def load_config(path, *, optional_fields=()):
     value = json.loads(path.read_text(encoding='utf-8'))
-    if set(value) != {'container_id', 'container_name', 'image_id', 'spec_sha256', 'docker', 'npu_smi', 'state_file'}:
+    required = {'container_id', 'container_name', 'image_id', 'spec_sha256', 'docker', 'npu_smi', 'state_file'}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - set(optional_fields):
         raise ValueError('INVALID_CONFIG')
     if not re.fullmatch('[0-9a-f]{64}', value['container_id']) or not re.fullmatch('sha256:[0-9a-f]{64}', value['image_id']):
         raise ValueError('INVALID_TARGET')
