@@ -43,6 +43,32 @@ class SiteTests(unittest.TestCase):
         self.assertIn('A2', text)
         self.assertIn('A3', text)
 
+    def test_landing_template_is_allowed_only_as_the_homepage(self):
+        self.assertEqual(pages({'pages': [{'source': 'site/home.html', 'output': 'index.html'}]}),
+                         {'site/home.html': 'index.html'})
+        for source, output in [('site/other.html', 'index.html'), ('site/home.html', 'other.html'),
+                               ('local/home.html', 'index.html')]:
+            with self.subTest(source=source, output=output), self.assertRaises(ValueError):
+                pages({'pages': [{'source': source, 'output': output}]})
+
+    @unittest.skipUnless(importlib.util.find_spec('markdown'), 'Install site/requirements.txt for Pages verification')
+    def test_landing_page_shows_core_deployments_without_documentation_chrome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'site'
+            build(output)
+            text = (output / 'index.html').read_text(encoding='utf-8')
+            self.assertIn('class="landing"', text)
+            for unwanted in ['aria-label="文档目录"', '目录与导航', '本地检查', '共用服务与运维', 'document-source']:
+                self.assertNotIn(unwanted, text)
+            for topology in ['单机 8 卡', '8P＋8D 分离', '16 卡 EP16 混部']:
+                self.assertIn(topology, text)
+            self.assertIn('双机在线 API 尚未验收', text)
+            self.assertEqual(text.count('<table '), 1)
+            self.assertIn('<th scope="col">DeepInfer</th>', text)
+            self.assertIn('<th scope="col">vLLM Ascend</th>', text)
+            self.assertIn('<th scope="row" class="model-cell">DeepSeek V4.1', text)
+            self.assertIn('aria-label="文档目录"', (output / 'a5/950dt/deepinfer.html').read_text(encoding='utf-8'))
+
     @unittest.skipUnless(importlib.util.find_spec('markdown'), 'Install site/requirements.txt for Pages verification')
     def test_site_contains_only_allowlisted_pages_with_valid_metadata_links_and_sitemap(self):
         config = json.loads((ROOT / 'site/config.json').read_text(encoding='utf-8'))
@@ -50,7 +76,7 @@ class SiteTests(unittest.TestCase):
             output = Path(tmp) / 'site'
             self.assertEqual(build(output), len(config['pages']))
             documents = {p['output']: Document((output / p['output']).read_text(encoding='utf-8')) for p in config['pages']}
-            expected = set(documents) | {'assets/style.css', 'sitemap.xml', 'robots.txt', '.nojekyll'} | set(config.get('google_verification_files', []))
+            expected = set(documents) | {'assets/style.css', 'assets/home.css', 'sitemap.xml', 'robots.txt', '.nojekyll'} | set(config.get('google_verification_files', []))
             self.assertEqual({p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}, expected)
             for name, document in documents.items():
                 self.assertTrue(document.meta['description'])

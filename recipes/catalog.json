@@ -17,7 +17,9 @@
           "engine": "deepinfer",
           "recipe": "recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
           "guide": "docs/deployments/a5/950dt/deepinfer.md",
-          "path_note": "Single-host serving profile; new renderer has local tests only."
+          "path_note": "Historical single-host API profile plus limited native single8, split8p8d and combined16 records; distributed API not accepted.",
+          "native_topologies": "recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/native-topologies.json",
+          "native_guide": "docs/deployments/a5/950dt/deepinfer-topologies.md"
         }
       ]
     },
@@ -37,7 +39,7 @@
           "profile": "two-host-ep16-resident",
           "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/recipe.json",
           "guide": "docs/deployments/a2/910b/deepinfer.md",
-          "path_note": "Native EP16 resident experts with MTP, prefix cache and batched candidate decode; actual public two-host start, short native MTP/cache and identical frozen4K cold/cache checks passed. Previous-source32K is historical only; configured context is not capacity validation."
+          "path_note": "Native EP16 model source passed 16-worker start, short MTP/cache and identical frozen4K cold/cache checks. The public entry has only been identity checked, not restarted. Previous-source32K is historical only; configured context is not capacity validation."
         }
       ]
     },

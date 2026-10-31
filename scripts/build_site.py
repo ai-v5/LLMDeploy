@@ -1,4 +1,4 @@
-"""Build only the explicitly listed public Markdown pages; never copy the repo."""
+"""Build allowlisted public documents and the fixed landing template."""
 import argparse
 import html
 from html.parser import HTMLParser
@@ -27,9 +27,10 @@ def pages(config):
             path = PurePosixPath(value)
             if path.is_absolute() or '..' in path.parts or '\\' in value or any(p.startswith('.') for p in path.parts):
                 raise ValueError('INVALID_SITE_PATH')
-        if source not in ('README.md', 'THIRD_PARTY_NOTICES.md') and not source.startswith('docs/'):
+        landing = source == 'site/home.html' and output == 'index.html'
+        if not landing and source not in ('README.md', 'THIRD_PARTY_NOTICES.md') and not source.startswith('docs/'):
             raise ValueError('SOURCE_OUTSIDE_PUBLIC_DOCUMENTATION')
-        if not source.endswith('.md') or not output.endswith('.html') or source in sources or output in outputs:
+        if (not landing and not source.endswith('.md')) or not output.endswith('.html') or source in sources or output in outputs:
             raise ValueError('DUPLICATE_OR_INVALID_PAGE')
         sources.add(source)
         outputs.add(output)
@@ -102,31 +103,39 @@ def build(output, root=ROOT):
     # Require a new directory so no stale files or private inputs survive.
     output.mkdir(parents=True, exist_ok=False)
     (output / 'assets').mkdir()
-    (output / 'assets/style.css').write_bytes((root / 'site/style.css').read_bytes())
+    for asset in ('style.css', 'home.css'):
+        (output / 'assets' / asset).write_bytes((root / 'site' / asset).read_bytes())
     for name, raw in verification_assets.items():
         (output / name).write_bytes(raw)
     verification = config.get('google_site_verification', '')
     if verification and not re.fullmatch(r'[A-Za-z0-9_-]+', verification):
         raise ValueError('INVALID_GOOGLE_VERIFICATION_TAG')
     for page in config['pages']:
-        md = markdown.Markdown(extensions=['tables', 'fenced_code', 'toc'], extension_configs={'toc': {'slugify': slug}})
-        body = md.convert((root / page['source']).read_text(encoding='utf-8'))
+        landing = page['source'] == 'site/home.html'
+        body = (root / page['source']).read_text(encoding='utf-8')
+        if not landing:
+            md = markdown.Markdown(extensions=['tables', 'fenced_code', 'toc'], extension_configs={'toc': {'slugify': slug}})
+            body = md.convert(body)
         links = Links(page['source'], config, mapping, root)
         links.feed(body)
         canonical = config['url'] + page['output'] if page['output'] != 'index.html' else config['url']
         nav = '<p>DEPLOYMENT NOTES</p>' + ''.join('<a' + (' class="active" aria-current="page"' if p == page else '') + ' href="' + html.escape(config['url'] + p['output']) + '">' + html.escape(p['title']) + '</a>' for p in config['pages'])
         meta = '<meta name="google-site-verification" content="' + verification + '">' if verification else ''
+        content = ''.join(links.result)
+        if not landing:
+            content = f'''<header><div><a class="brand" href="{config['url']}">LLMDeploy<small>ASCEND · DEPLOYMENT NOTES</small></a><a class="source" href="{config['repository']}">View on GitHub ↗</a></div></header>
+<div class="layout"><nav aria-label="文档目录">{nav}<div class="nav-note">已使用经验分享<br>A5 / 950DT · A2 / A3 待验证<br>敏感信息不提供</div></nav><main id="content"><div class="eyebrow">DOCUMENTATION / 昇腾部署实践</div>{content}
+<div class="document-source">本文源于仓库文档 · <a href="{config['repository']}/blob/{config['branch']}/{page['source']}">查看 Markdown 源文件</a><br>仅分享已使用经验；新环境与新工件需重新验证。敏感信息不提供。</div></main></div>
+<footer>LLMDeploy · 原创内容 AGPL-3.0-only，上游保留原许可 · 不提供生产、性能或兼容性保证</footer>'''
+        home_style = '<link rel="stylesheet" href="assets/home.css">' if landing else ''
         document = f'''<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(page['title'])}</title><meta name="description" content="{html.escape(page['description'], quote=True)}">
 <link rel="canonical" href="{canonical}"><meta property="og:type" content="website"><meta property="og:locale" content="zh_CN">
 <meta property="og:title" content="{html.escape(page['title'], quote=True)}"><meta property="og:url" content="{canonical}">
 <meta property="og:description" content="{html.escape(page['description'], quote=True)}">{meta}
-<link rel="stylesheet" href="{posixpath.relpath('assets/style.css', posixpath.dirname(page['output']) or '.')}"><link rel="sitemap" type="application/xml" href="{config['url']}sitemap.xml"></head>
-<body><a class="skip" href="#content">跳到正文</a><header><div><a class="brand" href="{config['url']}">LLMDeploy<small>ASCEND · DEPLOYMENT NOTES</small></a><a class="source" href="{config['repository']}">View on GitHub ↗</a></div></header>
-<div class="layout"><nav aria-label="文档目录">{nav}<div class="nav-note">已使用经验分享<br>A5 / 950DT · A2 / A3 待验证<br>敏感信息不提供</div></nav><main id="content"><div class="eyebrow">DOCUMENTATION / 昇腾部署实践</div>{''.join(links.result)}
-<div class="document-source">本文源于仓库文档 · <a href="{config['repository']}/blob/{config['branch']}/{page['source']}">查看 Markdown 源文件</a><br>仅分享已使用经验；新环境与新工件需重新验证。敏感信息不提供。</div></main></div>
-<footer>LLMDeploy · 原创内容 AGPL-3.0-only，上游保留原许可 · 不提供生产、性能或兼容性保证</footer></body></html>
+<link rel="stylesheet" href="{posixpath.relpath('assets/style.css', posixpath.dirname(page['output']) or '.')}">{home_style}<link rel="sitemap" type="application/xml" href="{config['url']}sitemap.xml"></head>
+<body class="{'landing' if landing else 'document'}"><a class="skip" href="#content">跳到正文</a>{content}</body></html>
 '''
         path = output / page['output']
         path.parent.mkdir(parents=True, exist_ok=True)

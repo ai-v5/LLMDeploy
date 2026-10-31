@@ -1,10 +1,10 @@
 # A5 / 950DT / DeepInfer
 
-本方案整理历史使用成功的**单机 8 卡原生 DeepInfer + recipe API**。多个这样的后端组成独立副本池，区别于实验中的双机 P/D。仅分享使用经验，不作兼容性、稳定性、性能或生产保证；敏感信息不提供，见[免责声明](../../../../README.md)。
+本方案整理历史使用成功的**单机 8 卡原生 DeepInfer + recipe API**。多个这样的后端组成独立副本池；新源码的单机、双机 P/D 和 EP16 原生路径另见[三拓扑指南](deepinfer-topologies.md)，不与历史 API profile 混用。仅分享使用经验，不作兼容性、稳定性、性能或生产保证；敏感信息不提供，见[免责声明](../../../../README.md)。
 
 ## 固定范围
 
-参数与源码/镜像/native 身份以 [recipe.json](../../../../recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/recipe.json) 为准。
+参数与源码/镜像/native 身份以 [recipe.json](../../../../recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/recipe.json) 为准。`source` 和 `image` 保留历史运行身份；`source_build_candidate` 单独记录新的源码构建版本，不替换历史启动配方。
 
 | 项目 | 历史 profile |
 | --- | --- |
@@ -50,7 +50,11 @@ docker image inspect --format '{{.Id}}' sha256:93b89c1ff22719cb91041f6a5b7d88323
 
 ## 构建来源与边界
 
-没有历史镜像时，可使用独立的[源码构建 Dockerfile](../../../../images/deepinfer/Dockerfile.source)。它从 Ascend 官方公开的 `ascendai/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12-devel` 基础镜像开始，编译 GCC 13.4.0、固定 commit 的 vendor 库及 DeepInfer，并分别安装 native/API 环境，不依赖本项目未公开的父镜像。基础镜像来源见 [Ascend 镜像说明](https://hub.docker.com/r/ascendai/cann)及[官方 Dockerfile](https://github.com/Ascend/cann-container-image/tree/main/cann/9.2.0-beta.2-950-ubuntu22.04-py3.12-devel)。
+新的源码构建固定到 DeepInfer fork [PR #1](https://github.com/ai-v5/deepinfer_ascend/pull/1) 的合并提交 `b1203ac1bcc57df099d6e336255bf6a7b6e9bb83`，源码树为 `42a07a920e56cf35bb9704fa2818c8f57222f14b`。它包含 Ascend 兼容补丁、常驻 API、前缀缓存与预热、原生前缀 checkpoint、批量 worker 事件和默认关闭的 step 遥测。补丁及 vendor 的准确版本由该提交锁定，在 fork 的 `scripts/build_vendor.sh` 中应用，本仓不重复复制补丁。
+
+此提交已通过 CPU 协议与源码回归。后续在与它源码树相同的构建提交上重建了 native，并完成三种拓扑的有限原生 NPU 推理；准确工件身份和限制见[三拓扑指南](deepinfer-topologies.md)。这不表示下面的公开源码 Dockerfile 已构建验收，也不表示新 API、完整上下文或所有跨拓扑输出一致性已验收。原生调度和绑定发生变化，必须配套构建 native 与 Python 源码，不能将新文件覆盖到历史 native 镜像中。
+
+没有历史镜像时，可使用独立的[源码构建 Dockerfile](../../../../images/deepinfer/Dockerfile.source)。它获取 `source_build_candidate.commit`，从 Ascend 官方公开的 `ascendai/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12-devel` 基础镜像开始，编译 GCC 13.4.0、固定 commit 的 vendor 库及 DeepInfer，并分别安装 native/API 环境，不依赖本项目未公开的父镜像。基础镜像来源见 [Ascend 镜像说明](https://hub.docker.com/r/ascendai/cann)及[官方 Dockerfile](https://github.com/Ascend/cann-container-image/tree/main/cann/9.2.0-beta.2-950-ubuntu22.04-py3.12-devel)。
 
 在 Linux aarch64 构建机、LLMDeploy 仓库根目录执行以下命令；需要 Docker BuildKit、足够的内存/磁盘，以及访问公开镜像、系统软件源、源码与 Python 依赖源的网络：
 
@@ -65,6 +69,8 @@ docker build --platform linux/arm64 \
 
 **本次仅提供 Dockerfile，未执行镜像构建、真机验收或镜像发布。** 此新镜像不接入现有渲染器，历史 native SHA 校验保持不变；需要新配方、启动接入和端到端验收后才能作为已验证部署方案。以下 overlay 和镜像迁移仍仅适用于已有历史镜像的操作者。
 
+### 历史 serving overlay
+
 [serving overlay Dockerfile](../../../../images/deepinfer/Dockerfile) 依赖锁定的**已构建 native/API 父镜像**，不是从空 CANN 镜像构建。先导入配方的父镜像，然后从公开 commit 提取三处 profile 变更：
 
 ```sh
@@ -75,22 +81,19 @@ docker build --network none --iidfile local/deepinfer-image.id local/deepinfer-b
 
 准备工具只读取 `git show <固定commit>:<文件>`，不复制工作树、`.git`、本机配置或用户改动；输出目录必须不存在。Dockerfile 校验父镜像 native SHA 后复制固定公开源码。新 image ID 不保证等于历史值，须写入自己的机器配置并重新验收。入口校验源码 LF 归一化 SHA（历史镜像使用 CRLF）及 native SHA，不做 AST 宽松匹配。
 
-若没有该 native 父镜像，先按同一固定 fork 的 `patches/ascend/README.md` 从源构建：
+没有该 native 父镜像时，使用上面的独立源码构建路线，不能将新 native 的 SHA 填成历史值。API 与 native 使用各自的 venv；历史版本锁保留在[配方目录](../../../../recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/)。新构建须记录依赖、源码、native 和 image 身份，运行 kernel、8 卡集体通信、完整模型/API 验收后，才能建立新的可启动配方。
 
-```sh
-git -C local/deepinfer-source checkout --detach 07e5002c08bce137ab2a86a5a1fc8bb652729ad6
-git -C local/deepinfer-source submodule update --init vendor/DeepSelect vendor/FlashMLA vendor/DeepEP-Ascend vendor/DeepGEMM-Ascend
-```
+## 新源码的实验性 P/D 入口
 
-随后在 Linux 构建环境、fork 根目录及独立 native venv 中，先 source CANN、选择 GCC 13.4，并设置配套 `CC`、`CXX`、`CPLUS_INCLUDE_PATH`、`LD_LIBRARY_PATH`，再执行：
+准确参数见固定提交的[实验性 P/D 指南](https://github.com/ai-v5/deepinfer_ascend/blob/b1203ac1bcc57df099d6e336255bf6a7b6e9bb83/examples/README.md#experimental-pd-checkpoints)。该路径使用可信共享目录传送不可变前缀 checkpoint，不是 HIXL 或 Mooncake 原生网络连接器。默认 `--pd-role combined` 仍是本地常驻推理。
 
-```sh
-python -m pip install -r requirements-ascend.txt
-DEEPINFER_ACCELERATOR=ascend bash scripts/build_vendor.sh
-DEEPINFER_ACCELERATOR=ascend bash scripts/build.sh build
-```
+P、D 两侧必须使用相同源码提交与匹配的 native 构建、精确 `--model-revision`、CP1、DP=EP 和兼容 NORMAL 布局。按相同模型固定 `--max-model-len 1048576 --max-output-tokens 32768`；请求输入与输出合计仍需遵守总窗口。`--max-num-seqs` 可按角色分别设置，容量差异不应改变布局语义；HTTP 并发或排队数不能当作原生 batch。
 
-API 另建 venv，安装[API 历史版本锁](../../../../recipes/a5/950dt/deepinfer/deepseek-v4.1-flash-1017/requirements-api.lock)，不要向 native venv 混装 torch。供应商构建脚本、补丁及其许可由 fork 维护；本仓不重复复制。按配方 `paths` 布置源码、两套解释器及 native 库，提供 Linux tini 与 source CANN/编译器环境的 `runtime_env.sh`。这条新 native 路线**不能直接取得历史镜像的身份**：须记录新依赖锁，运行 kernel、8 卡集体通信、完整模型/API 验收，建立新配方和 SHA；不能删除当前入口的 native 校验伪装成复现成功。本次交付未运行此新构建。
+P 使用 `--pd-role prefill --pd-checkpoint-dir <私有共享目录>`，D 使用 `--pd-role decode --pd-checkpoint-dir <同一共享目录> --pd-prefill-url <P服务根URL>`，两侧均传 `--model-revision`。实际地址、目录、监听端口、两套 Python 和挂载由操作者配置。共享目录须已存在且仅可信 worker 可访问；内部认证通过私有环境变量 `DEEPINFER_PD_API_KEY` 提供，URL 不携带凭据。它不替代外部 API 的认证网关。
+
+该参考路径仅支持文本，尚不支持多模态或结构化输出的 P/D 传输。D 校验模型、布局、token 指纹及文件完整性，分配自己的状态，恢复完整缓存块后计算剩余后缀；P 不提交采样输出。新构建仍须补跑原生 allocator 测试，以及同配置 full-D 与 P/D 的原生 token 一致性，成功 HTTP 响应不能代替这些检查。
+
+`DEEPINFER_BATCH_TELEMETRY_DIR` 与 `DEEPINFER_BATCH_TELEMETRY_RUN_ID` 可选启用 rank/请求生命周期遥测，默认关闭。目录须预先存在，每轮使用新的 ID，原始记录保留在私有工件目录。step 时间不是 kernel 时间，跨机比较还需要时钟对齐。本仓不保存遥测记录或性能结果，此入口不接入已使用的服务池配方。
 
 ## 合成预热、生成与显式启动
 
@@ -124,4 +127,4 @@ python3 scripts/smoke_deepinfer.py --base http://127.0.0.1:8900/v1
 
 ## 验证状态
 
-此 profile 有历史真实八卡模型/API 使用记录，但不代表今天所有副本健康，也不代表双机 P/D 或性能已验收。本次新渲染器、preflight、overlay 准备及导航只做本地验证，未重启、构建或启动真实服务；使用者仍需在独立空闲机器验收新的端到端启动流程。敏感配置、内部身份、原始日志及性能数据不提供。
+此 profile 有历史真实八卡模型/API 使用记录，但不代表今天所有副本健康。后续新源码的双机原生推理记录见[三拓扑指南](deepinfer-topologies.md)，不能据此宣称双机在线 API 已验收。本次新渲染器、preflight、overlay 准备及导航只做本地验证，未重启、构建或启动真实服务；使用者仍需在独立空闲机器验收新的端到端启动流程。敏感配置、内部身份、原始日志及性能数据不提供。
