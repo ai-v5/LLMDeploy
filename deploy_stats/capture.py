@@ -49,10 +49,38 @@ def extract_usage(protocol, value):
     return prompt, output, cached
 
 
+def has_visible_delta(protocol, value):
+    """Recognize a nonempty output delta, not a role or lifecycle event."""
+    if not isinstance(value, dict):
+        return False
+    if protocol == 'chat':
+        choices = value.get('choices')
+        for choice in choices if isinstance(choices, list) else ():
+            delta = choice.get('delta') if isinstance(choice, dict) else None
+            if not isinstance(delta, dict):
+                continue
+            if any(isinstance(delta.get(k), str) and delta[k] for k in ('content', 'reasoning', 'reasoning_content')):
+                return True
+            for call in delta.get('tool_calls', ()) if isinstance(delta.get('tool_calls'), list) else ():
+                fn = call.get('function') if isinstance(call, dict) else None
+                if isinstance(fn, dict) and any(isinstance(fn.get(k), str) and fn[k] for k in ('name', 'arguments')):
+                    return True
+        return False
+    event_type = value.get('type')
+    if protocol == 'responses':
+        return (isinstance(event_type, str) and event_type.startswith('response.') and
+                event_type.endswith('.delta') and isinstance(value.get('delta'), str) and bool(value['delta']))
+    if protocol == 'messages' and event_type == 'content_block_delta':
+        delta = value.get('delta')
+        return isinstance(delta, dict) and any(isinstance(delta.get(k), str) and delta[k]
+            for k in ('text', 'thinking', 'partial_json'))
+    return False
+
+
 class UsageCapture:
     """Bound memory and retain only numerical usage after each response frame."""
 
-    def __init__(self, protocol, content_type, content_encoding=''):
+    def __init__(self, protocol, content_type, content_encoding='', on_first_output=None):
         self.protocol = protocol
         media_type = (content_type or '').split(';', 1)[0].strip().lower()
         self.kind = ('sse' if media_type == 'text/event-stream' else
@@ -67,6 +95,8 @@ class UsageCapture:
         self.too_large = False
         self.usage = None
         self.terminal = False
+        self.on_first_output = on_first_output
+        self.saw_output = False
 
     def feed(self, data):
         if self.kind == 'other':
@@ -110,13 +140,18 @@ class UsageCapture:
             payload = b'\n'.join(self.event_data)
             if payload == b'[DONE]':
                 self.terminal = True
-            elif b'"usage"' in payload or b'message_stop' in payload:
+            elif (not self.saw_output or b'"usage"' in payload or b'message_stop' in payload or
+                  b'response.completed' in payload or b'response.incomplete' in payload):
                 try:
                     value = json.loads(payload)
                 except (ValueError, UnicodeDecodeError):
                     value = None
                 if isinstance(value, dict):
                     event_type = value.get('type')
+                    if not self.saw_output and has_visible_delta(self.protocol, value):
+                        self.saw_output = True
+                        if self.on_first_output:
+                            self.on_first_output()
                     final = (self.protocol == 'chat' or
                              self.protocol == 'messages' and event_type == 'message_delta' or
                              self.protocol == 'responses' and event_type in
@@ -147,8 +182,8 @@ class UsageCapture:
 class SafeCapture:
     """A statistics parser error must never interrupt the user's response."""
 
-    def __init__(self, protocol, content_type, content_encoding=''):
-        self.reader = UsageCapture(protocol, content_type, content_encoding)
+    def __init__(self, protocol, content_type, content_encoding='', on_first_output=None):
+        self.reader = UsageCapture(protocol, content_type, content_encoding, on_first_output)
         self.failed = False
 
     def feed(self, data):

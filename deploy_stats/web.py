@@ -6,6 +6,7 @@ import socket
 import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
+from .backends import read_backend
 from .report import report
 
 STATIC = Path(__file__).resolve().parent / 'static'
@@ -18,10 +19,13 @@ class Dashboard(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, port, database):
+    def __init__(self, port, database, backend_ports=()):
         if type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('INVALID_PORT')
         self.database = Path(database)
+        if len(backend_ports) > 8 or any(type(p) is not int or not 1 <= p <= 65535 for p in backend_ports):
+            raise ValueError('INVALID_BACKEND_PORTS')
+        self.backend_ports = tuple(dict.fromkeys(backend_ports))
         super().__init__(('127.0.0.1', port), Handler)
 
     def server_bind(self):
@@ -71,11 +75,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == '/api/stats':
             values = parse_qs(url.query, keep_blank_values=True)
-            if set(values) - {'window'} or len(values.get('window', ['24h'])) != 1:
+            if (set(values) - {'window', 'offset', 'session_offset'} or len(values.get('window', ['24h'])) != 1 or
+                    any(len(values.get(key, ['0'])) != 1 or not values.get(key, ['0'])[0].isdigit()
+                        for key in ('offset', 'session_offset'))):
                 self.send(400, b'{"error":"INVALID_WINDOW"}', 'application/json; charset=utf-8')
                 return
             try:
-                value = report(self.server.database, values.get('window', ['24h'])[0])
+                value = report(self.server.database, values.get('window', ['24h'])[0],
+                               request_offset=int(values.get('offset', ['0'])[0]),
+                               session_offset=int(values.get('session_offset', ['0'])[0]))
+                value['backends'] = [read_backend(port) for port in self.server.backend_ports]
                 body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
                 self.send(200, body, 'application/json; charset=utf-8')
             except ValueError:

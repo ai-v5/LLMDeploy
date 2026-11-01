@@ -2,11 +2,13 @@
 import asyncio
 from contextlib import suppress
 from email.parser import BytesHeaderParser
+import hashlib
 import ipaddress
 import os
 import socket
 import threading
 import time
+import uuid
 from urllib.parse import urlsplit
 
 from .capture import SafeCapture
@@ -15,8 +17,12 @@ from .store import Recorder
 CLIENT_HEADER = 'x-llmdeploy-client-ip'
 PROTOCOLS = {'/v1/chat/completions': 'chat', '/v1/responses': 'responses',
              '/v1/messages': 'messages'}
-MAX_HEADER = 128 * 1024
-MAX_CONNECTIONS = 192
+# Allow a large incoming header plus additional fields from the front proxy.
+MAX_HEADER = 1024 * 1024 + 65536
+MAX_RESPONSE_HEADER = 10 * 1024 * 1024
+WINDOWS_WORKERS = 3
+WINDOWS_CONNECTIONS_PER_WORKER = 160
+MAX_CONNECTIONS = WINDOWS_WORKERS * WINDOWS_CONNECTIONS_PER_WORKER
 
 
 def client_ip(headers):
@@ -30,6 +36,27 @@ def client_ip(headers):
         return str(address)
     except ValueError:
         return None
+
+
+def session_fingerprint(headers):
+    """Match the gateway's identity domain for explicit session headers only."""
+    auth = headers.get_all('Authorization', [])
+    if len(auth) != 1:
+        return None
+    fields = auth[0].split()
+    if len(fields) != 2 or fields[0].lower() != 'bearer' or len(fields[1]) > 256:
+        return None
+    for name in ('x-session-affinity', 'x-deepseek-harness-session-id', 'x-session-id'):
+        values = headers.get_all(name, [])
+        if values:
+            if len(values) != 1 or not 0 < len(values[0]) <= 256:
+                return None
+            try:
+                key_digest = hashlib.sha256(fields[1].encode()).hexdigest()
+                return hashlib.sha256((key_digest + '\0session:' + values[0]).encode()).hexdigest()
+            except UnicodeError:
+                return None
+    return None
 
 
 def _headers(raw):
@@ -118,7 +145,7 @@ class Proxy:
             if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             self.socket.bind(('127.0.0.1', port))
-            self.socket.listen(64)
+            self.socket.listen(MAX_CONNECTIONS)
             self.socket.setblocking(False)
             self.server_port = self.socket.getsockname()[1]
             if self.server_port == upstream_port:
@@ -136,15 +163,15 @@ class Proxy:
         self.finished = threading.Event()
         self.ready = threading.Event()
         self.tasks = set()
+        self.tasks_lock = threading.Lock()
+        self.connections_lock = threading.Lock()
         self.connections = 0
+        self.shutdown_requested = threading.Event()
 
     def serve_forever(self, poll_interval=None):
         try:
             if os.name == 'nt':
-                # The Windows proactor can leak sockets on a peer reset during
-                # shutdown. Keep this event loop local to the proxy process.
-                with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-                    runner.run(self._serve())
+                self._serve_windows()
             else:
                 asyncio.run(self._serve())
         finally:
@@ -157,20 +184,124 @@ class Proxy:
         self.ready.set()
         async with server:
             await self.stop.wait()
-        tasks = list(self.tasks)
+        with self.tasks_lock:
+            tasks = list(self.tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def shutdown(self):
-        if self.ready.wait(3) and self.loop and self.stop:
-            self.loop.call_soon_threadsafe(self.stop.set)
+        if self.ready.wait(3):
+            self.shutdown_requested.set()
+            if self.loop and self.stop:
+                self.loop.call_soon_threadsafe(self.stop.set)
             self.finished.wait(5)
 
+    def _serve_windows(self):
+        # One Windows selector can watch only 512 sockets. Dispatch accepted
+        # connections across independent loops, each with room for both the
+        # client and upstream sockets, instead of using the reset-prone proactor.
+        workers = []
+        worker_lock = threading.Lock()
+        started = [threading.Event() for _ in range(WINDOWS_WORKERS)]
+        loops = [None] * WINDOWS_WORKERS
+        stops = [None] * WINDOWS_WORKERS
+        assigned = [0] * WINDOWS_WORKERS
+        errors = []
+
+        async def worker(index):
+            loop = asyncio.get_running_loop()
+            loops[index], stops[index] = loop, asyncio.Event()
+            started[index].set()
+            await stops[index].wait()
+            with self.tasks_lock:
+                tasks = [task for task in self.tasks if task.get_loop() is loop]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        def run_worker(index):
+            try:
+                with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                    runner.run(worker(index))
+            except Exception as exc:
+                errors.append(exc)
+                started[index].set()
+                self.shutdown_requested.set()
+
+        async def handle_socket(conn, index):
+            try:
+                loop = asyncio.get_running_loop()
+                reader = asyncio.StreamReader(limit=MAX_HEADER)
+                protocol = asyncio.StreamReaderProtocol(reader)
+                transport, _ = await loop.connect_accepted_socket(lambda: protocol, conn)
+                writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+                await self._handle(reader, writer)
+            finally:
+                conn.close()
+                with worker_lock:
+                    assigned[index] -= 1
+
+        def dispatch(conn, index):
+            task = asyncio.create_task(handle_socket(conn, index))
+            # Track handoff as well as the handler so shutdown cannot leave an
+            # accepted but not-yet-attached socket behind.
+            with self.tasks_lock:
+                self.tasks.add(task)
+            task.add_done_callback(lambda done: self._discard_task(done))
+
+        try:
+            for index in range(WINDOWS_WORKERS):
+                thread = threading.Thread(target=run_worker, args=(index,), daemon=True)
+                workers.append(thread)
+                thread.start()
+            if not all(event.wait(3) for event in started) or errors:
+                raise RuntimeError('PROXY_WORKER_START_FAILED')
+            self.socket.settimeout(.2)
+            self.ready.set()
+            while not self.shutdown_requested.is_set():
+                try:
+                    conn, _ = self.socket.accept()
+                except socket.timeout:
+                    continue
+                conn.setblocking(False)
+                with worker_lock:
+                    index = min(range(WINDOWS_WORKERS), key=assigned.__getitem__)
+                    if assigned[index] < WINDOWS_CONNECTIONS_PER_WORKER:
+                        assigned[index] += 1
+                    else:
+                        index = None
+                if index is None:
+                    self.recorder.note_drop()
+                    with suppress(OSError):
+                        # Give an already-arriving head a short chance to drain;
+                        # closing with unread bytes otherwise resets Windows peers.
+                        conn.settimeout(.05)
+                        conn.recv(MAX_HEADER)
+                    with suppress(OSError):
+                        conn.sendall(b'HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                    conn.close()
+                else:
+                    loops[index].call_soon_threadsafe(dispatch, conn, index)
+        finally:
+            for loop, stop in zip(loops, stops):
+                if loop and stop:
+                    with suppress(RuntimeError):
+                        loop.call_soon_threadsafe(stop.set)
+            for thread in workers:
+                thread.join(5)
+
+    def _discard_task(self, task):
+        with self.tasks_lock:
+            self.tasks.discard(task)
+
     def server_close(self):
-        if self.loop and not self.finished.is_set():
+        if self.ready.is_set() and not self.finished.is_set():
             self.shutdown()
+            if not self.finished.is_set():
+                raise RuntimeError('PROXY_SHUTDOWN_TIMEOUT')
         self.socket.close()
         with self.active_lock:
             with self.recorder.lock:
@@ -179,21 +310,34 @@ class Proxy:
 
     async def _handle(self, client_reader, client_writer):
         task = asyncio.current_task()
-        self.tasks.add(task)
-        if self.connections >= MAX_CONNECTIONS:
+        with self.tasks_lock:
+            self.tasks.add(task)
+        with self.connections_lock:
+            accepted = self.connections < MAX_CONNECTIONS
+            if accepted:
+                self.connections += 1
+        if not accepted:
             self.recorder.note_drop()
+            # Read the request head before closing so Windows does not reset a
+            # small request while the caller is trying to receive the 429.
+            with suppress(OSError, ConnectionError, asyncio.TimeoutError, asyncio.LimitOverrunError,
+                          asyncio.IncompleteReadError):
+                await asyncio.wait_for(client_reader.readuntil(b'\r\n\r\n'), 1)
             with suppress(OSError, ConnectionError):
                 client_writer.write(b'HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
                 await client_writer.drain()
             client_writer.close()
             with suppress(OSError, ConnectionError, asyncio.TimeoutError):
                 await asyncio.wait_for(client_writer.wait_closed(), 1)
-            self.tasks.discard(task)
+            self._discard_task(task)
             return
-        self.connections += 1
-        started = time.monotonic()
+        started = time.perf_counter()
+        started_wall = time.time()
         counted = False
         source = None
+        session = None
+        request_id = None
+        first_visible = None
         status, state, values = None, 'interrupted', None
         sent_headers = False
         upstream_writer = None
@@ -215,8 +359,14 @@ class Proxy:
             headers = _headers(header_bytes)
             source = client_ip(headers)
             if counted:
+                session = session_fingerprint(headers)
+                request_id = uuid.uuid4().hex
                 with self.active_lock:
                     self.active += 1
+                try:
+                    self.recorder.begin(request_id, started_wall, source, session)
+                except Exception:
+                    self.recorder.note_drop()
             lines = header_bytes.split(b'\r\n')
             if any(line.startswith((b' ', b'\t')) for line in lines):
                 raise ValueError('FOLDED_HEADER_UNSUPPORTED')
@@ -224,7 +374,7 @@ class Proxy:
                        not in (CLIENT_HEADER.encode(), b'connection')]
             forward.append(b'Connection: close')
             upstream_reader, upstream_writer = await asyncio.wait_for(
-                asyncio.open_connection('127.0.0.1', self.upstream_port, limit=MAX_HEADER), 2)
+                asyncio.open_connection('127.0.0.1', self.upstream_port, limit=MAX_RESPONSE_HEADER), 5)
             upstream_writer.write(request_line + b'\r\n' + b'\r\n'.join(forward) + b'\r\n\r\n')
             await upstream_writer.drain()
             lengths = headers.get_all('Content-Length', [])
@@ -249,6 +399,7 @@ class Proxy:
                             try:
                                 upstream_writer.write(chunk)
                                 await upstream_writer.drain()
+                                await asyncio.sleep(0)
                             except (OSError, ConnectionError):
                                 abort_send.set()
                 except Exception:
@@ -272,12 +423,26 @@ class Proxy:
             if length:
                 # Let an immediate auth/admission rejection arrive before a
                 # large upload can reset an upstream that does not read it.
-                done, _ = await asyncio.wait((head_task,), timeout=.01)
-                if done:
-                    first_line = head_task.result().split(b'\r\n', 1)[0]
-                    parts = first_line.split(b' ', 2)
-                    if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) >= 200:
+                deadline = asyncio.get_running_loop().time() + (.1 if length >= 4096 else .01)
+                while True:
+                    remaining = max(0, deadline - asyncio.get_running_loop().time())
+                    done, _ = await asyncio.wait((head_task,), timeout=remaining)
+                    if not done:
+                        break
+                    preliminary = head_task.result()
+                    parts = preliminary.split(b'\r\n', 1)[0].split(b' ', 2)
+                    if len(parts) < 2 or not parts[1].isdigit():
+                        break
+                    code = int(parts[1])
+                    if code < 100 or code > 599:
+                        raise ValueError('INVALID_RESPONSE_STATUS')
+                    if code >= 200:
                         abort_send.set()
+                        break
+                    client_writer.write(preliminary)
+                    await client_writer.drain()
+                    head_task = asyncio.create_task(asyncio.wait_for(
+                        upstream_reader.readuntil(b'\r\n\r\n'), self.timeout))
             body_task = asyncio.create_task(send_body())
             watch_task = asyncio.create_task(watch_client())
             while True:
@@ -301,12 +466,21 @@ class Proxy:
             if not body_done.is_set():
                 abort_send.set()
             response_headers = _headers(response_fields)
+            def first_output():
+                nonlocal first_visible
+                if first_visible is None:
+                    first_visible = max(0, time.perf_counter() - started)
+                    if request_id is not None:
+                        self.recorder.first_output(request_id, first_visible)
+
             capture = SafeCapture(protocol, response_headers.get('Content-Type'),
-                                   response_headers.get('Content-Encoding')) if protocol else None
+                                   response_headers.get('Content-Encoding'), first_output) if protocol else None
             copy_task = asyncio.create_task(_response_body(upstream_reader, client_writer, response_headers,
                 method, status, capture, self.timeout))
-            await asyncio.wait((copy_task, watch_task), return_when=asyncio.FIRST_COMPLETED)
-            if disconnected.is_set():
+            done, _ = await asyncio.wait((copy_task, watch_task), return_when=asyncio.FIRST_COMPLETED)
+            error_response_completed = (status >= 400 and copy_task in done and
+                                        not copy_task.cancelled() and copy_task.exception() is None)
+            if disconnected.is_set() and not error_response_completed:
                 copy_task.cancel()
                 await asyncio.gather(copy_task, return_exceptions=True)
             else:
@@ -345,11 +519,13 @@ class Proxy:
                 prompt, output, cached = values if state == 'known' else (None, None, None)
                 with self.active_lock:
                     try:
-                        self.recorder.submit((time.time(), source, max(0, time.monotonic() - started),
-                            status, state, prompt, output, cached))
+                        self.recorder.end(request_id)
+                        self.recorder.submit((time.time(), source, max(0, time.perf_counter() - started),
+                            status, state, prompt, output, cached, session, first_visible), request_id)
                     except Exception:
                         self.recorder.note_drop()
                     finally:
                         self.active -= 1
-            self.connections -= 1
-            self.tasks.discard(task)
+            with self.connections_lock:
+                self.connections -= 1
+            self._discard_task(task)

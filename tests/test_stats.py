@@ -3,11 +3,12 @@ from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from email.message import Message
 import hashlib
-from http.client import HTTPConnection, IncompleteRead
+from http.client import HTTPConnection, HTTPResponse, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import queue
 import sqlite3
 import socket
 import subprocess
@@ -18,11 +19,13 @@ import unittest
 from unittest.mock import patch
 
 from deploy_stats.capture import UsageCapture, extract_usage
-from deploy_stats.proxy import Proxy, client_ip
+from deploy_stats.proxy import Proxy, client_ip, session_fingerprint
+from deploy_stats.backends import read_backend
 from deploy_stats.report import report
 from deploy_stats.store import _open, Recorder
 from deploy_stats.web import Dashboard
 from deploy_gateway.server import Gateway
+from deploy_gateway.routing import affinity_key
 
 
 def usage(input_tokens=100, output_tokens=7, cached=60):
@@ -80,6 +83,35 @@ class CaptureTests(unittest.TestCase):
         headers['X-LLMDeploy-Client-IP'] = '192.0.2.5'
         self.assertIsNone(client_ip(headers))
 
+    def test_session_fingerprint_matches_gateway_identity_without_storing_key(self):
+        headers = Message()
+        headers['Authorization'] = 'Bearer synthetic-gateway-key'
+        headers['X-Session-Id'] = 'synthetic-private-session'
+        digest = hashlib.sha256(b'synthetic-gateway-key').hexdigest()
+        self.assertEqual(session_fingerprint(headers), affinity_key(headers, b'{}', digest))
+        other = Message()
+        other['Authorization'] = 'Bearer other-synthetic-key'
+        other['X-Session-Id'] = 'synthetic-private-session'
+        self.assertNotEqual(session_fingerprint(headers), session_fingerprint(other))
+        headers['X-Session-Id'] = 'duplicate'
+        self.assertIsNone(session_fingerprint(headers))
+
+    def test_first_visible_delta_ignores_roles_and_empty_events(self):
+        observed = []
+        parser = UsageCapture('chat', 'text/event-stream', on_first_output=lambda: observed.append(1))
+        parser.feed(sse({'choices': [{'delta': {'role': 'assistant', 'content': ''}}]}))
+        self.assertEqual(observed, [])
+        parser.feed(sse({'choices': [{'delta': {'content': 'synthetic'}}]}))
+        parser.feed(sse({'choices': [{'delta': {'content': 'more'}}]}))
+        self.assertEqual(observed, [1])
+        response = UsageCapture('responses', 'text/event-stream', on_first_output=lambda: observed.append(2))
+        response.feed(sse({'type': 'response.created'}))
+        response.feed(sse({'type': 'response.output_text.delta', 'delta': 'synthetic'}))
+        messages = UsageCapture('messages', 'text/event-stream', on_first_output=lambda: observed.append(3))
+        messages.feed(sse({'type': 'message_start'}))
+        messages.feed(sse({'type': 'content_block_delta', 'delta': {'thinking': 'synthetic'}}))
+        self.assertEqual(observed, [1, 2, 3])
+
 
 class SyntheticGateway(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -94,6 +126,7 @@ class SyntheticGateway(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.server.mode == 'reject':
+            time.sleep(getattr(self.server, 'reject_delay', 0))
             self.send_response(429)
             self.send_header('Content-Length', '0')
             self.send_header('Connection', 'close')
@@ -183,6 +216,8 @@ class ProxyTests(unittest.TestCase):
         self.path = Path(self.temp.name) / 'usage.sqlite3'
         class SyntheticServer(ThreadingHTTPServer):
             request_queue_size = 128
+            def handle_error(self, request, client_address):
+                pass
         self.upstream = SyntheticServer(('127.0.0.1', 0), SyntheticGateway)
         self.upstream.daemon_threads = True
         self.upstream.mode = 'sse'
@@ -326,6 +361,64 @@ class ProxyTests(unittest.TestCase):
         data = report(self.path, 'total', now=time.time() + .01)
         self.assertEqual((data['totals']['known'], data['totals']['output'], len(data['clients'])), (12, 84, 12))
 
+    def test_session_summary_tracks_requests_without_storing_secrets(self):
+        for token, session in (('synthetic-key-a', 'synthetic-private-session'),
+                               ('synthetic-key-a', 'synthetic-private-session'),
+                               ('synthetic-key-b', 'synthetic-private-session')):
+            connection = HTTPConnection('127.0.0.1', self.proxy.server_port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}', {
+                'Authorization': 'Bearer ' + token, 'X-Session-Id': session,
+                'X-LLMDeploy-Client-IP': '192.0.2.4'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+        self.wait_recorded()
+        data = report(self.path, 'total', now=time.time() + .01)
+        self.assertEqual(data['session_count'], 2)
+        self.assertEqual(sorted(item['requests'] for item in data['sessions']), [1, 2])
+        self.assertEqual(sorted(item['input'] for item in data['sessions']), [100, 200])
+        self.assertTrue(all(item['first_visible'] is not None for item in data['requests']))
+        for dbfile in Path(self.temp.name).glob('usage.sqlite3*'):
+            raw = dbfile.read_bytes()
+            for secret in (b'synthetic-key-a', b'synthetic-key-b', b'synthetic-private-session'):
+                self.assertNotIn(secret, raw)
+
+    def test_active_snapshot_clears_when_completion_event_is_dropped(self):
+        self.upstream.mode = 'slow'
+        connection = socket.create_connection(('127.0.0.1', self.proxy.server_port), timeout=5)
+        connection.sendall(b'POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n'
+                           b'Content-Length: 2\r\nX-LLMDeploy-Client-IP: 192.0.2.4\r\n\r\n{}')
+        self.assertTrue(connection.recv(1024))
+        self.assertTrue(self.upstream.stream_started.wait(2))
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            data = report(self.path, 'total', now=time.time() + .01)
+            if data['active_ready'] and len(data['active']) == 1:
+                break
+            time.sleep(.05)
+        self.assertEqual(len(data['active']), 1)
+        try:
+            with patch.object(self.proxy.recorder.pending, 'put_nowait', side_effect=queue.Full):
+                connection.shutdown(socket.SHUT_RDWR)
+                connection.close()
+                deadline = time.monotonic() + 3
+                while self.proxy.active and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(self.proxy.active, 0)
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                data = report(self.path, 'total', now=time.time() + .01)
+                if data['active_ready'] and not data['active']:
+                    break
+                time.sleep(.05)
+            self.assertTrue(data['active_ready'])
+            self.assertEqual(data['active'], [])
+            self.assertGreater(self.proxy.recorder.dropped, 0)
+        finally:
+            self.upstream.stream_release.set()
+            connection.close()
+
     def test_sixty_four_simultaneous_streams_are_independently_accounted(self):
         self.upstream.barrier = threading.Barrier(64)
         with ThreadPoolExecutor(max_workers=64) as pool:
@@ -377,17 +470,164 @@ class ProxyTests(unittest.TestCase):
         self.wait_recorded()
         self.assertEqual(self.upstream.calls[-1][0], payload)
 
-    def test_gateway_can_reject_a_large_body_before_reading_it(self):
-        self.upstream.mode = 'reject'
+    def test_large_combined_headers_reach_the_existing_gateway(self):
         connection = HTTPConnection('127.0.0.1', self.proxy.server_port, timeout=5)
-        connection.request('POST', '/v1/chat/completions', b'x' * (1024 * 1024),
-                           {'X-LLMDeploy-Client-IP': '192.0.2.4'})
+        headers = {f'X-Synthetic-{i}': 'x' * 45000 for i in range(3)}
+        connection.request('POST', '/v1/chat/completions', b'{}', headers)
         response = connection.getresponse()
-        self.assertEqual(response.status, 429)
+        self.assertEqual(response.status, 200)
         response.read()
         connection.close()
         self.wait_recorded()
-        self.assertEqual(report(self.path, 'total', now=time.time() + .01)['totals']['failed'], 1)
+        self.assertEqual(len(self.upstream.calls), 1)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows selector capacity')
+    def test_windows_keeps_480_streams_in_flight(self):
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(480)
+        listener.settimeout(.1)
+        accepted, clients = [], []
+        stop = threading.Event()
+
+        def accept_upstreams():
+            while not stop.is_set():
+                try:
+                    conn, _ = listener.accept()
+                    accepted.append(conn)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=accept_upstreams, daemon=True)
+        thread.start()
+        proxy = Proxy(0, listener.getsockname()[1], Path(self.temp.name) / 'capacity.sqlite3')
+        self.start(proxy)
+        try:
+            for _ in range(480):
+                conn = socket.create_connection(('127.0.0.1', proxy.server_port), timeout=15)
+                clients.append(conn)
+                conn.sendall(b'POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n'
+                             b'Content-Length: 2\r\nX-LLMDeploy-Client-IP: 192.0.2.4\r\n\r\n{}')
+            deadline = time.monotonic() + 20
+            while (len(accepted) < 480 or proxy.connections < 480) and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(len(accepted), 480)
+            self.assertEqual(proxy.connections, 480)
+            with socket.create_connection(('127.0.0.1', proxy.server_port), timeout=5) as extra:
+                extra.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                self.assertIn(b'429 Too Many Requests', extra.recv(1024))
+            extra = HTTPConnection('127.0.0.1', proxy.server_port, timeout=5)
+            try:
+                extra.request('POST', '/v1/chat/completions', b'x' * (1024 * 1024))
+                rejected = extra.getresponse()
+                self.assertEqual(rejected.status, 429)
+                rejected.read()
+            except (OSError, IncompleteRead):
+                # A peer still uploading at the limit may observe a reset.
+                pass
+            finally:
+                extra.close()
+            body = sse({'usage': usage()}) + b'data: [DONE]\n\n'
+            response = (b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: '
+                        + str(len(body)).encode() + b'\r\n\r\n' + body)
+            for conn in accepted:
+                conn.sendall(response)
+            for conn in clients:
+                received = bytearray()
+                while b'data: [DONE]\n\n' not in received:
+                    part = conn.recv(4096)
+                    self.assertTrue(part)
+                    received.extend(part)
+                self.assertIn(b'HTTP/1.1 200 OK', received)
+            deadline = time.monotonic() + 10
+            while proxy.connections and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(proxy.connections, 0)
+            self.assertTrue(proxy.recorder.flush())
+            data = report(proxy.recorder.path, 'total', now=time.time() + .01)
+            self.assertEqual(data['totals']['known'], 480)
+        finally:
+            for conn in clients + accepted:
+                conn.close()
+            stop.set()
+            listener.close()
+            thread.join(3)
+
+    def test_gateway_can_reject_a_large_body_before_reading_it(self):
+        self.upstream.mode = 'reject'
+        for delay, expect in ((0, False), (.05, True), (.15, False)):
+            self.upstream.reject_delay = delay
+            for size in (2, 4095, 4096, 65535, 1024 * 1024):
+                connection = HTTPConnection('127.0.0.1', self.proxy.server_port, timeout=5)
+                headers = {'X-LLMDeploy-Client-IP': '192.0.2.4'}
+                if expect:
+                    headers['Expect'] = '100-continue'
+                connection.request('POST', '/v1/chat/completions', b'x' * size, headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 429)
+                response.read()
+                connection.close()
+        self.wait_recorded()
+        self.assertEqual(report(self.path, 'total', now=time.time() + .01)['totals']['failed'], 15)
+
+    def test_large_invalid_auth_preserves_real_gateway_response(self):
+        keyfile = Path(self.temp.name) / 'auth-keys.json'
+        keyfile.write_text(json.dumps({'version': 1, 'records': {'fixture': {
+            'sha256': hashlib.sha256(b'synthetic-gateway-key').hexdigest(), 'active': True}}}))
+        gateway = Gateway(('127.0.0.1', 0), keyfile,
+            state_path=Path(self.temp.name) / 'auth-state.json',
+            bindings_file=Path(self.temp.name) / 'auth-bindings.json',
+            backend_ports=[self.upstream.server_port], backend_managed_affinity=True)
+        self.start(gateway)
+        proxy = Proxy(0, gateway.server_port, Path(self.temp.name) / 'auth-stats.sqlite3')
+        self.start(proxy)
+        direct = HTTPConnection('127.0.0.1', gateway.server_port, timeout=5)
+        direct.request('POST', '/v1/chat/completions', b'{}', {'Authorization': 'Bearer incorrect-placeholder'})
+        response = direct.getresponse()
+        expected = response.status, response.read()
+        direct.close()
+        self.assertEqual(expected[0], 401)
+        for size in (2, 4095, 4096, 65535, 65536, 1024 * 1024):
+            for expect in (False, True):
+                for _ in range(2):
+                    connection = HTTPConnection('127.0.0.1', proxy.server_port, timeout=5)
+                    headers = {'Authorization': 'Bearer incorrect-placeholder'}
+                    if expect:
+                        headers['Expect'] = '100-continue'
+                    connection.request('POST', '/v1/chat/completions', b'x' * size, headers)
+                    response = connection.getresponse()
+                    self.assertEqual((response.status, response.read()), expected)
+                    connection.close()
+        for size in (4095, 4096, 1024 * 1024):
+            sock = socket.create_connection(('127.0.0.1', proxy.server_port), timeout=5)
+            stop = threading.Event()
+            uploader = None
+            try:
+                sock.sendall((f'POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n'
+                              f'Authorization: Bearer incorrect-placeholder\r\nContent-Length: {size}\r\n'
+                              'Expect: 100-continue\r\n\r\n').encode())
+                def upload():
+                    remaining = size
+                    while remaining and not stop.is_set():
+                        amount = min(remaining, 512)
+                        try:
+                            sock.sendall(b'x' * amount)
+                        except OSError:
+                            return
+                        remaining -= amount
+                        time.sleep(.002)
+                uploader = threading.Thread(target=upload, daemon=True)
+                uploader.start()
+                response = HTTPResponse(sock)
+                response.begin()
+                self.assertEqual((response.status, response.read()), expected)
+            finally:
+                stop.set()
+                if uploader:
+                    uploader.join(1)
+                sock.close()
 
     def test_dashboard_is_loopback_only_and_rejects_untrusted_hosts(self):
         self.request()
@@ -417,6 +657,17 @@ class ProxyTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 Proxy(port, self.upstream.server_port, Path(self.temp.name) / 'must-not-exist.sqlite3')
             self.assertFalse((Path(self.temp.name) / 'must-not-exist.sqlite3').exists())
+
+    def test_server_close_stops_a_running_proxy(self):
+        proxy = Proxy(0, self.upstream.server_port, Path(self.temp.name) / 'close.sqlite3')
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        self.assertTrue(proxy.ready.wait(3))
+        proxy.server_close()
+        thread.join(3)
+        self.assertTrue(proxy.finished.is_set())
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(proxy.recorder.thread.is_alive())
 
     def test_connection_limit_rejects_and_marks_a_gap(self):
         self.upstream.mode = 'slow_headers'
@@ -477,6 +728,252 @@ class ProxyTests(unittest.TestCase):
         self.assertIsNone(self.upstream.calls[-1][1])
 
     @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for local Caddy integration')
+    def test_caddy_reload_preserves_an_existing_stream(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            admin_port = probe.getsockname()[1]
+        old = Path(self.temp.name) / 'Caddyfile-before'
+        new = Path(self.temp.name) / 'Caddyfile-after'
+        template = '''{{
+    admin 127.0.0.1:{admin}
+    auto_https off
+}}
+http://127.0.0.1:{port} {{
+    log {{
+        output discard
+    }}
+    reverse_proxy 127.0.0.1:{upstream} {{
+        flush_interval 10ms
+    }}
+}}
+'''
+        old.write_text(template.format(admin=admin_port, port=port, upstream=self.upstream.server_port), encoding='utf-8')
+        new.write_text(template.format(admin=admin_port, port=port, upstream=self.proxy.server_port), encoding='utf-8')
+        environment = dict(os.environ)
+        environment['XDG_DATA_HOME'] = self.temp.name
+        environment['XDG_CONFIG_HOME'] = self.temp.name
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        process = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(old),
+            '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=environment, creationflags=flags)
+        client = None
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with socket.create_connection(('127.0.0.1', port), timeout=.2):
+                        break
+                except OSError:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        self.fail('synthetic Caddy did not start')
+                    time.sleep(.05)
+            self.upstream.mode = 'slow_length'
+            client = socket.create_connection(('127.0.0.1', port), timeout=5)
+            client.sendall((f'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
+                            'Content-Length: 2\r\n\r\n{}').encode())
+            self.assertTrue(self.upstream.stream_started.wait(2))
+            received = bytearray()
+            while b'data:' not in received:
+                received.extend(client.recv(4096))
+            self.upstream.mode = 'json'
+            reload = subprocess.run([os.environ['LLMDEPLOY_CADDY'], 'reload', '--address',
+                f'127.0.0.1:{admin_port}', '--config', str(new), '--adapter', 'caddyfile'],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=environment, creationflags=flags, timeout=5)
+            self.assertEqual(reload.returncode, 0)
+            connection = HTTPConnection('127.0.0.1', port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}')
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn('application/json', response.getheader('Content-Type'))
+            response.read()
+            connection.close()
+            self.wait_recorded()
+            self.assertEqual(report(self.path, 'total', now=time.time() + .01)['totals']['known'], 1)
+            self.upstream.stream_release.set()
+            while b'data: [DONE]\n\n' not in received:
+                part = client.recv(4096)
+                self.assertTrue(part)
+                received.extend(part)
+        finally:
+            self.upstream.stream_release.set()
+            if client:
+                client.close()
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+
+    @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for local Caddy integration')
+    def test_caddy_fallback_preserves_auth_and_never_replays_post(self):
+        keyfile = Path(self.temp.name) / 'fallback-keys.json'
+        keyfile.write_text(json.dumps({'version': 1, 'records': {'fixture': {
+            'sha256': hashlib.sha256(b'synthetic-gateway-key').hexdigest(), 'active': True}}}))
+        gateway = Gateway(('127.0.0.1', 0), keyfile,
+            state_path=Path(self.temp.name) / 'fallback-state.json',
+            bindings_file=Path(self.temp.name) / 'fallback-bindings.json',
+            backend_ports=[self.upstream.server_port], backend_managed_affinity=True)
+        self.start(gateway)
+        proxy = Proxy(0, gateway.server_port, Path(self.temp.name) / 'fallback-stats.sqlite3')
+        self.start(proxy)
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            primary_port = probe.getsockname()[1]
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        config = Path(self.temp.name) / 'Caddyfile-fallback'
+        config.write_text('''{
+    admin off
+    auto_https off
+}
+http://127.0.0.1:%d {
+    log {
+        output discard
+    }
+    reverse_proxy 127.0.0.1:%d 127.0.0.1:%d {
+        lb_policy first
+        fail_duration 2s
+        lb_try_duration 6s
+        lb_try_interval 20ms
+        header_up X-LLMDeploy-Client-IP {remote_host}
+        flush_interval 10ms
+        transport http {
+            dial_timeout 5s
+        }
+    }
+}
+''' % (port, primary_port, gateway.server_port), encoding='utf-8')
+        environment = dict(os.environ)
+        environment['XDG_DATA_HOME'] = self.temp.name
+        environment['XDG_CONFIG_HOME'] = self.temp.name
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        process = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(config),
+            '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=environment, creationflags=flags)
+        primary = None
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with socket.create_connection(('127.0.0.1', port), timeout=.2):
+                        break
+                except OSError:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        self.fail('synthetic Caddy did not start')
+                    time.sleep(.05)
+
+            def request(key):
+                connection = HTTPConnection('127.0.0.1', port, timeout=5)
+                connection.request('POST', '/v1/chat/completions',
+                    b'{"messages":[{"role":"user","content":"synthetic"}]}',
+                    {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
+                return connection, connection.getresponse()
+
+            connection, response = request('incorrect-placeholder')
+            self.assertEqual(response.status, 401)
+            response.read()
+            connection.close()
+            self.assertEqual(len(self.upstream.calls), 0)
+            connection, response = request('synthetic-gateway-key')
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            self.assertEqual(len(self.upstream.calls), 1)
+
+            class Primary(BaseHTTPRequestHandler):
+                protocol_version = 'HTTP/1.1'
+                def log_message(self, format, *args):
+                    pass
+                def do_POST(self):
+                    payload = self.rfile.read(int(self.headers['Content-Length']))
+                    self.server.calls += 1
+                    if self.server.mode == 'drop':
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        self.close_connection = True
+                        return
+                    if self.server.mode == 'sse-drop':
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'text/event-stream')
+                        self.send_header('Content-Length', '100')
+                        self.end_headers()
+                        self.wfile.write(b'data: partial\n\n')
+                        self.wfile.flush()
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        self.close_connection = True
+                        return
+                    upstream = HTTPConnection('127.0.0.1', proxy.server_port, timeout=5)
+                    upstream.request('POST', self.path, payload, {
+                        'Content-Type': self.headers.get('Content-Type'),
+                        'Authorization': self.headers.get('Authorization'),
+                        'X-LLMDeploy-Client-IP': self.headers.get('X-LLMDeploy-Client-IP')})
+                    result = upstream.getresponse()
+                    body = result.read()
+                    self.send_response(result.status)
+                    self.send_header('Content-Type', result.getheader('Content-Type'))
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    upstream.close()
+
+            class PrimaryServer(ThreadingHTTPServer):
+                def handle_error(self, request, client_address):
+                    pass  # Deliberate reset scenarios in this test.
+
+            primary = PrimaryServer(('127.0.0.1', primary_port), Primary)
+            primary.mode, primary.calls = 'normal', 0
+            primary.daemon_threads = True
+            self.start(primary)
+            time.sleep(2.2)
+            connection, response = request('synthetic-gateway-key')
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            self.assertEqual((primary.calls, len(self.upstream.calls)), (1, 2))
+            self.assertTrue(proxy.recorder.flush())
+            self.assertEqual(report(proxy.recorder.path, 'total', now=time.time() + .01)['totals']['known'], 1)
+
+            primary.mode = 'drop'
+            try:
+                connection, response = request('synthetic-gateway-key')
+                self.assertNotEqual(response.status, 200)
+                response.read()
+                connection.close()
+            except (OSError, IncompleteRead):
+                pass
+            self.assertEqual((primary.calls, len(self.upstream.calls)), (2, 2))
+            connection, response = request('synthetic-gateway-key')
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            self.assertEqual((primary.calls, len(self.upstream.calls)), (2, 3))
+
+            time.sleep(2.2)
+            primary.mode = 'sse-drop'
+            connection, response = request('synthetic-gateway-key')
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(5), b'data:')
+            with self.assertRaises(IncompleteRead):
+                response.read()
+            connection.close()
+            self.assertEqual((primary.calls, len(self.upstream.calls)), (3, 3))
+
+            time.sleep(2.2)
+            primary.mode = 'normal'
+            connection, response = request('synthetic-gateway-key')
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            self.assertEqual((primary.calls, len(self.upstream.calls)), (4, 4))
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for local Caddy integration')
     def test_caddy_overwrites_spoofed_origin_and_preserves_response(self):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
@@ -525,6 +1022,13 @@ http://127.0.0.1:%d {
             data = report(self.path, 'total', now=time.time() + .01)
             self.assertEqual(data['clients'][0]['ip'], '127.0.0.1')
             self.assertEqual(self.upstream.calls[-1][1:], ('Bearer synthetic-placeholder', None))
+            large_headers = {f'X-Synthetic-{i}': 'x' * 5000 for i in range(3)}
+            connection = HTTPConnection('127.0.0.1', port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}', large_headers)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
             self.upstream.mode = 'slow_length'
             self.upstream.stream_started.clear()
             self.upstream.stream_release.clear()
@@ -552,6 +1056,116 @@ http://127.0.0.1:%d {
 
 
 class ReportTests(unittest.TestCase):
+    def test_subsecond_coverage_gap_is_incomplete_everywhere(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = datetime(2026, 1, 3, 12, tzinfo=timezone(timedelta(hours=8))).timestamp()
+            start = now - 12 * 3600
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('first', start, now - 300.4, now - 300.4, 0))
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('second', now - 299.6, now, now, 0))
+            db.commit()
+            db.close()
+            value = report(path, 'today', now=now)
+            self.assertFalse(value['totals']['complete'])
+            self.assertFalse(value['days'][-1]['complete'])
+            bucket = next(point for point in value['series_24h'] if point['start'] == now - 600)
+            self.assertFalse(bucket['complete'])
+            self.assertAlmostEqual(bucket['covered_seconds'], 599.2, places=4)
+
+    def test_stale_active_snapshot_is_unknown_even_with_live_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('live', now - 60, now - 1, None, 0))
+            db.execute('INSERT INTO active_samples VALUES (?,?)', ('live', now - 4))
+            db.execute('INSERT INTO active_requests VALUES (?,?,?,?,?,?)',
+                       ('fixture', 'live', now - 30, '192.0.2.4', None, None))
+            db.commit()
+            db.close()
+            value = report(path, 'total', now=now)
+            self.assertTrue(value['collector_live'])
+            self.assertFalse(value['active_ready'])
+            self.assertEqual(value['active'], [])
+
+    def test_session_and_request_pagination_do_not_drop_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 1000, now, now, 0))
+            for i in range(205):
+                db.execute('''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                    input_tokens,output_tokens,cached_tokens,session_id,first_visible)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                    ('fixture', now - 205 + i, '192.0.2.4', 2, 200, 'known', 100, 7, 60,
+                     f'session-{i % 105}', .5))
+            db.commit()
+            db.close()
+            value = report(path, 'total', now=now + .01, request_offset=100, session_offset=100)
+            self.assertEqual((value['request_count'], len(value['requests'])), (205, 100))
+            self.assertEqual((value['session_count'], len(value['sessions'])), (105, 5))
+            self.assertEqual(value['totals']['input'], 20500)
+
+    def test_schema_one_migrates_without_losing_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            db = sqlite3.connect(path)
+            db.executescript('''CREATE TABLE stats_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                INSERT INTO stats_meta VALUES ('application','llmdeploy-gateway-stats');
+                CREATE TABLE runs (id TEXT PRIMARY KEY,started REAL NOT NULL,last_seen REAL NOT NULL,
+                    ended REAL,dropped INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE requests (id INTEGER PRIMARY KEY,run_id TEXT NOT NULL,finished REAL NOT NULL,
+                    client_ip TEXT,elapsed REAL NOT NULL,http_status INTEGER,state TEXT NOT NULL,
+                    input_tokens INTEGER,output_tokens INTEGER,cached_tokens INTEGER);
+                INSERT INTO runs VALUES ('old',100,200,200,0);
+                INSERT INTO requests VALUES (1,'old',150,'192.0.2.4',2,200,'known',100,7,60);
+                PRAGMA user_version=1;''')
+            db.commit()
+            db.close()
+            migrated = _open(path)
+            self.assertEqual(migrated.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(migrated.execute('SELECT input_tokens,session_id,first_visible FROM requests').fetchone(),
+                             (100, None, None))
+            migrated.execute("UPDATE runs SET started=?,last_seen=?,ended=? WHERE id='old'",
+                             (1800000100, 1800000200, 1800000200))
+            migrated.execute("UPDATE requests SET finished=1800000150 WHERE run_id='old'")
+            migrated.commit()
+            migrated.close()
+            value = report(path, 'total', now=1800000201)
+            self.assertEqual((value['totals']['input'], value['totals']['unknown_session']), (100, 1))
+
+    def test_backend_metric_subset_and_unavailable(self):
+        class Metrics(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+            def do_GET(self):
+                body = (b'deepinfer:requests_running 2\n' b'deepinfer:requests_waiting 1\n'
+                    b'deepinfer:workers_alive 8\n' b'deepinfer:admission_ready 1\n'
+                    b'deepinfer:prompt_tokens_total 100\n' b'deepinfer:prompt_cache_hit_tokens_total 30\n'
+                    b'deepinfer:prompt_cache_hit_requests_total 4\n')
+                if getattr(self.server, 'invalid_ratio', False):
+                    body = body.replace(b'prompt_cache_hit_tokens_total 30', b'prompt_cache_hit_tokens_total 130')
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Metrics)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            value = read_backend(server.server_port)
+            self.assertTrue(value['available'])
+            self.assertEqual((value['running'], value['waiting'], value['cached_total']), (2, 1, 30))
+            self.assertEqual(value['hit_rate'], .3)
+            server.invalid_ratio = True
+            self.assertIsNone(read_backend(server.server_port)['hit_rate'])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+
     def test_unclean_stale_run_never_claims_a_historical_day_is_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'usage.sqlite3'
