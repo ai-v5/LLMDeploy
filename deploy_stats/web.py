@@ -6,27 +6,29 @@ import socket
 import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
-from .backends import read_backend
+from .backends import read_backend, read_telemetry
 from .report import active_report, report
 
 STATIC = Path(__file__).resolve().parent / 'static'
 ASSETS = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.css': ('app.css', 'text/css; charset=utf-8'),
-          '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
-          '/app-trends-v1.js': ('app.js', 'text/javascript; charset=utf-8')}
+          '/app-telemetry-v2.js': ('app.js', 'text/javascript; charset=utf-8')}
 
 
 class Dashboard(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, port, database, backend_ports=()):
+    def __init__(self, port, database, backend_ports=(), telemetry_port=None):
         if type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('INVALID_PORT')
         self.database = Path(database)
         if len(backend_ports) > 8 or any(type(p) is not int or not 1 <= p <= 65535 for p in backend_ports):
             raise ValueError('INVALID_BACKEND_PORTS')
         self.backend_ports = tuple(dict.fromkeys(backend_ports))
+        if telemetry_port is not None and (type(telemetry_port) is not int or not 1 <= telemetry_port <= 65535):
+            raise ValueError('INVALID_TELEMETRY_PORT')
+        self.telemetry_port = telemetry_port
         super().__init__(('127.0.0.1', port), Handler)
 
     def server_bind(self):
@@ -73,6 +75,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, (STATIC / name).read_bytes(), media)
             except OSError:
                 self.send(503, b'Unavailable', 'text/plain; charset=utf-8')
+            return
+        if url.path == '/api/telemetry':
+            if url.query:
+                self.send(400, b'{"error":"INVALID_TELEMETRY_QUERY"}', 'application/json; charset=utf-8')
+                return
+            body = json.dumps(read_telemetry(self.server.telemetry_port), allow_nan=False, separators=(',', ':')).encode()
+            self.send(200, body, 'application/json; charset=utf-8')
             return
         if url.path == '/api/active':
             if url.query:

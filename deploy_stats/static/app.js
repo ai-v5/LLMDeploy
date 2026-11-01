@@ -12,6 +12,11 @@ let lastSnapshot = null;
 let pendingRefresh = null;
 let activeExpiry = null;
 let pendingActive = null;
+let pendingTelemetry = null;
+let telemetrySnapshot = null;
+let telemetryExpiry = null;
+let telemetryNodePort = null;
+let telemetryOptionsKey = null;
 let latestActiveAsOf = 0;
 let currentView = 'overview';
 const tables = {
@@ -37,54 +42,120 @@ const count = (value) => value === null || value === undefined ? '—' : integer
 const fingerprint = (value) => value ? value.slice(0, 12) : '未知';
 const setTextIfPresent = (id, value) => { const element = $(id); if (element) element.textContent = value; };
 
-function efficiencyProfile() {
-  const element = $('efficiency-profile');
-  if (!element) return null;
-  const read = (name) => {
-    const raw = element.dataset[name];
-    if (typeof raw !== 'string' || !raw.trim()) return null;
-    const value = Number(raw);
-    return Number.isFinite(value) && value > 0 ? value : null;
-  };
-  const profile = {prefillFlops: read('prefillFlops'), peakFlops: read('peakFlops'),
-    decodeBytesLow: read('decodeBytesLow'), decodeBytesHigh: read('decodeBytesHigh'),
-    bandwidth: read('bandwidth'), description: element.dataset.description || ''};
-  if ([profile.prefillFlops, profile.peakFlops, profile.decodeBytesLow, profile.decodeBytesHigh,
-    profile.bandwidth].some((value) => value === null) || profile.decodeBytesLow > profile.decodeBytesHigh ||
-    !profile.description.trim()) return null;
-  return profile;
+function freshTelemetry(part, now) {
+  return part && typeof part.valid_until === 'number' && Number.isFinite(part.valid_until) && now < part.valid_until ? part : null;
 }
 
-function estimateEfficiency(stats, profile) {
-  const unknown = {mfu: null, mbuLow: null, mbuHigh: null};
-  if (!stats || !profile) return unknown;
-  const valid = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-  const ratio = (rateValue, units, capacity) => {
-    if (!valid(rateValue) || !valid(units) || !valid(capacity) || units === 0 || capacity === 0) return null;
-    const value = rateValue * units / capacity;
-    return Number.isFinite(value) && Number.isFinite(value * 100) ? value : null;
-  };
-  return {
-    mfu: valid(stats.prefill_samples) && stats.prefill_samples > 0 ?
-      ratio(stats.prefill_estimate_tps, profile.prefillFlops, profile.peakFlops) : null,
-    mbuLow: valid(stats.decode_samples) && stats.decode_samples > 0 ?
-      ratio(stats.decode_estimate_tps, profile.decodeBytesLow, profile.bandwidth) : null,
-    mbuHigh: valid(stats.decode_samples) && stats.decode_samples > 0 ?
-      ratio(stats.decode_estimate_tps, profile.decodeBytesHigh, profile.bandwidth) : null,
-  };
+function telemetryValues(data, port, now) {
+  const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes : [];
+  const item = nodes.find((node) => node && node.backend_port === port && node.source_ok === true);
+  const prefill = item && freshTelemetry(item.prefill, now);
+  const decode = item && freshTelemetry(item.decode, now);
+  const hbm = item && freshTelemetry(item.hbm, now);
+  const read = (value, max = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
+  return {prefill: read(prefill && prefill.tokens_per_second), decode: read(decode && decode.tokens_per_second),
+    mfu: read(prefill && prefill.mfu_estimate), hbm: read(hbm && hbm.mean_percent, 100)};
 }
 
-function renderEfficiency(stats) {
-  const profile = efficiencyProfile();
-  const result = estimateEfficiency(stats, profile);
-  const show = (value) => value !== null && value > 0 && value < 0.0001 ? '<0.01%' : percent(value);
-  setTextIfPresent('overview-mfu', show(result.mfu));
-  setTextIfPresent('overview-mbu', result.mbuLow === null || result.mbuHigh === null ? '—' :
-    `${show(result.mbuLow)} – ${show(result.mbuHigh)}`);
-  setTextIfPresent('overview-mfu-detail', profile ? `单请求等效 · ${count(stats.prefill_samples)} 个样本` : '未配置估算假设');
-  setTextIfPresent('overview-mbu-detail', profile ? `两种权重精度情景 · ${count(stats.decode_samples)} 个样本` : '未配置估算假设');
-  setTextIfPresent('overview-efficiency-note', profile ? `${profile.description}。按入口请求速度估算，包含排队与网络；并发、MoE 权重复用、KV 读取和推测解码均会影响结果。缓存全命中时粗估可能为零，不表示设备没有计算。结果不是设备实测，也不是严格上下界；历史换版或混合模型可能使结果不具代表性。` :
-    'MFU / MBU 需要配置模型和硬件假设；当前没有真实设备利用率数据。');
+function renderTelemetry(data) {
+  telemetrySnapshot = data;
+  if (telemetryExpiry) clearTimeout(telemetryExpiry);
+  telemetryExpiry = null;
+  const now = Date.now() / 1000;
+  const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes.filter((item) => item && typeof item === 'object') : [];
+  if (!nodes.some((item) => item.backend_port === telemetryNodePort)) telemetryNodePort = nodes.length ? nodes[0].backend_port : null;
+  const select = $('telemetry-node');
+  if (select) {
+    const key = JSON.stringify(nodes.map((item) => [item.backend_port, item.label]));
+    if (key !== telemetryOptionsKey) {
+      select.replaceChildren();
+      nodes.forEach((item) => {
+        const option = document.createElement('option'); option.value = String(item.backend_port);
+        option.textContent = item.label || '未知实例'; select.appendChild(option);
+      });
+      if (!nodes.length) {
+        const option = document.createElement('option'); option.value = ''; option.textContent = '等待采样'; select.appendChild(option);
+      }
+      telemetryOptionsKey = key;
+    }
+    select.value = telemetryNodePort === null ? '' : String(telemetryNodePort);
+  }
+  const values = telemetryValues(data, telemetryNodePort, now);
+  const selectedNode = nodes.find((item) => item.backend_port === telemetryNodePort);
+  const prefillSample = selectedNode && freshTelemetry(selectedNode.prefill, now);
+  const decodeSample = selectedNode && freshTelemetry(selectedNode.decode, now);
+  const measured = (value) => value === null || value === undefined ? '—' : speed(value);
+  const showMfu = (value) => value !== null && value !== undefined && value > 0 && value < .0001 ? '<0.01%' : percent(value);
+  setTextIfPresent('live-prefill-tps', measured(values.prefill));
+  setTextIfPresent('live-decode-tps', measured(values.decode));
+  setTextIfPresent('live-mfu', showMfu(values.mfu));
+  setTextIfPresent('live-mbu', '—');
+  setTextIfPresent('live-hbm', values.hbm === null ? '—' : `${number.format(values.hbm)}%`);
+  setTextIfPresent('live-prefill-samples', values.prefill === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(prefillSample.log_at * 1000))} 写出 · rank 近似和`);
+  setTextIfPresent('live-decode-samples', values.decode === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(decodeSample.log_at * 1000))} 写出 · rank 近似和`);
+  setTextIfPresent('live-mfu-detail', values.mfu === null ? '等待所选设备组 Prefill 样本' : '引擎吞吐与模型假设换算');
+  setTextIfPresent('live-hbm-detail', values.hbm === null ? '所选设备组暂无有效样本' : '所选设备组驱动读数的平均');
+  setTextIfPresent('telemetry-status', nodes.length ? `最近读取于 ${clock.format(new Date(data.sampled_at * 1000))}` : '采样未连接');
+  const tbody = $('telemetry-body');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  nodes.forEach((item) => {
+    const row = document.createElement('tr');
+    const prefill = item.source_ok === true ? freshTelemetry(item.prefill, now) : null;
+    const decode = item.source_ok === true ? freshTelemetry(item.decode, now) : null;
+    const hbm = item.source_ok === true ? freshTelemetry(item.hbm, now) : null;
+    const timerStep = item.phase_timers && item.phase_timers.step;
+    const timersFresh = prefill && prefill.step === timerStep || decode && decode.step === timerStep;
+    const timer = (phase) => {
+      const value = timersFresh && item.phase_timers && item.phase_timers[phase];
+      return value && value.mean_ms !== null ? `${number.format(value.mean_ms)} ms · ${value.ranks}/${value.expected_ranks} rank` : '—';
+    };
+    cell(row, item.label || '未知实例');
+    cell(row, prefill ? `${measured(prefill.tokens_per_second)} · 日志 ${clock.format(new Date(prefill.log_at * 1000))}` : '—');
+    cell(row, decode ? `${measured(decode.tokens_per_second)} · 日志 ${clock.format(new Date(decode.log_at * 1000))}` : '—');
+    cell(row, prefill ? showMfu(prefill.mfu_estimate) : '—');
+    cell(row, hbm ? `${number.format(hbm.mean_percent)}% · ${hbm.device_count} 卡` : '—');
+    cell(row, timer('prefill'));
+    cell(row, timer('decode'));
+    const engine = Boolean(prefill || decode);
+    const device = Boolean(hbm);
+    cell(row, item.duplicate_source ? '设备组重复，待核验' : !item.clock_ok ? '时钟不可用' :
+      !item.source_ok ? '引擎版本待核验' : item.backend_ready === false ? '后端未就绪' :
+      item.driver_ok === false ? '驱动版本待核验' :
+      engine && device ? '引擎与设备有样本' : engine ? '仅引擎有样本' : device ? '仅设备有样本' : '来源已核验，暂无样本');
+    tbody.appendChild(row);
+  });
+  if (!nodes.length) {
+    const row = document.createElement('tr');
+    const value = document.createElement('td'); value.colSpan = 8; value.className = 'empty';
+    value.textContent = '真实采样尚未连接'; row.appendChild(value); tbody.appendChild(row);
+  }
+  const profile = selectedNode && selectedNode.assumptions;
+  const assumption = profile ? `当前假设 ${number.format(profile.prefill_flops_per_token / 1e9)} GFLOP/输入 Token、${number.format(profile.peak_flops_per_device / 1e12)} TFLOP/s/卡；` : '';
+  setTextIfPresent('live-efficiency-note', `${assumption}Prefill-MFU 按引擎吞吐和模型假设估算，未计上下文 Attention 等，并非硬件算力实测。HBM 为设备级混合阶段采样，无法直接归因 Decode。`);
+  const deadlines = nodes.flatMap((item) => [item.prefill, item.decode, item.hbm])
+    .map((part) => part && part.valid_until).filter((value) => typeof value === 'number' && Number.isFinite(value) && value > now);
+  if (deadlines.length) telemetryExpiry = setTimeout(() => renderTelemetry(telemetrySnapshot),
+    Math.min(2147483647, Math.max(1, (Math.min(...deadlines) - now) * 1000 + 20)));
+}
+
+async function refreshTelemetry() {
+  if (pendingTelemetry) return pendingTelemetry;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  pendingTelemetry = (async () => {
+    try {
+      const response = await fetch('/api/telemetry', {cache: 'no-store', signal: controller.signal});
+      if (!response.ok) throw new Error('telemetry unavailable');
+      renderTelemetry(await response.json());
+    } catch (_) {
+      renderTelemetry({available: false, nodes: []});
+    } finally {
+      clearTimeout(timeout);
+      pendingTelemetry = null;
+    }
+  })();
+  return pendingTelemetry;
 }
 
 function activateView(name) {
@@ -482,15 +553,10 @@ function render(data) {
   $('total-cached').textContent = display(stats.cached, stats);
   $('total-tps').textContent = stats.window_tps === null ? '—' : display(stats.window_tps, stats, true);
   $('cache-detail').textContent = stats.hit_rate === null ? '按输入 Token 加权命中率 —' : `按输入 Token 加权命中率 ${number.format(stats.hit_rate * 100)}%`;
-  setTextIfPresent('overview-prefill-tps', speed(stats.prefill_estimate_tps));
   setTextIfPresent('overview-prefill-wait', seconds(stats.first_mean));
-  setTextIfPresent('overview-decode-tps', speed(stats.decode_estimate_tps));
   setTextIfPresent('overview-hit-rate', percent(stats.hit_rate));
-  setTextIfPresent('overview-prefill-samples', `${count(stats.prefill_samples)} 个样本 · 按耗时加权`);
   setTextIfPresent('overview-wait-samples', `${count(stats.first_samples)} 个可见增量样本`);
-  setTextIfPresent('overview-decode-samples', `${count(stats.decode_samples)} 个样本 · 按耗时加权`);
   setTextIfPresent('overview-hit-samples', `按输入 Token 加权 · ${count(stats.known)} 个已计量请求`);
-  renderEfficiency(stats);
   $('success-rate').textContent = percent(stats.success_rate);
   $('success-detail').textContent = `${count(stats.successes)} / ${count(stats.classified)} 个可判定请求`;
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
@@ -554,10 +620,9 @@ async function refresh() {
     $('status-dot').classList.remove('live');
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';
-    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps', 'overview-prefill-tps',
-      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate', 'overview-mfu', 'overview-mbu'].forEach((id) => setTextIfPresent(id, '—'));
-    ['overview-prefill-samples', 'overview-wait-samples', 'overview-decode-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
-    ['overview-mfu-detail', 'overview-mbu-detail'].forEach((id) => setTextIfPresent(id, '统计不可用'));
+    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps',
+      'overview-prefill-wait', 'overview-hit-rate'].forEach((id) => setTextIfPresent(id, '—'));
+    ['overview-wait-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
     charts.forEach(({id}) => { $(`chart-${id}-svg`)?.replaceChildren(); const label = $(`chart-${id}`); if (label) label.textContent = '暂无数据'; });
     $('clients-body').replaceChildren();
     $('days-body').replaceChildren();
@@ -589,6 +654,18 @@ $('refresh').addEventListener('click', () => {
 });
 setupTables();
 setupNavigation();
+$('telemetry-node')?.addEventListener('change', (event) => {
+  telemetryNodePort = event.target.value === '' ? null : Number(event.target.value);
+  if (telemetrySnapshot) renderTelemetry(telemetrySnapshot);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (telemetrySnapshot) renderTelemetry(telemetrySnapshot);
+    refreshTelemetry();
+  }
+});
 refresh();
+refreshTelemetry();
 setInterval(() => { if (!pendingRefresh) refresh(); }, 10000);
 setInterval(refreshActive, 2000);
+setInterval(refreshTelemetry, 15000);

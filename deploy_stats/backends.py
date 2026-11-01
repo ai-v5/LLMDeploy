@@ -1,5 +1,6 @@
 """Read the bounded, public numeric subset of local backend metrics."""
 from http.client import HTTPConnection, HTTPException
+import json
 import math
 import time
 
@@ -43,5 +44,34 @@ def read_backend(port):
         return result
     except (OSError, HTTPException, UnicodeError, ValueError, OverflowError):
         return result
+    finally:
+        connection.close()
+
+
+def read_telemetry(port):
+    unavailable = {'available': False, 'nodes': []}
+    if port is None:
+        return unavailable
+    connection = HTTPConnection('127.0.0.1', port, timeout=2)
+    try:
+        connection.request('GET', '/snapshot')
+        response = connection.getresponse()
+        if response.status != 200:
+            return unavailable
+        payload = response.read(1024 * 1024 + 1)
+        if len(payload) > 1024 * 1024:
+            return unavailable
+        value = json.loads(payload)
+        now = time.time()
+        stamp = value.get('sampled_at') if isinstance(value, dict) else None
+        if (not isinstance(value, dict) or value.get('schema') != 1 or value.get('kind') != 'deepinfer-telemetry' or
+                type(stamp) not in (int, float) or not math.isfinite(stamp) or not 0 <= now - stamp <= 620 or
+                not isinstance(value.get('nodes'), list) or len(value['nodes']) > 8):
+            return unavailable
+        value['available'] = True
+        json.dumps(value, allow_nan=False)
+        return value
+    except (OSError, HTTPException, UnicodeError, ValueError, OverflowError):
+        return unavailable
     finally:
         connection.close()
