@@ -259,7 +259,10 @@ class UsageCapture:
         if not self.discard_event and self.event_lines:
             payload = self.event_data
             if payload == b'[DONE]':
-                self.terminal = True
+                if self.protocol == 'chat':
+                    self.terminal = True
+                elif not self.terminal:
+                    self.incomplete = True
             elif self.terminal:
                 self.incomplete = True
             elif (self.max_delta is not None and len(payload) > self.max_delta and
@@ -281,8 +284,16 @@ class UsageCapture:
                     self.incomplete = True
                 else:
                     event_type = value.get('type')
+                    # A prior usage snapshot is no longer final when generation
+                    # continues. A later valid usage event can restore it.
                     if self.protocol == 'chat':
                         choices = value.get('choices')
+                        self.usage = None
+                    elif self.protocol == 'messages' and event_type != 'message_stop':
+                        self.usage = None
+                    elif self.protocol == 'messages' and value.get('usage') is not None:
+                        self.incomplete = True
+                    if self.protocol == 'chat':
                         if isinstance(choices, list) and any(
                                 isinstance(choice, dict) and isinstance(choice.get('finish_reason'), str)
                                 and choice['finish_reason'] for choice in choices):
@@ -327,7 +338,8 @@ class UsageCapture:
     def finish(self):
         if self.kind == 'json' and not self.too_large:
             return extract_usage(self.protocol, self._decode(self.buffer))
-        if self.kind == 'sse' and self.terminal and not self.incomplete:
+        if (self.kind == 'sse' and self.terminal and not self.incomplete and not self.buffer and
+                not self.event_lines and not self.discard_line and not self.discard_event):
             return self.usage
         return None
 

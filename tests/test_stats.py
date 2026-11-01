@@ -78,6 +78,59 @@ class CaptureTests(unittest.TestCase):
         parser.feed(sse({'type': 'message_stop'}))
         self.assertEqual(parser.finish(), (100, 7, 60))
 
+    def test_earlier_usage_is_not_final_if_later_chat_events_continue(self):
+        early = sse({'usage': usage(output_tokens=1)})
+        content = sse({'choices': [{'delta': {'content': 'later'}}]})
+        finish = sse({'choices': [{'finish_reason': 'stop'}]})
+        final = sse({'choices': [], 'usage': usage(output_tokens=7)})
+        for later in (content + finish, finish, sse({'unrecognized': 'later event'})):
+            with self.subTest(later=later):
+                parser = UsageCapture('chat', 'text/event-stream')
+                parser.feed(early + later + b'data: [DONE]\n\n')
+                self.assertIsNone(parser.finish())
+                parser = UsageCapture('chat', 'text/event-stream')
+                parser.feed(early + later + final + b'data: [DONE]\n\n')
+                self.assertEqual(parser.finish(), (100, 7, 60))
+
+    def test_messages_usage_before_later_content_is_not_final(self):
+        delta = sse({'type': 'message_delta', 'usage': {'input_tokens': 40,
+            'cache_read_input_tokens': 60, 'output_tokens': 7}})
+        content = sse({'type': 'content_block_delta', 'delta': {'text': 'later'}})
+        stop = sse({'type': 'message_stop'})
+        parser = UsageCapture('messages', 'text/event-stream')
+        parser.feed(delta + content + stop)
+        self.assertIsNone(parser.finish())
+        parser = UsageCapture('messages', 'text/event-stream')
+        parser.feed(delta + content + delta + stop)
+        self.assertEqual(parser.finish(), (100, 7, 60))
+
+    def test_messages_stop_with_conflicting_usage_is_unknown(self):
+        delta = sse({'type': 'message_delta', 'usage': {'input_tokens': 40,
+            'cache_read_input_tokens': 60, 'output_tokens': 1}})
+        stop = sse({'type': 'message_stop', 'usage': {'input_tokens': 40,
+            'cache_read_input_tokens': 60, 'output_tokens': 2}})
+        parser = UsageCapture('messages', 'text/event-stream')
+        parser.feed(delta + stop)
+        self.assertIsNone(parser.finish())
+
+    def test_done_cannot_replace_protocol_specific_terminal_event(self):
+        delta = sse({'type': 'message_delta', 'usage': {'input_tokens': 40,
+            'cache_read_input_tokens': 60, 'output_tokens': 7}})
+        parser = UsageCapture('messages', 'text/event-stream')
+        parser.feed(delta + b'data: [DONE]\n\n')
+        self.assertIsNone(parser.finish())
+        parser = UsageCapture('messages', 'text/event-stream')
+        parser.feed(delta + sse({'type': 'message_stop'}) + b'data: [DONE]\n\n')
+        self.assertEqual(parser.finish(), (100, 7, 60))
+
+    def test_unfinished_data_after_terminal_invalidates_previous_usage(self):
+        body = sse({'usage': usage()}) + b'data: [DONE]\n\n'
+        for tail in (b'data: {"choices":[', b'data: {"choices":[]}\n'):
+            with self.subTest(tail=tail):
+                parser = UsageCapture('chat', 'text/event-stream')
+                parser.feed(body + tail)
+                self.assertIsNone(parser.finish())
+
     def test_origin_header_requires_one_valid_ip(self):
         headers = Message()
         self.assertIsNone(client_ip(headers))
