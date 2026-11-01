@@ -40,3 +40,37 @@ SQLite 使用 WAL / NORMAL；已提交记录可跨普通进程退出保留，正
 通知进程每约 30 秒在后台通过 SSH 只读查询，两台分别超时，查询不会阻塞健康观察。仅允许固定报告命令、已验证的路径与目标；远端结果仅提取有界数字，原始文本和异常不进入消息。以通知机本地接收时间判断缓存是否超过 90 秒，避免跨机时钟偏差造成误判。事件与窗口仍按部署机时间；与通知机的估计偏差超过 5 秒时显示提示，不自动修改系统时钟。
 
 `@小鲁班 状态` 保留部署数量和健康状态，并按实例返回五个窗口的输入、输出、缓存、命中率、均速和生成速度。IP 仍只显示最后一段；查询游标、投递去重及失败不自动重发的合同不变。统计故障不等同于 vLLM 故障。
+
+## 统一入口的 IP 用量与本机页面
+
+`deploy_stats` 是独立的入口统计组件，适用于固定 DeepInfer recipe API 的 Chat Completions、Responses 和 Messages JSON/SSE。它放在 Caddy 与**现有认证网关之间**，透传请求和响应，从正常结束的原生 `usage` 提取输入、输出及缓存命中；不会改变模型服务、认证或路由。页面和采集代理都只监听 `127.0.0.1`。这是与上面的 vLLM Stat Logger 分开的账本，不能把两者直接相加，也不自动补齐启用前的历史。
+
+Chat Completions 的最终流式用量语义来自[固定版本的 recipe 源码](https://github.com/deepseek-ai/deepseek-recipe/blob/935817c66f5d6e64838f419692545f06787e485f/deepseek-recipe/src/protocol/openai/chat_completion/response/chunk_generator.rs)；更换后端或协议版本时须重新核对，不按旧版本假设填零。
+
+页面展示今天、滚动 24 小时、7 天和累计的总 Token、输入、输出、缓存命中、窗口输出 tok/s 与各请求 IP；另有最近 24 小时和近 14 日的统计。**总 Token = 输入 + 输出**，缓存命中是输入子集。窗口输出 tok/s 为已计量输出 / 窗口墙钟秒数，包含空闲时间，不是单请求解码速度。所有 Token 按请求完成时间入桶；24 小时曲线显示完整的 10 分钟区间，未满区间仍计入概览。这不是逐 token 生成时刻的曲线，长请求在结束前没有最终用量。
+
+请求中断、上游错误、未知协议、缺失或互相矛盾的用量字段记为未计量，不当成零。无采集覆盖显示空缺；`≥` 表示已观测下限，命中率仅针对已计量请求。队列满时记录丢失数并将相关采集运行周期视为不完整；运行周期与心跳用于标识中断，队列丢失数可能包含所选窗口以外的时间。SQLite 使用 WAL / NORMAL，异常退出或断电可能丢失尾部；这不是故障下逐 token 零丢失的计费账本。
+
+页面的运行覆盖只反映采集进程心跳，不证明 Caddy 已经切换或所有入口流量均经过该代理。启动代理但尚未切换、入口配置后来变化或客户端绕过入口时，仍可能有未记录流量；必须单独核验真实入口路由，不能将心跳 100% 当作入口完整性证明。
+
+为适配 Windows 的本机异步事件循环，采集代理最多同时处理 192 个连接；超限返回 429，并标记统计缺口。对于带请求体的请求，代理最多先等待约 10ms，以便透传上游立即返回的认证或准入拒绝，再开始转发请求体。上线前必须核对连接上限不低于实际网关需要的并发与等待配额，并实测对首 token 延迟的影响；扩大服务池后需重新评估，不能把连接数当作模型吞吐能力。
+
+账本只保留 IP、请求结束时间、耗时、HTTP 状态及数值用量，不保存认证信息、提示词、模型回答或原始 Token。IP 和账本属于私有运行数据，目录需限制本机访问，只放忽略的 `local/` 或操作者自己的私有位置。页面拒绝跨站 Origin 和非 loopback Host，且不提供修改接口；同一台机器上有权限读取账本的用户仍可读取这些 IP。
+
+下面是**待单独授权部署**时的示例；目录、端口和原网关地址须先核实，命令不会由开发或测试自动执行：
+
+```powershell
+New-Item -ItemType Directory -Path local/stats -Force
+python -m deploy_stats proxy --port 19882 --upstream-port 19010 --database local/stats/usage.sqlite3
+python -m deploy_stats dashboard --port 19881 --database local/stats/usage.sqlite3
+```
+
+示例中的 `19010` 仅代表既有网关的 loopback 端口。[Caddy 示例](../services/deepinfer/Caddyfile.stats.example)仅供审阅。先在隔离环境验证代理，再按维护流程排空入口，并将 Caddy 的 `reverse_proxy` 目标改为 `127.0.0.1:19882`，同时在该反代块内设置：
+
+```caddyfile
+header_up X-LLMDeploy-Client-IP {remote_host}
+```
+
+Caddy 必须覆盖客户端传入的同名头；采集器不信任客户端的 `X-Forwarded-For`，缺失、重复或非法来源显示为“未知来源”。`{remote_host}` 是 Caddy 的直接对端：若 Caddy 前还有其他代理，显示的是该代理 IP，需先明确可信代理链，不能自行相信转发头。参见 Caddy 的[反向代理头部说明](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#headers)和[请求占位符](https://caddyserver.com/docs/caddyfile/concepts#placeholders)。所有入口别名必须指向同一个采集代理，绕过它的流量不在统计范围。
+
+切换前保留原 Caddy 配置，验证认证失败控制、JSON/SSE 字节内容、并发、取消、大请求、来源 IP 和页面；核对源版本与真实用量字段，检查记录器心跳及缺失数。验证通过才恢复通知。回退时把 Caddy 的目标恢复到原网关，保留账本并停止本次采集/页面进程；回退期间形成统计空缺，不得视为零。上述均需另行授权，离线测试和合成预览不构成实际部署或真机验收。
