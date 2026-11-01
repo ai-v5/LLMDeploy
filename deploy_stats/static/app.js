@@ -463,7 +463,7 @@ function render(data) {
   } else if (stats.overload_tracked_runs) {
     overload = ` · 相关采集周期内代理超载降级已记录 ${integer.format(stats.overload_rejected)} 次`;
   }
-  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期未完整计入 ${integer.format(stats.dropped)} 个${overload} · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计采集器观察并已写盘的最终响应；入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
+  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期未完整计入 ${integer.format(stats.dropped)} 个${overload} · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计采集器已写盘的请求记录；Token 用量取可识别的最终 usage。入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
   charts.forEach((chart) => renderPlot(chart, data.series_24h));
   renderClients(data);
   renderDays(data);
