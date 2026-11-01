@@ -26,13 +26,13 @@
         <div class="cards phase-cards prefill-cards" data-view="overview">
           <article class="metric"><div class="metric-top"><span>Prefill 速度（估算）</span><span class="metric-icon blue">↘</span></div><strong id="overview-prefill-tps">—</strong><small id="overview-prefill-samples">等待可测样本</small></article>
           <article class="metric"><div class="metric-top"><span>Prefill 平均等待（估算）</span><span class="metric-icon violet">◷</span></div><strong id="overview-prefill-wait">—</strong><small id="overview-wait-samples">等待可测样本</small></article>
-          <article class="metric"><div class="metric-top"><span>MFU（请求级粗估）</span><span class="metric-icon blue">%</span></div><strong id="overview-mfu">—</strong><small id="overview-mfu-detail">未配置估算假设</small></article>
+          <article class="metric"><div class="metric-top"><span>Prefill-MFU（请求级粗估）</span><span class="metric-icon blue">%</span></div><strong id="overview-mfu">—</strong><small id="overview-mfu-detail">未配置估算假设</small></article>
           <article class="metric"><div class="metric-top"><span>缓存命中率</span><span class="metric-icon green">◈</span></div><strong id="overview-hit-rate">—</strong><small id="overview-hit-samples">等待已计量样本</small></article>
         </div>
         <div class="phase-heading" data-view="overview">DECODE</div>
         <div class="cards phase-cards decode-cards" data-view="overview">
           <article class="metric"><div class="metric-top"><span>Decode 速度（估算）</span><span class="metric-icon orange">↗</span></div><strong id="overview-decode-tps">—</strong><small id="overview-decode-samples">等待可测样本</small></article>
-          <article class="metric"><div class="metric-top"><span>MBU（请求级粗估）</span><span class="metric-icon violet">%</span></div><strong id="overview-mbu">—</strong><small id="overview-mbu-detail">未配置估算假设</small></article>
+          <article class="metric"><div class="metric-top"><span>Decode-MBU（请求级粗估）</span><span class="metric-icon violet">%</span></div><strong id="overview-mbu">—</strong><small id="overview-mbu-detail">未配置估算假设</small></article>
         </div>
         <div class="phase-note" data-view="overview">阶段速度按可测请求的入口时间加权；平均等待包含上传、排队和网络，均非引擎实测，也不是并发总吞吐。</div>
         <div class="phase-note efficiency-note" id="overview-efficiency-note" data-view="overview">MFU / MBU 需要配置模型和硬件假设；当前没有真实设备利用率数据。</div>
