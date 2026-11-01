@@ -183,7 +183,7 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
                   first_p50=_percentile(first_values, .50), first_p95=_percentile(first_values, .95),
                   first_samples=len(first_values), elapsed_p50=_percentile(duration_values, .50),
                   elapsed_p95=_percentile(duration_values, .95), elapsed_samples=len(duration_values),
-                  explicit_sessions=len({item['session'] for item in details if item['session']}),
+                  identified_sessions=len({item['session'] for item in details if item['session']}),
                   unknown_session=sum(1 for item in details if not item['session']))
     totals['complete'] = (bool(runs) and seconds > 0 and covered >= seconds - COVERAGE_EPSILON and dropped == 0 and unclean == 0 and
                           totals['missing'] == 0 and totals['interrupted'] == 0 and totals['failed'] == 0)

@@ -115,6 +115,12 @@ class Recorder:
             if item is not None:
                 self.live[request_id] = (*item[:3], first_visible)
 
+    def set_session(self, request_id, session_id):
+        with self.live_lock:
+            item = self.live.get(request_id)
+            if item is not None:
+                self.live[request_id] = (item[0], item[1], session_id, item[3])
+
     def end(self, request_id):
         with self.live_lock:
             self.live.pop(request_id, None)

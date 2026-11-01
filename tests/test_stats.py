@@ -3,8 +3,9 @@ from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from email.message import Message
 import hashlib
-from http.client import HTTPConnection, HTTPResponse, IncompleteRead
+from http.client import HTTPConnection, HTTPResponse, IncompleteRead, parse_headers
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -19,9 +20,10 @@ import unittest
 from unittest.mock import patch
 
 from deploy_stats.capture import UsageCapture, extract_usage
-from deploy_stats.proxy import Proxy, client_ip, session_fingerprint
+from deploy_stats.proxy import Proxy, _headers, client_ip, session_fingerprint
 from deploy_stats.backends import read_backend
 from deploy_stats.report import report
+from deploy_stats.session import BodyBudget, SessionBodyCapture
 from deploy_stats.store import _open, Recorder
 from deploy_stats.web import Dashboard
 from deploy_gateway.server import Gateway
@@ -96,6 +98,16 @@ class CaptureTests(unittest.TestCase):
         headers['X-Session-Id'] = 'duplicate'
         self.assertIsNone(session_fingerprint(headers))
 
+    def test_non_ascii_header_bytes_match_gateway_header_parser(self):
+        raw = (b'Authorization: Bearer synthetic-gateway-key\r\n'
+               b'X-Session-Id: synthetic-\xe4\xb8\xad')
+        actual = _headers(raw)
+        gateway = parse_headers(BytesIO(raw + b'\r\n\r\n'))
+        self.assertEqual(actual.get('X-Session-Id'), gateway.get('X-Session-Id'))
+        digest = hashlib.sha256(b'synthetic-gateway-key').hexdigest()
+        self.assertEqual(session_fingerprint(actual), affinity_key(gateway, b'{}', digest))
+        self.assertIsNone(client_ip(_headers(b'X-LLMDeploy-Client-IP: \xff')))
+
     def test_first_visible_delta_ignores_roles_and_empty_events(self):
         observed = []
         parser = UsageCapture('chat', 'text/event-stream', on_first_output=lambda: observed.append(1))
@@ -111,6 +123,45 @@ class CaptureTests(unittest.TestCase):
         messages.feed(sse({'type': 'message_start'}))
         messages.feed(sse({'type': 'content_block_delta', 'delta': {'thinking': 'synthetic'}}))
         self.assertEqual(observed, [1, 2, 3])
+
+    def test_body_session_fallback_matches_gateway_for_fragmented_json(self):
+        headers = Message()
+        headers['Authorization'] = 'Bearer synthetic-gateway-key'
+        digest = hashlib.sha256(b'synthetic-gateway-key').hexdigest()
+        cases = [
+            {'prompt_cache_key': 'synthetic-private-cache-key',
+             'messages': [{'role': 'user', 'content': 'synthetic-private-prompt'}]},
+            {'messages': [{'role': 'system', 'content': 'ignored'},
+                          {'role': 'user', 'content': 'synthetic-private-prompt'},
+                          {'role': 'user', 'content': 'later'}]},
+            {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': '测试'},
+                                                       {'z': 2, 'a': 'synthetic'}]}]},
+            {'messages': [{'role': 'assistant', 'content': 'no user'}]},
+        ]
+        for value in cases:
+            body = json.dumps(value, ensure_ascii=False).encode()
+            for size in (1, 7, 67):
+                budget = BodyBudget(2 * len(body))
+                capture = SessionBodyCapture(digest, budget=budget)
+                for start in range(0, len(body), size):
+                    capture.feed(body[start:start + size])
+                self.assertEqual(capture.finish(), affinity_key(headers, body, digest))
+                self.assertEqual(budget.used, 0)
+
+    def test_session_body_budget_and_size_fail_closed(self):
+        budget = BodyBudget(5)
+        first = SessionBodyCapture('synthetic-digest', budget=budget, max_body=10)
+        second = SessionBodyCapture('synthetic-digest', budget=budget, max_body=10)
+        first.feed(b'1234')
+        second.feed(b'12')
+        self.assertIsNone(second.finish())
+        self.assertEqual(budget.used, 4)
+        first.close()
+        self.assertEqual(budget.used, 0)
+        oversized = SessionBodyCapture('synthetic-digest', budget=budget, max_body=3)
+        oversized.feed(b'1234')
+        self.assertIsNone(oversized.finish())
+        self.assertEqual(budget.used, 0)
 
 
 class SyntheticGateway(BaseHTTPRequestHandler):
@@ -383,6 +434,52 @@ class ProxyTests(unittest.TestCase):
             raw = dbfile.read_bytes()
             for secret in (b'synthetic-key-a', b'synthetic-key-b', b'synthetic-private-session'):
                 self.assertNotIn(secret, raw)
+
+    def test_body_fallback_session_groups_without_persisting_content(self):
+        bodies = [
+            {'messages': [{'role': 'user', 'content': 'synthetic-private-first'}]},
+            {'messages': [{'role': 'user', 'content': 'synthetic-private-first'},
+                          {'role': 'assistant', 'content': 'synthetic-response'},
+                          {'role': 'user', 'content': 'synthetic-second'}]},
+            {'prompt_cache_key': 'synthetic-private-cache',
+             'messages': [{'role': 'user', 'content': 'synthetic-private-first'}]},
+        ]
+        for value in bodies:
+            connection = HTTPConnection('127.0.0.1', self.proxy.server_port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', json.dumps(value).encode(), {
+                'Authorization': 'Bearer synthetic-gateway-key', 'Content-Type': 'application/json',
+                'X-LLMDeploy-Client-IP': '192.0.2.4'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+        self.wait_recorded()
+        value = report(self.path, 'total', now=time.time() + .01)
+        self.assertEqual(value['totals']['unknown_session'], 0)
+        self.assertEqual(sorted(item['requests'] for item in value['sessions']), [1, 2])
+        for dbfile in Path(self.temp.name).glob('usage.sqlite3*'):
+            raw = dbfile.read_bytes()
+            for secret in (b'synthetic-gateway-key', b'synthetic-private-first', b'synthetic-private-cache'):
+                self.assertNotIn(secret, raw)
+
+    def test_body_session_parser_failure_does_not_interrupt_response(self):
+        with patch('deploy_stats.proxy.SessionBodyCapture.finish', side_effect=RuntimeError):
+            connection = HTTPConnection('127.0.0.1', self.proxy.server_port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{"messages":[]}', {
+                'Authorization': 'Bearer synthetic-gateway-key', 'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+        self.wait_recorded()
+        self.assertGreater(self.proxy.recorder.dropped, 0)
+
+    def test_body_session_feed_or_budget_failure_does_not_interrupt_response(self):
+        for target in ('deploy_stats.proxy.SessionBodyCapture.feed', 'deploy_stats.session.BUDGET.reserve'):
+            with self.subTest(target=target), patch(target, side_effect=RuntimeError):
+                self.assertEqual(self.request()[0], 200)
+                self.wait_recorded()
+        self.assertGreaterEqual(self.proxy.recorder.dropped, 2)
 
     def test_active_snapshot_clears_when_completion_event_is_dropped(self):
         self.upstream.mode = 'slow'
@@ -726,6 +823,30 @@ class ProxyTests(unittest.TestCase):
         data = report(proxy.recorder.path, 'total', now=time.time() + .01)
         self.assertEqual((data['totals']['known'], data['totals']['failed']), (1, 2))
         self.assertIsNone(self.upstream.calls[-1][1])
+        for port in (gateway.server_port, proxy.server_port):
+            connection = HTTPConnection('127.0.0.1', port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}', {
+                'Authorization': b'Bearer invalid-\xff', 'X-Session-Id': b'synthetic-\xe4\xb8\xad'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+            connection.close()
+            connection = HTTPConnection('127.0.0.1', port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}', {
+                'Authorization': 'Bearer synthetic-gateway-key', 'X-Session-Id': b'synthetic-\xe4\xb8\xad'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+        deadline = time.monotonic() + 3
+        while proxy.active and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(proxy.recorder.flush())
+        raw = (b'Authorization: Bearer synthetic-gateway-key\r\n'
+               b'X-Session-Id: synthetic-\xe4\xb8\xad\r\n\r\n')
+        expected = affinity_key(parse_headers(BytesIO(raw)), b'{}', hashlib.sha256(b'synthetic-gateway-key').hexdigest())
+        data = report(proxy.recorder.path, 'total', now=time.time() + .01)
+        self.assertIn(expected, [row['session'] for row in data['requests']])
 
     @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for local Caddy integration')
     def test_caddy_reload_preserves_an_existing_stream(self):
@@ -1022,6 +1143,18 @@ http://127.0.0.1:%d {
             data = report(self.path, 'total', now=time.time() + .01)
             self.assertEqual(data['clients'][0]['ip'], '127.0.0.1')
             self.assertEqual(self.upstream.calls[-1][1:], ('Bearer synthetic-placeholder', None))
+            connection = HTTPConnection('127.0.0.1', port, timeout=5)
+            connection.request('POST', '/v1/chat/completions', b'{}', {
+                'Authorization': 'Bearer synthetic-placeholder', 'X-Session-Id': b'synthetic-\xe4\xb8\xad'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            connection.close()
+            self.wait_recorded()
+            gateway_headers = parse_headers(BytesIO(b'Authorization: Bearer synthetic-placeholder\r\n'
+                b'X-Session-Id: synthetic-\xe4\xb8\xad\r\n\r\n'))
+            expected = affinity_key(gateway_headers, b'{}', hashlib.sha256(b'synthetic-placeholder').hexdigest())
+            self.assertIn(expected, [row['session'] for row in report(self.path, 'total', now=time.time() + .01)['requests']])
             large_headers = {f'X-Synthetic-{i}': 'x' * 5000 for i in range(3)}
             connection = HTTPConnection('127.0.0.1', port, timeout=5)
             connection.request('POST', '/v1/chat/completions', b'{}', large_headers)

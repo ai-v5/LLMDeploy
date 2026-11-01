@@ -110,8 +110,8 @@ function renderBackends(data) {
 function renderSessions(data) {
   const summary = $('session-summary-body');
   summary.replaceChildren();
-  $('session-count').textContent = `${count(data.session_count)} 个显式会话 · ${count(data.totals.unknown_session)} 个请求未知`;
-  if (!data.sessions.length) empty(summary, 11, '当前页暂无可识别的显式会话');
+  $('session-count').textContent = `${count(data.session_count)} 个可识别会话 · ${count(data.totals.unknown_session)} 个请求未知`;
+  if (!data.sessions.length) empty(summary, 11, '当前页暂无可识别会话');
   data.sessions.forEach((item) => {
     const row = document.createElement('tr');
     const view = {known: item.known, complete: data.totals.complete && item.known === item.requests};
@@ -214,9 +214,9 @@ function render(data) {
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
     `${stats.complete ? '' : '≥'}${rate(stats.requests_per_second)}`;
   $('first-p95').textContent = seconds(stats.first_p95);
-  $('first-detail').textContent = `${count(stats.first_samples)} 个入口观测样本`;
+  $('first-detail').textContent = `${count(stats.first_samples)} 个已计量成功样本`;
   $('elapsed-p95').textContent = seconds(stats.elapsed_p95);
-  $('elapsed-detail').textContent = `${count(stats.elapsed_samples)} 个已完成样本`;
+  $('elapsed-detail').textContent = `${count(stats.elapsed_samples)} 个已计量成功样本`;
   const unknown = stats.missing + stats.interrupted + stats.failed;
   const coverage = stats.seconds ? Math.min(100, stats.covered_seconds / stats.seconds * 100) : 0;
   const notice = $('notice');

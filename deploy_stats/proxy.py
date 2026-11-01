@@ -1,8 +1,8 @@
 """A loopback-only, byte-transparent accounting hop before the existing gateway."""
 import asyncio
 from contextlib import suppress
-from email.parser import BytesHeaderParser
-import hashlib
+from email.parser import Parser
+from http.client import HTTPMessage
 import ipaddress
 import os
 import socket
@@ -12,6 +12,7 @@ import uuid
 from urllib.parse import urlsplit
 
 from .capture import SafeCapture
+from .session import MAX_BODY, SessionBodyCapture, explicit_session, key_digest
 from .store import Recorder
 
 CLIENT_HEADER = 'x-llmdeploy-client-ip'
@@ -27,7 +28,7 @@ MAX_CONNECTIONS = WINDOWS_WORKERS * WINDOWS_CONNECTIONS_PER_WORKER
 
 def client_ip(headers):
     values = headers.get_all(CLIENT_HEADER, [])
-    if len(values) != 1:
+    if len(values) != 1 or not isinstance(values[0], str):
         return None
     try:
         address = ipaddress.ip_address(values[0].strip())
@@ -39,28 +40,13 @@ def client_ip(headers):
 
 
 def session_fingerprint(headers):
-    """Match the gateway's identity domain for explicit session headers only."""
-    auth = headers.get_all('Authorization', [])
-    if len(auth) != 1:
-        return None
-    fields = auth[0].split()
-    if len(fields) != 2 or fields[0].lower() != 'bearer' or len(fields[1]) > 256:
-        return None
-    for name in ('x-session-affinity', 'x-deepseek-harness-session-id', 'x-session-id'):
-        values = headers.get_all(name, [])
-        if values:
-            if len(values) != 1 or not 0 < len(values[0]) <= 256:
-                return None
-            try:
-                key_digest = hashlib.sha256(fields[1].encode()).hexdigest()
-                return hashlib.sha256((key_digest + '\0session:' + values[0]).encode()).hexdigest()
-            except UnicodeError:
-                return None
-    return None
+    return explicit_session(headers)[1]
 
 
 def _headers(raw):
-    return BytesHeaderParser().parsebytes(raw + b'\r\n')
+    # Match http.client.parse_headers, used by the existing gateway: header
+    # octets are decoded as ISO-8859-1 before the email parser sees them.
+    return Parser(_class=HTTPMessage).parsestr((raw + b'\r\n').decode('iso-8859-1'))
 
 
 async def _read(reader, size, timeout):
@@ -336,6 +322,7 @@ class Proxy:
         counted = False
         source = None
         session = None
+        has_session_header = False
         request_id = None
         first_visible = None
         status, state, values = None, 'interrupted', None
@@ -359,7 +346,7 @@ class Proxy:
             headers = _headers(header_bytes)
             source = client_ip(headers)
             if counted:
-                session = session_fingerprint(headers)
+                has_session_header, session = explicit_session(headers)
                 request_id = uuid.uuid4().hex
                 with self.active_lock:
                     self.active += 1
@@ -384,8 +371,15 @@ class Proxy:
                 length = 0
             if headers.get('Transfer-Encoding') or len(lengths) > 1 or not 0 <= length <= 64 * 1024 * 1024:
                 length = 0  # Existing gateway rejects the unchanged headers.
+            body_capture = None
+            if counted and not has_session_header and 0 < length <= MAX_BODY:
+                try:
+                    body_capture = SessionBodyCapture(key_digest(headers))
+                except Exception:
+                    self.recorder.note_drop()
 
             async def send_body():
+                nonlocal session, body_capture
                 left = length
                 try:
                     while left:
@@ -396,17 +390,43 @@ class Proxy:
                             return
                         left -= len(chunk)
                         if not abort_send.is_set():
+                            if body_capture:
+                                try:
+                                    body_capture.feed(chunk)
+                                except Exception:
+                                    with suppress(Exception):
+                                        body_capture.close()
+                                    body_capture = None
+                                    self.recorder.note_drop()
                             try:
                                 upstream_writer.write(chunk)
                                 await upstream_writer.drain()
                                 await asyncio.sleep(0)
                             except (OSError, ConnectionError):
                                 abort_send.set()
+                        elif body_capture:
+                            with suppress(Exception):
+                                body_capture.close()
+                            body_capture = None
                 except Exception:
                     disconnected.set()
                     upstream_writer.close()
                 finally:
-                    body_done.set()
+                    try:
+                        if body_capture:
+                            if left == 0 and not disconnected.is_set():
+                                session = body_capture.finish()
+                                if session is not None:
+                                    self.recorder.set_session(request_id, session)
+                            else:
+                                body_capture.close()
+                    except Exception:
+                        if body_capture:
+                            with suppress(Exception):
+                                body_capture.close()
+                        self.recorder.note_drop()
+                    finally:
+                        body_done.set()
 
             async def watch_client():
                 await body_done.wait()
