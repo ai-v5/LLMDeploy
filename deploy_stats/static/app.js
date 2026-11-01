@@ -25,7 +25,7 @@ const tables = {
 const textSorts = new Set(['ip', 'ips', 'session', 'state', 'date']);
 Object.values(tables).forEach((table) => { table.offset = 0; table.size = 20; });
 const views = {
-  overview: ['用量概览', 'OVERVIEW'], active: ['当前连接', 'LIVE REQUESTS'],
+  overview: ['总览', 'OVERVIEW'], active: ['当前连接', 'LIVE REQUESTS'],
   sessions: ['会话记录', 'SESSIONS'], clients: ['请求来源', 'CLIENTS'],
   daily: ['每日用量', 'DAILY'], backends: ['后端状态', 'BACKENDS'],
 };
@@ -36,6 +36,56 @@ const percent = (value) => value === null || value === undefined ? '—' : `${nu
 const count = (value) => value === null || value === undefined ? '—' : integer.format(value);
 const fingerprint = (value) => value ? value.slice(0, 12) : '未知';
 const setTextIfPresent = (id, value) => { const element = $(id); if (element) element.textContent = value; };
+
+function efficiencyProfile() {
+  const element = $('efficiency-profile');
+  if (!element) return null;
+  const read = (name) => {
+    const raw = element.dataset[name];
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  };
+  const profile = {prefillFlops: read('prefillFlops'), peakFlops: read('peakFlops'),
+    decodeBytesLow: read('decodeBytesLow'), decodeBytesHigh: read('decodeBytesHigh'),
+    bandwidth: read('bandwidth'), description: element.dataset.description || ''};
+  if ([profile.prefillFlops, profile.peakFlops, profile.decodeBytesLow, profile.decodeBytesHigh,
+    profile.bandwidth].some((value) => value === null) || profile.decodeBytesLow > profile.decodeBytesHigh ||
+    !profile.description.trim()) return null;
+  return profile;
+}
+
+function estimateEfficiency(stats, profile) {
+  const unknown = {mfu: null, mbuLow: null, mbuHigh: null};
+  if (!stats || !profile) return unknown;
+  const valid = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const ratio = (rateValue, units, capacity) => {
+    if (!valid(rateValue) || !valid(units) || !valid(capacity) || units === 0 || capacity === 0) return null;
+    const value = rateValue * units / capacity;
+    return Number.isFinite(value) && Number.isFinite(value * 100) ? value : null;
+  };
+  return {
+    mfu: valid(stats.prefill_samples) && stats.prefill_samples > 0 ?
+      ratio(stats.prefill_estimate_tps, profile.prefillFlops, profile.peakFlops) : null,
+    mbuLow: valid(stats.decode_samples) && stats.decode_samples > 0 ?
+      ratio(stats.decode_estimate_tps, profile.decodeBytesLow, profile.bandwidth) : null,
+    mbuHigh: valid(stats.decode_samples) && stats.decode_samples > 0 ?
+      ratio(stats.decode_estimate_tps, profile.decodeBytesHigh, profile.bandwidth) : null,
+  };
+}
+
+function renderEfficiency(stats) {
+  const profile = efficiencyProfile();
+  const result = estimateEfficiency(stats, profile);
+  const show = (value) => value !== null && value > 0 && value < 0.0001 ? '<0.01%' : percent(value);
+  setTextIfPresent('overview-mfu', show(result.mfu));
+  setTextIfPresent('overview-mbu', result.mbuLow === null || result.mbuHigh === null ? '—' :
+    `${show(result.mbuLow)} – ${show(result.mbuHigh)}`);
+  setTextIfPresent('overview-mfu-detail', profile ? `单请求等效 · ${count(stats.prefill_samples)} 个样本` : '未配置估算假设');
+  setTextIfPresent('overview-mbu-detail', profile ? `两种权重精度情景 · ${count(stats.decode_samples)} 个样本` : '未配置估算假设');
+  setTextIfPresent('overview-efficiency-note', profile ? `${profile.description}。按入口请求速度估算，包含排队与网络；并发、MoE 权重复用、KV 读取和推测解码均会影响结果。缓存全命中时粗估可能为零，不表示设备没有计算。结果不是设备实测，也不是严格上下界；历史换版或混合模型可能使结果不具代表性。` :
+    'MFU / MBU 需要配置模型和硬件假设；当前没有真实设备利用率数据。');
+}
 
 function activateView(name) {
   const view = Object.prototype.hasOwnProperty.call(views, name) ? name : 'overview';
@@ -440,6 +490,7 @@ function render(data) {
   setTextIfPresent('overview-wait-samples', `${count(stats.first_samples)} 个可见增量样本`);
   setTextIfPresent('overview-decode-samples', `${count(stats.decode_samples)} 个样本 · 按耗时加权`);
   setTextIfPresent('overview-hit-samples', `按输入 Token 加权 · ${count(stats.known)} 个已计量请求`);
+  renderEfficiency(stats);
   $('success-rate').textContent = percent(stats.success_rate);
   $('success-detail').textContent = `${count(stats.successes)} / ${count(stats.classified)} 个可判定请求`;
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
@@ -504,8 +555,9 @@ async function refresh() {
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';
     ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps', 'overview-prefill-tps',
-      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate'].forEach((id) => setTextIfPresent(id, '—'));
+      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate', 'overview-mfu', 'overview-mbu'].forEach((id) => setTextIfPresent(id, '—'));
     ['overview-prefill-samples', 'overview-wait-samples', 'overview-decode-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
+    ['overview-mfu-detail', 'overview-mbu-detail'].forEach((id) => setTextIfPresent(id, '统计不可用'));
     charts.forEach(({id}) => { $(`chart-${id}-svg`)?.replaceChildren(); const label = $(`chart-${id}`); if (label) label.textContent = '暂无数据'; });
     $('clients-body').replaceChildren();
     $('days-body').replaceChildren();
