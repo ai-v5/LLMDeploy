@@ -201,8 +201,8 @@ function renderPlot(field, points) {
 function render(data) {
   const stats = data.totals;
   $('status-dot').classList.toggle('live', data.collector_live);
-  $('status-label').textContent = data.collector_live ? '采集运行中' : '采集未连接';
-  $('updated').textContent = `更新于 ${clock.format(new Date(data.as_of * 1000))}`;
+  $('status-label').textContent = data.collector_live ? '入口采集运行中' : '入口采集未连接';
+  $('updated').textContent = `数据查询于 ${clock.format(new Date(data.as_of * 1000))}`;
   $('total-usage').textContent = display(stats.input + stats.output, stats);
   $('total-input').textContent = display(stats.input, stats);
   $('total-output').textContent = display(stats.output, stats);
@@ -221,7 +221,8 @@ function render(data) {
   const coverage = stats.seconds ? Math.min(100, stats.covered_seconds / stats.seconds * 100) : 0;
   const notice = $('notice');
   notice.classList.toggle('warning', !stats.complete || !data.collector_live || stats.unknown_source > 0);
-  notice.textContent = `已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期队列丢失 ${integer.format(stats.dropped)} 个 · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计经过本代理且已写盘的最终响应；入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
+  const collectorNotice = data.collector_live ? '' : '入口采集未连接不代表模型服务不可用；无法确认新请求已记录，后端状态仍可单独查看。';
+  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期队列丢失 ${integer.format(stats.dropped)} 个 · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计经过本代理且已写盘的最终响应；入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
   ['input', 'output', 'cached'].forEach((field) => renderPlot(field, data.series_24h));
   renderClients(data);
   renderDays(data);
