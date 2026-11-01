@@ -35,6 +35,7 @@ const speed = (value) => value === null || value === undefined ? '—' : `${rate
 const percent = (value) => value === null || value === undefined ? '—' : `${number.format(value * 100)}%`;
 const count = (value) => value === null || value === undefined ? '—' : integer.format(value);
 const fingerprint = (value) => value ? value.slice(0, 12) : '未知';
+const setTextIfPresent = (id, value) => { const element = $(id); if (element) element.textContent = value; };
 
 function activateView(name) {
   const view = Object.prototype.hasOwnProperty.call(views, name) ? name : 'overview';
@@ -361,15 +362,33 @@ function svgElement(name, attributes) {
   return el;
 }
 
-function renderPlot(field, points) {
-  const svg = $(`chart-${field}-svg`);
+const charts = [
+  {id: 'input', field: 'input', kind: 'tokens'},
+  {id: 'output', field: 'output', kind: 'tokens'},
+  {id: 'cache-rate', style: 'cached', field: 'mean_request_hit_rate', kind: 'hit', samples: 'request_hit_samples'},
+  {id: 'prefill', field: 'prefill_estimate_tps', kind: 'speed', samples: 'prefill_samples'},
+  {id: 'decode', field: 'decode_estimate_tps', kind: 'speed', samples: 'decode_samples'},
+];
+
+function renderPlot(chart, points) {
+  const {id, field, kind} = chart;
+  const svg = $(`chart-${id}-svg`);
+  const label = $(`chart-${id}`);
+  if (!svg || !label) return;
   svg.replaceChildren();
   [16, 34, 52].forEach((y) => svg.appendChild(svgElement('line', {x1: 0, y1: y, x2: 800, y2: y, class: 'grid'})));
-  const values = points.map((point) => point.end - point.start >= 599.99 && (point.known || point.complete) ? point[field] : null);
+  const required = kind === 'hit' ? [field, 'request_hit_sum', 'request_hit_samples'] :
+    kind === 'speed' ? [field, `${id}_tokens`, `${id}_seconds`, chart.samples] : [];
+  if (points.some((point) => required.some((key) => !Object.prototype.hasOwnProperty.call(point, key)))) {
+    label.textContent = '当前数据版本不支持';
+    return;
+  }
+  const values = points.map((point) => point.end - point.start >= 599.99 && (point.known || point.complete) &&
+    typeof point[field] === 'number' && Number.isFinite(point[field]) ? point[field] : null);
   const peak = Math.max(1, ...values.filter((value) => value !== null));
   let segment = [];
   const draw = () => {
-    if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: field}));
+    if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: chart.style || id}));
     segment = [];
   };
   values.forEach((value, i) => {
@@ -377,17 +396,29 @@ function renderPlot(field, points) {
     const x = points.length > 1 ? i * 800 / (points.length - 1) : 0;
     const y = 59 - value / peak * 50;
     segment.push(`${x.toFixed(2)},${y.toFixed(2)}`);
-    const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: field});
+    const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: chart.style || id});
     const title = svgElement('title', {});
-    title.textContent = `${clock.format(new Date(points[i].start * 1000))}–${clock.format(new Date(points[i].end * 1000))}：${points[i].complete ? '' : '至少 '}${integer.format(value)} Token`;
+    const formatted = kind === 'tokens' ? `${integer.format(value)} Token` : kind === 'hit' ? percent(value) : speed(value);
+    const boundary = points[i].complete ? '' : kind === 'tokens' ? '至少 ' : '已观测样本 ';
+    const samples = chart.samples ? ` · ${count(points[i][chart.samples])} 个样本` : '';
+    title.textContent = `${clock.format(new Date(points[i].start * 1000))}–${clock.format(new Date(points[i].end * 1000))}：${boundary}${formatted}${samples}`;
     marker.appendChild(title);
     svg.appendChild(marker);
   });
   draw();
-  const total = points.reduce((sum, point) => sum + point[field], 0);
-  const any = points.some((point) => point.known || point.complete);
-  const complete = points.every((point) => point.complete);
-  $(`chart-${field}`).textContent = any ? `${complete ? '' : '≥'}${integer.format(total)}` : '暂无数据';
+  const sum = (key) => points.reduce((total, point) => total + (point[key] || 0), 0);
+  if (kind === 'tokens') {
+    const any = points.some((point) => point.known || point.complete);
+    const complete = points.filter((point) => point.end > point.start).every((point) => point.complete);
+    label.textContent = any ? `${complete ? '' : '≥'}${integer.format(sum(field))}` : '暂无数据';
+  } else if (kind === 'hit') {
+    const samples = sum(chart.samples);
+    label.textContent = samples ? `${percent(sum('request_hit_sum') / samples)} · ${count(samples)} 请求` : '暂无样本';
+  } else {
+    const samples = sum(chart.samples);
+    const duration = sum(`${id}_seconds`);
+    label.textContent = samples && duration ? `${speed(sum(`${id}_tokens`) / duration)} · ${count(samples)} 样本` : '暂无样本';
+  }
 }
 
 function render(data) {
@@ -400,15 +431,15 @@ function render(data) {
   $('total-output').textContent = display(stats.output, stats);
   $('total-cached').textContent = display(stats.cached, stats);
   $('total-tps').textContent = stats.window_tps === null ? '—' : display(stats.window_tps, stats, true);
-  $('cache-detail').textContent = stats.hit_rate === null ? '已计量请求命中率 —' : `已计量请求命中率 ${number.format(stats.hit_rate * 100)}%`;
-  $('overview-prefill-tps').textContent = speed(stats.prefill_estimate_tps);
-  $('overview-prefill-wait').textContent = seconds(stats.first_mean);
-  $('overview-decode-tps').textContent = speed(stats.decode_estimate_tps);
-  $('overview-hit-rate').textContent = percent(stats.hit_rate);
-  $('overview-prefill-samples').textContent = `${count(stats.prefill_samples)} 个样本 · 按耗时加权`;
-  $('overview-wait-samples').textContent = `${count(stats.first_samples)} 个可见增量样本`;
-  $('overview-decode-samples').textContent = `${count(stats.decode_samples)} 个样本 · 按耗时加权`;
-  $('overview-hit-samples').textContent = `${count(stats.known)} 个已计量请求`;
+  $('cache-detail').textContent = stats.hit_rate === null ? '按输入 Token 加权命中率 —' : `按输入 Token 加权命中率 ${number.format(stats.hit_rate * 100)}%`;
+  setTextIfPresent('overview-prefill-tps', speed(stats.prefill_estimate_tps));
+  setTextIfPresent('overview-prefill-wait', seconds(stats.first_mean));
+  setTextIfPresent('overview-decode-tps', speed(stats.decode_estimate_tps));
+  setTextIfPresent('overview-hit-rate', percent(stats.hit_rate));
+  setTextIfPresent('overview-prefill-samples', `${count(stats.prefill_samples)} 个样本 · 按耗时加权`);
+  setTextIfPresent('overview-wait-samples', `${count(stats.first_samples)} 个可见增量样本`);
+  setTextIfPresent('overview-decode-samples', `${count(stats.decode_samples)} 个样本 · 按耗时加权`);
+  setTextIfPresent('overview-hit-samples', `按输入 Token 加权 · ${count(stats.known)} 个已计量请求`);
   $('success-rate').textContent = percent(stats.success_rate);
   $('success-detail').textContent = `${count(stats.successes)} / ${count(stats.classified)} 个可判定请求`;
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
@@ -422,8 +453,18 @@ function render(data) {
   const notice = $('notice');
   notice.classList.toggle('warning', !stats.complete || !data.collector_live || stats.unknown_source > 0);
   const collectorNotice = data.collector_live ? '' : '入口采集未连接不代表模型服务不可用；无法确认新请求已记录，后端状态仍可单独查看。';
-  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期队列丢失 ${integer.format(stats.dropped)} 个 · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计经过本代理且已写盘的最终响应；入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
-  ['input', 'output', 'cached'].forEach((field) => renderPlot(field, data.series_24h));
+  let overload = '';
+  if (stats.overload_untracked_runs || stats.unclean_runs) {
+    const reasons = [stats.overload_untracked_runs ? '部分周期未细分' : '',
+      stats.unclean_runs ? '存在未正常结束周期' : ''].filter(Boolean).join('、');
+    overload = stats.overload_tracked_runs ?
+      ` · 相关采集周期内代理超载降级已记录至少 ${integer.format(stats.overload_rejected)} 次（${reasons}）` :
+      ` · 相关采集周期内代理超载降级次数未知（${reasons}）`;
+  } else if (stats.overload_tracked_runs) {
+    overload = ` · 相关采集周期内代理超载降级已记录 ${integer.format(stats.overload_rejected)} 次`;
+  }
+  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期未完整计入 ${integer.format(stats.dropped)} 个${overload} · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计经过本代理且已写盘的最终响应；入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
+  charts.forEach((chart) => renderPlot(chart, data.series_24h));
   renderClients(data);
   renderDays(data);
   renderActive(data);
@@ -463,9 +504,9 @@ async function refresh() {
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';
     ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps', 'overview-prefill-tps',
-      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate'].forEach((id) => { $(id).textContent = '—'; });
-    ['overview-prefill-samples', 'overview-wait-samples', 'overview-decode-samples', 'overview-hit-samples'].forEach((id) => { $(id).textContent = '统计不可用'; });
-    ['input', 'output', 'cached'].forEach((field) => { $(`chart-${field}-svg`).replaceChildren(); $(`chart-${field}`).textContent = '暂无数据'; });
+      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate'].forEach((id) => setTextIfPresent(id, '—'));
+    ['overview-prefill-samples', 'overview-wait-samples', 'overview-decode-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
+    charts.forEach(({id}) => { $(`chart-${id}-svg`)?.replaceChildren(); const label = $(`chart-${id}`); if (label) label.textContent = '暂无数据'; });
     $('clients-body').replaceChildren();
     $('days-body').replaceChildren();
     empty($('clients-body'), 8, '统计不可用');

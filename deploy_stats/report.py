@@ -208,6 +208,8 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
         db.execute('BEGIN')
         _check_database(db)
         runs = list(db.execute('SELECT started,last_seen,ended,dropped FROM runs'))
+        overload_runs = list(db.execute('''SELECT runs.started,runs.last_seen,runs.ended,stats_meta.value
+            FROM runs LEFT JOIN stats_meta ON stats_meta.key='overload:' || runs.id'''))
         since = min((r[0] for r in runs), default=now)
         if snapshot_at is None:
             snapshot_at = now
@@ -238,7 +240,7 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
             snapshot_details.append(view if view is not None else _request_view(row))
         if stamp >= now - 86400:
             bucket = int(stamp // BUCKET_SECONDS) * BUCKET_SECONDS
-            series_rows.setdefault(bucket, []).append(row[2:7])
+            series_rows.setdefault(bucket, []).append(row)
         if stamp >= midnight - 13 * 86400:
             day = int((stamp + 8 * 3600) // 86400) * 86400 - 8 * 3600
             day_rows.setdefault(day, []).append(row[2:7])
@@ -251,6 +253,21 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
     totals['seconds'] = seconds
     totals['dropped'] = dropped
     totals['unclean_runs'] = unclean
+    overload_count, overload_tracked, overload_untracked = 0, 0, 0
+    for left, seen, ended, value in overload_runs:
+        live = ended is None and 0 <= now - seen < 15
+        right = ended if ended is not None else (now if live else seen)
+        if left < now and right > start:
+            try:
+                if value is None or not value.isascii() or not value.isdigit():
+                    raise ValueError()
+                overload_count += int(value)
+                overload_tracked += 1
+            except (ValueError, TypeError, OverflowError):
+                overload_untracked += 1
+    totals['overload_rejected'] = overload_count
+    totals['overload_tracked_runs'] = overload_tracked
+    totals['overload_untracked_runs'] = overload_untracked
     classified = [item for item in details if item['state'] in ('known', 'failed', 'interrupted')]
     successes = [item for item in classified if item['state'] == 'known' and item['status'] is not None
                  and 200 <= item['status'] < 300]
@@ -288,9 +305,27 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
     series = []
     for bucket in range(first_bucket, last_bucket + 1, BUCKET_SECONDS):
         a, b = max(bucket, now - 86400), min(bucket + BUCKET_SECONDS, now)
-        counts = _counts(series_rows.get(bucket, []))
+        bucket_rows = series_rows.get(bucket, [])
+        counts = _counts([row[2:7] for row in bucket_rows])
+        bucket_requests = [_request_view(row) for row in bucket_rows]
+        hits = [item['hit_rate'] for item in bucket_requests if item['hit_rate'] is not None]
+        timed = [item for item in bucket_requests if item['state'] == 'known' and
+                 item['status'] is not None and 200 <= item['status'] < 300 and
+                 item['first_visible'] is not None]
+        prefill = [item for item in timed if item['first_visible'] > 0]
+        decode = [item for item in timed if item['output'] > 1 and item['after_first'] > 0]
+        prefill_tokens = sum(item['input'] - item['cached'] for item in prefill)
+        prefill_seconds = sum(item['first_visible'] for item in prefill)
+        decode_tokens = sum(item['output'] - 1 for item in decode)
+        decode_seconds = sum(item['after_first'] for item in decode)
         coverage, lost, unclean = _coverage(runs, a, b, now)
         counts.update(start=a, end=b, covered_seconds=coverage, dropped=lost, unclean_runs=unclean,
+                      mean_request_hit_rate=sum(hits) / len(hits) if hits else None,
+                      request_hit_sum=sum(hits), request_hit_samples=len(hits),
+                      prefill_estimate_tps=prefill_tokens / prefill_seconds if prefill_seconds else None,
+                      prefill_tokens=prefill_tokens, prefill_seconds=prefill_seconds, prefill_samples=len(prefill),
+                      decode_estimate_tps=decode_tokens / decode_seconds if decode_seconds else None,
+                      decode_tokens=decode_tokens, decode_seconds=decode_seconds, decode_samples=len(decode),
                       complete=bool(runs) and b > a and coverage >= b - a - COVERAGE_EPSILON and lost == 0 and unclean == 0 and
                       counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
         series.append(counts)
