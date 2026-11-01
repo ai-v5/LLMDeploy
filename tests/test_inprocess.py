@@ -22,6 +22,7 @@ from deploy_stats.inprocess import _Observer, install
 from deploy_stats.report import report
 from deploy_stats.session import BodyBudget
 from deploy_stats.web import Dashboard
+from tests.caddy_helpers import synthetic_caddy_owns_listener
 
 
 STREAM = (b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\n'
@@ -126,7 +127,7 @@ class InProcessCaptureTests(unittest.TestCase):
     def test_response_and_session_match_existing_gateway_without_storing_content(self):
         payload = b'{"messages":[{"role":"user","content":"synthetic-private-prompt"}]}'
         headers = {'Authorization': 'Bearer '+self.key, 'Content-Type': 'application/json',
-                   'X-LLMDeploy-Client-IP': '192.0.2.4'}
+                   'X-Forwarded-For': '192.0.2.4'}
         self.assertEqual(self.request(self.baseline, payload, headers), (200, STREAM))
         self.assertEqual(self.request(self.gateway_under_test, payload, headers), (200, STREAM))
         self.wait_recorded()
@@ -144,11 +145,85 @@ class InProcessCaptureTests(unittest.TestCase):
             for private in (self.key.encode(), b'synthetic-private-prompt'):
                 self.assertNotIn(private, data)
 
+    def test_inprocess_source_uses_only_single_caddy_forwarded_address(self):
+        headers = {'Authorization': 'Bearer '+self.key, 'Content-Type': 'application/json',
+                   'X-Forwarded-For': '192.0.2.4', 'X-LLMDeploy-Client-IP': '198.51.100.9'}
+        self.assertEqual(self.request(self.gateway_under_test, b'{}', headers), (200, STREAM))
+        self.wait_recorded()
+        result = report(self.recorder.path, 'total', now=time.time() + .01)
+        self.assertEqual(result['requests'][0]['ip'], '192.0.2.4')
+        headers.pop('X-Forwarded-For')
+        self.assertEqual(self.request(self.gateway_under_test, b'{}', headers), (200, STREAM))
+        self.wait_recorded()
+        result = report(self.recorder.path, 'total', now=time.time() + .01)
+        self.assertEqual(result['totals']['unknown_source'], 1)
+        for forwarded in ('192.0.2.4, 198.51.100.2', 'not-an-ip'):
+            headers['X-Forwarded-For'] = forwarded
+            self.assertEqual(self.request(self.gateway_under_test, b'{}', headers), (200, STREAM))
+            self.wait_recorded()
+        result = report(self.recorder.path, 'total', now=time.time() + .01)
+        self.assertEqual(result['totals']['unknown_source'], 3)
+        message = Message()
+        message['X-Forwarded-For'] = '192.0.2.4'
+        message['X-Forwarded-For'] = '198.51.100.2'
+        observer = _Observer(self.recorder, BodyBudget(), message, 'chat')
+        self.assertIsNone(observer.source)
+        observer.finish()
+
+    @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for Caddy integration')
+    def test_caddy_default_forwarding_overwrites_spoofed_client_addresses(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            front = probe.getsockname()[1]
+        config = self.root/'Caddyfile-default-xff'
+        config.write_text('{\n admin off\n auto_https off\n}\n'
+            f'http://127.0.0.1:{front} {{\n bind 127.0.0.1\n'
+            f' reverse_proxy 127.0.0.1:{self.gateway_under_test.server_port}\n}}\n', encoding='utf-8')
+        env = dict(os.environ, XDG_DATA_HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
+                   APPDATA=str(self.root), LOCALAPPDATA=str(self.root))
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        caddy = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(config),
+            '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env, creationflags=flags)
+        try:
+            deadline = time.monotonic() + 5
+            while not synthetic_caddy_owns_listener(caddy, front):
+                if caddy.poll() is not None or time.monotonic() >= deadline:
+                    self.fail('synthetic Caddy listener ownership could not be verified')
+                time.sleep(.02)
+            cases = ([], [('X-Forwarded-For', '192.0.2.55')],
+                     [('X-Forwarded-For', '192.0.2.55, 198.51.100.8')],
+                     [('X-Forwarded-For', '192.0.2.55'), ('x-forwarded-for', '198.51.100.8')],
+                     [('X-LLMDeploy-Client-IP', '192.0.2.55')])
+            for extra in cases:
+                self.assertTrue(synthetic_caddy_owns_listener(caddy, front))
+                conn = HTTPConnection('127.0.0.1', front, timeout=5)
+                try:
+                    conn.putrequest('POST', '/v1/chat/completions')
+                    conn.putheader('Authorization', 'Bearer '+self.key)
+                    conn.putheader('Content-Length', '2')
+                    for name, value in extra:
+                        conn.putheader(name, value)
+                    conn.endheaders(b'{}')
+                    response = conn.getresponse()
+                    self.assertEqual((response.status, response.read()), (200, STREAM))
+                finally:
+                    conn.close()
+            self.wait_recorded()
+            result = report(self.recorder.path, 'total', now=time.time() + .01)
+            self.assertEqual(result['totals']['known'], len(cases))
+            self.assertEqual(result['totals']['unknown_source'], 0)
+            self.assertEqual({item['ip'] for item in result['clients']}, {'127.0.0.1'})
+        finally:
+            if caddy.poll() is None:
+                caddy.terminate()
+            caddy.wait(timeout=5)
+
     def test_dashboard_api_updates_after_successive_gateway_requests(self):
         dashboard = Dashboard(0, self.recorder.path)
         self.start(dashboard)
         headers = {'Authorization': 'Bearer '+self.key, 'Content-Type': 'application/json',
-                   'X-LLMDeploy-Client-IP': '192.0.2.4'}
+                   'X-Forwarded-For': '192.0.2.4'}
         def stats():
             conn = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=5)
             try:
@@ -171,7 +246,8 @@ class InProcessCaptureTests(unittest.TestCase):
                               value['totals']['cached']), (expected, 100*expected, 7*expected, 60*expected))
 
     @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for Caddy integration')
-    def test_caddy_adds_source_header_without_interrupting_an_existing_stream(self):
+    def test_caddy_reload_keeps_one_active_stream(self):
+        # This checks an active stream, not idle keep-alive connections.
         def port():
             with socket.socket() as probe:
                 probe.bind(('127.0.0.1', 0))
@@ -180,16 +256,17 @@ class InProcessCaptureTests(unittest.TestCase):
         before, maintenance, after = (self.root/'before.Caddyfile', self.root/'maintenance.Caddyfile',
                                       self.root/'after.Caddyfile')
         template = ('{{\n admin 127.0.0.1:{admin}\n auto_https off\n}}\n'
-                    'http://127.0.0.1:{front} {{\n reverse_proxy 127.0.0.1:{gateway} {{\n'
+                    'http://127.0.0.1:{front} {{\n bind 127.0.0.1\n reverse_proxy 127.0.0.1:{gateway} {{\n'
                     '{header} }}\n}}\n')
         values = {'admin': admin, 'front': front, 'gateway': self.gateway_under_test.server_port}
         before.write_text(template.format(**values, header=''), encoding='utf-8')
         maintenance.write_text(('{{\n admin 127.0.0.1:{admin}\n auto_https off\n}}\n'
-                                'http://127.0.0.1:{front} {{\n respond 503\n}}\n').format(**values),
+                                'http://127.0.0.1:{front} {{\n bind 127.0.0.1\n respond 503\n}}\n').format(**values),
                                encoding='utf-8')
         after.write_text(template.format(**values,
             header='  header_up X-LLMDeploy-Client-IP {remote_host}\n'), encoding='utf-8')
-        env = dict(os.environ, XDG_DATA_HOME=str(self.root), XDG_CONFIG_HOME=str(self.root))
+        env = dict(os.environ, XDG_DATA_HOME=str(self.root), XDG_CONFIG_HOME=str(self.root),
+                   APPDATA=str(self.root), LOCALAPPDATA=str(self.root))
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         caddy = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(before),
             '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -197,14 +274,11 @@ class InProcessCaptureTests(unittest.TestCase):
         client = None
         try:
             deadline = time.monotonic() + 5
-            while True:
-                try:
-                    with socket.create_connection(('127.0.0.1', front), timeout=.1):
-                        break
-                except OSError:
-                    if caddy.poll() is not None or time.monotonic() >= deadline:
-                        self.fail('synthetic Caddy did not start')
-                    time.sleep(.02)
+            while not (synthetic_caddy_owns_listener(caddy, front) and
+                       synthetic_caddy_owns_listener(caddy, admin)):
+                if caddy.poll() is not None or time.monotonic() >= deadline:
+                    self.fail('synthetic Caddy listener ownership could not be verified')
+                time.sleep(.02)
             self.model.mode = 'slow'
             client = socket.create_connection(('127.0.0.1', front), timeout=5)
             client.sendall((f'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{front}\r\n'
@@ -214,12 +288,15 @@ class InProcessCaptureTests(unittest.TestCase):
             self.assertIn(b'200', received)
             self.model.mode = 'normal'
             def reload(config):
+                self.assertTrue(synthetic_caddy_owns_listener(caddy, admin))
+                self.assertTrue(synthetic_caddy_owns_listener(caddy, front))
                 result = subprocess.run([os.environ['LLMDEPLOY_CADDY'], 'reload', '--address',
                     f'127.0.0.1:{admin}', '--config', str(config), '--adapter', 'caddyfile'],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     env=env, creationflags=flags, timeout=5)
                 self.assertEqual(result.returncode, 0)
             reload(maintenance)
+            self.assertTrue(synthetic_caddy_owns_listener(caddy, front))
             conn = HTTPConnection('127.0.0.1', front, timeout=5)
             conn.request('POST', '/v1/chat/completions', b'{}')
             maintenance_response = conn.getresponse()
@@ -227,6 +304,7 @@ class InProcessCaptureTests(unittest.TestCase):
             maintenance_response.read()
             conn.close()
             reload(after)
+            self.assertTrue(synthetic_caddy_owns_listener(caddy, front))
             conn = HTTPConnection('127.0.0.1', front, timeout=5)
             conn.request('POST', '/v1/chat/completions', b'{}',
                 {'Authorization': 'Bearer '+self.key, 'X-LLMDeploy-Client-IP': '192.0.2.55'})

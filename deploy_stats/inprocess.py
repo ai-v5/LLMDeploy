@@ -1,4 +1,4 @@
-"""Observe gateway responses without adding another HTTP forwarding hop."""
+"""Observe gateway responses behind Caddy's verified default forwarding policy."""
 import time
 import threading
 import uuid
@@ -23,7 +23,9 @@ class _Observer:
         self.protocol = protocol
         self.started = time.perf_counter()
         self.request_id = uuid.uuid4().hex
-        self.source = client_ip(headers)
+        # Caddy must be verified to overwrite untrusted X-Forwarded-For.
+        # Direct loopback callers do not have that provenance guarantee.
+        self.source = client_ip(headers, header='X-Forwarded-For')
         self.session_id = None
         self.first = None
         self.status = None

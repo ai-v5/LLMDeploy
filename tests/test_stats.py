@@ -28,6 +28,7 @@ from deploy_stats.store import _open, Recorder
 from deploy_stats.web import Dashboard
 from deploy_gateway.server import Gateway
 from deploy_gateway.routing import affinity_key
+from tests.caddy_helpers import synthetic_caddy_owns_listener
 
 
 def usage(input_tokens=100, output_tokens=7, cached=60):
@@ -900,6 +901,7 @@ class ProxyTests(unittest.TestCase):
     auto_https off
 }}
 http://127.0.0.1:{port} {{
+    bind 127.0.0.1
     log {{
         output discard
     }}
@@ -913,6 +915,8 @@ http://127.0.0.1:{port} {{
         environment = dict(os.environ)
         environment['XDG_DATA_HOME'] = self.temp.name
         environment['XDG_CONFIG_HOME'] = self.temp.name
+        environment['APPDATA'] = self.temp.name
+        environment['LOCALAPPDATA'] = self.temp.name
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         process = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(old),
             '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -920,14 +924,11 @@ http://127.0.0.1:{port} {{
         client = None
         try:
             deadline = time.monotonic() + 5
-            while True:
-                try:
-                    with socket.create_connection(('127.0.0.1', port), timeout=.2):
-                        break
-                except OSError:
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        self.fail('synthetic Caddy did not start')
-                    time.sleep(.05)
+            while not (synthetic_caddy_owns_listener(process, port) and
+                       synthetic_caddy_owns_listener(process, admin_port)):
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    self.fail('synthetic Caddy listener ownership could not be verified')
+                time.sleep(.05)
             self.upstream.mode = 'slow_length'
             client = socket.create_connection(('127.0.0.1', port), timeout=5)
             client.sendall((f'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n'
@@ -937,11 +938,14 @@ http://127.0.0.1:{port} {{
             while b'data:' not in received:
                 received.extend(client.recv(4096))
             self.upstream.mode = 'json'
+            self.assertTrue(synthetic_caddy_owns_listener(process, admin_port))
+            self.assertTrue(synthetic_caddy_owns_listener(process, port))
             reload = subprocess.run([os.environ['LLMDEPLOY_CADDY'], 'reload', '--address',
                 f'127.0.0.1:{admin_port}', '--config', str(new), '--adapter', 'caddyfile'],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=environment, creationflags=flags, timeout=5)
             self.assertEqual(reload.returncode, 0)
+            self.assertTrue(synthetic_caddy_owns_listener(process, port))
             connection = HTTPConnection('127.0.0.1', port, timeout=5)
             connection.request('POST', '/v1/chat/completions', b'{}')
             response = connection.getresponse()
@@ -976,9 +980,12 @@ http://127.0.0.1:{port} {{
         self.start(gateway)
         proxy = Proxy(0, gateway.server_port, Path(self.temp.name) / 'fallback-stats.sqlite3')
         self.start(proxy)
-        with socket.socket() as probe:
-            probe.bind(('127.0.0.1', 0))
-            primary_port = probe.getsockname()[1]
+        reservation = socket.socket()
+        if os.name == 'nt':
+            reservation.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        reservation.bind(('127.0.0.1', 0))
+        self.addCleanup(reservation.close)
+        primary_port = reservation.getsockname()[1]
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
@@ -988,6 +995,7 @@ http://127.0.0.1:{port} {{
     auto_https off
 }
 http://127.0.0.1:%d {
+    bind 127.0.0.1
     log {
         output discard
     }
@@ -1007,6 +1015,8 @@ http://127.0.0.1:%d {
         environment = dict(os.environ)
         environment['XDG_DATA_HOME'] = self.temp.name
         environment['XDG_CONFIG_HOME'] = self.temp.name
+        environment['APPDATA'] = self.temp.name
+        environment['LOCALAPPDATA'] = self.temp.name
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         process = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(config),
             '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1014,16 +1024,13 @@ http://127.0.0.1:%d {
         primary = None
         try:
             deadline = time.monotonic() + 5
-            while True:
-                try:
-                    with socket.create_connection(('127.0.0.1', port), timeout=.2):
-                        break
-                except OSError:
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        self.fail('synthetic Caddy did not start')
-                    time.sleep(.05)
+            while not synthetic_caddy_owns_listener(process, port):
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    self.fail('synthetic Caddy listener ownership could not be verified')
+                time.sleep(.05)
 
             def request(key):
+                self.assertTrue(synthetic_caddy_owns_listener(process, port))
                 connection = HTTPConnection('127.0.0.1', port, timeout=5)
                 connection.request('POST', '/v1/chat/completions',
                     b'{"messages":[{"role":"user","content":"synthetic"}]}',
@@ -1082,6 +1089,7 @@ http://127.0.0.1:%d {
                 def handle_error(self, request, client_address):
                     pass  # Deliberate reset scenarios in this test.
 
+            reservation.close()
             primary = PrimaryServer(('127.0.0.1', primary_port), Primary)
             primary.mode, primary.calls = 'normal', 0
             primary.daemon_threads = True
@@ -1142,6 +1150,7 @@ http://127.0.0.1:%d {
     auto_https off
 }
 http://127.0.0.1:%d {
+    bind 127.0.0.1
     log {
         output discard
     }
@@ -1154,21 +1163,18 @@ http://127.0.0.1:%d {
         environment = dict(os.environ)
         environment['XDG_DATA_HOME'] = self.temp.name
         environment['XDG_CONFIG_HOME'] = self.temp.name
+        environment['APPDATA'] = self.temp.name
+        environment['LOCALAPPDATA'] = self.temp.name
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         process = subprocess.Popen([os.environ['LLMDEPLOY_CADDY'], 'run', '--config', str(config),
             '--adapter', 'caddyfile'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, env=environment, creationflags=flags)
         try:
             deadline = time.monotonic() + 5
-            while True:
-                try:
-                    connection = socket.create_connection(('127.0.0.1', port), timeout=.2)
-                    connection.close()
-                    break
-                except OSError:
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        self.fail('synthetic Caddy did not start')
-                    time.sleep(.05)
+            while not synthetic_caddy_owns_listener(process, port):
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    self.fail('synthetic Caddy listener ownership could not be verified')
+                time.sleep(.05)
             connection = HTTPConnection('127.0.0.1', port, timeout=5)
             connection.request('POST', '/v1/chat/completions', b'{}', {
                 'Authorization': 'Bearer synthetic-placeholder',

@@ -26,8 +26,8 @@ WINDOWS_CONNECTIONS_PER_WORKER = 160
 MAX_CONNECTIONS = WINDOWS_WORKERS * WINDOWS_CONNECTIONS_PER_WORKER
 
 
-def client_ip(headers):
-    values = headers.get_all(CLIENT_HEADER, [])
+def client_ip(headers, *, header=CLIENT_HEADER):
+    values = headers.get_all(header, [])
     if len(values) != 1 or not isinstance(values[0], str):
         return None
     try:
