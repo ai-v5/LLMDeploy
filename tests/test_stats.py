@@ -22,7 +22,7 @@ from unittest.mock import patch
 from deploy_stats.capture import UsageCapture, extract_usage
 from deploy_stats.proxy import Proxy, _headers, client_ip, session_fingerprint
 from deploy_stats.backends import read_backend
-from deploy_stats.report import report
+from deploy_stats.report import active_report, report
 from deploy_stats.session import BodyBudget, SessionBodyCapture
 from deploy_stats.store import _open, Recorder
 from deploy_stats.web import Dashboard
@@ -739,10 +739,47 @@ class ProxyTests(unittest.TestCase):
         connection.close()
         for headers in ({'Host': 'untrusted.invalid'}, {'Origin': 'https://untrusted.invalid'},
                         {'Sec-Fetch-Site': 'cross-site'}):
+            for path in ('/', '/api/active'):
+                connection = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=5)
+                connection.request('GET', path, headers=headers)
+                self.assertEqual(connection.getresponse().status, 403)
+                connection.close()
+
+    def test_dashboard_validates_pagination_and_sort_parameters(self):
+        self.request()
+        self.wait_recorded()
+        dashboard = Dashboard(0, self.path)
+        self.start(dashboard)
+        queries = [
+            ('?limit=10&sort=input&direction=asc&session_limit=50&session_sort=output&session_direction=desc', 200),
+            ('?limit=0', 400), ('?limit=201', 400), ('?session_limit=', 400),
+            ('?sort=not_a_column', 400), ('?session_sort=not_a_column', 400),
+            ('?direction=wrong', 400), ('?offset=1&offset=2', 400),
+            ('?snapshot_id=1', 400), ('?snapshot_at=1', 400), ('?snapshot_at=nan&snapshot_id=1', 400),
+        ]
+        for query, expected in queries:
             connection = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=5)
-            connection.request('GET', '/', headers=headers)
-            self.assertEqual(connection.getresponse().status, 403)
-            connection.close()
+            try:
+                connection.request('GET', '/api/stats' + query)
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, expected, query)
+                if expected == 200:
+                    self.assertEqual((payload['request_limit'], payload['session_limit']), (10, 50))
+            finally:
+                connection.close()
+        for path, expected in (('/api/active', 200), ('/api/active?bad=1', 400)):
+            connection = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=5)
+            try:
+                connection.request('GET', path)
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, expected)
+                if expected == 200:
+                    self.assertIn('active_ready', payload)
+                    self.assertIn('active_sampled_at', payload)
+            finally:
+                connection.close()
 
     def test_existing_listener_is_never_reused(self):
         with socket.socket() as occupied:
@@ -1221,6 +1258,29 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(value['collector_live'])
             self.assertFalse(value['active_ready'])
             self.assertEqual(value['active'], [])
+            lightweight = active_report(path, now=now)
+            self.assertTrue(lightweight['collector_live'])
+            self.assertFalse(lightweight['active_ready'])
+            self.assertEqual(lightweight['active'], [])
+
+    def test_lightweight_active_report_matches_full_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('live', now - 60, now - 1, None, 0))
+            db.execute('INSERT INTO active_samples VALUES (?,?)', ('live', now - 1))
+            db.execute('INSERT INTO active_requests VALUES (?,?,?,?,?,?)',
+                       ('fixture', 'live', now - 30, '192.0.2.4', 'synthetic-session', None))
+            db.commit()
+            db.close()
+            full = report(path, 'total', now=now)
+            lightweight = active_report(path, now=now)
+            for key in ('collector_live', 'active_ready', 'active_sampled_at', 'active'):
+                self.assertEqual(lightweight[key], full[key])
+            self.assertTrue(lightweight['active_ready'])
+            self.assertEqual(len(lightweight['active']), 1)
+            self.assertFalse(active_report(path, now=now + 3)['active_ready'])
 
     def test_session_and_request_pagination_do_not_drop_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1240,6 +1300,117 @@ class ReportTests(unittest.TestCase):
             self.assertEqual((value['request_count'], len(value['requests'])), (205, 100))
             self.assertEqual((value['session_count'], len(value['sessions'])), (105, 5))
             self.assertEqual(value['totals']['input'], 20500)
+
+    def test_sorting_is_global_before_independent_pagination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 1000, now, now, 0))
+            for i in range(73):
+                known = i % 11 != 0
+                db.execute('''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                    input_tokens,output_tokens,cached_tokens,session_id,first_visible)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                    ('fixture', now - 100 + i, None if i == 5 else f'192.0.2.{i % 15 + 1}', 2, 200, 'known' if known else 'missing',
+                     1000 - i if known else None, i + 1 if known else None, 0 if known else None,
+                     f'session-{i % 17:02}', .5 if known else None))
+            db.commit()
+            db.close()
+            for size in (10, 20, 50):
+                for direction in ('asc', 'desc'):
+                    pages = [report(path, 'total', now=now + .01, request_offset=offset, request_limit=size,
+                                    request_sort='input', request_dir=direction, session_limit=10)
+                             for offset in range(0, 73, size)]
+                    records = [item for page in pages for item in page['requests']]
+                    self.assertEqual(len({item['id'] for item in records}), 73)
+                    inputs = [item['input'] for item in records if item['input'] is not None]
+                    self.assertEqual(inputs, sorted(inputs, reverse=direction == 'desc'))
+                    self.assertTrue(all(item['input'] is None for item in records[len(inputs):]))
+                    self.assertEqual(pages[0]['request_limit'], size)
+                    self.assertEqual(pages[0]['session_limit'], 10)
+            for direction in ('asc', 'desc'):
+                ip_page = report(path, 'total', now=now + .01, request_limit=200,
+                                 request_sort='ip', request_dir=direction)['requests']
+                self.assertIsNone(ip_page[-1]['ip'])
+                octets = [int(item['ip'].split('.')[-1]) for item in ip_page if item['ip'] is not None]
+                self.assertEqual(octets, sorted(octets, reverse=direction == 'desc'))
+            session_pages = [report(path, 'total', now=now + .01, request_limit=20, session_offset=offset,
+                                    session_limit=10, session_sort='output', session_dir='asc')
+                             for offset in (0, 10)]
+            sessions = [item for page in session_pages for item in page['sessions']]
+            self.assertEqual(len({item['session'] for item in sessions}), 17)
+            self.assertEqual([item['output'] for item in sessions], sorted(item['output'] for item in sessions))
+            clamped = report(path, 'total', now=now + .01, request_offset=10000, request_limit=20,
+                             session_offset=10000, session_limit=10)
+            self.assertEqual((clamped['request_offset'], clamped['session_offset']), (60, 10))
+            for bad in ({'request_sort': 'bad'}, {'session_sort': 'bad'}, {'request_dir': 'bad'},
+                        {'session_dir': 'bad'}, {'request_limit': 0}, {'session_limit': 201}):
+                with self.assertRaises(ValueError):
+                    report(path, 'total', now=now + .01, **bad)
+
+    def test_session_sort_puts_unknown_source_last_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 100, now, now, 0))
+            for i, ip in enumerate((None, '192.0.2.1', '192.0.2.20')):
+                db.execute('''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                    input_tokens,output_tokens,cached_tokens,session_id,first_visible)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                    ('fixture', now - 10 + i, ip, 2, 200, 'known', 100, 7, 0, f'session-{i}', .5))
+            db.commit()
+            db.close()
+            for direction in ('asc', 'desc'):
+                sessions = report(path, 'total', now=now + .01, session_sort='ips', session_dir=direction)['sessions']
+                self.assertEqual(sessions[-1]['ips'], ['未知来源'])
+
+    def test_page_snapshot_excludes_new_and_late_commits_but_live_totals_advance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 200000, now, now, 0))
+            statement = '''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                input_tokens,output_tokens,cached_tokens,session_id,first_visible) VALUES(?,?,?,?,?,?,?,?,?,?,?)'''
+            for i in range(40):
+                db.execute(statement, ('fixture', now - 100 + i, '192.0.2.4', 2, 200, 'known',
+                                       100, 7, 0, f'session-{i:02}', .5))
+            db.commit()
+            db.close()
+            first = report(path, 'total', now=now, request_limit=20, session_limit=20)
+            db = _open(path)
+            for i, finished in enumerate((now + 1, now - 1)):
+                db.execute(statement, ('fixture', finished, '192.0.2.4', 2, 200, 'known',
+                                       100, 7, 0, f'new-session-{i}', .5))
+            db.execute('UPDATE runs SET last_seen=?,ended=? WHERE id=?', (now + 5, now + 5, 'fixture'))
+            db.commit()
+            db.close()
+            second = report(path, 'total', now=now + 5, request_offset=20, request_limit=20,
+                            session_offset=20, session_limit=20,
+                            snapshot_at=first['snapshot_at'], snapshot_id=first['snapshot_id'])
+            self.assertEqual((second['request_count'], second['session_count'], second['totals']['requests']), (40, 40, 42))
+            self.assertEqual(len({item['id'] for item in first['requests'] + second['requests']}), 40)
+            self.assertEqual(len({item['session'] for item in first['sessions'] + second['sessions']}), 40)
+            latest = report(path, 'total', now=now + 5)
+            self.assertEqual((latest['request_count'], latest['session_count']), (42, 42))
+
+    def test_snapshot_completeness_uses_snapshot_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 86400, now, now, 0))
+            db.execute('''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                input_tokens,output_tokens,cached_tokens,session_id,first_visible) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+                ('fixture', now - 121, '192.0.2.4', 2, 200, 'known', 100, 7, 0, 'session', .5))
+            db.commit()
+            db.close()
+            value = report(path, '24h', now=now, snapshot_at=now - 120, snapshot_id=1)
+            self.assertTrue(value['totals']['complete'])
+            self.assertFalse(value['snapshot_complete'])
+            self.assertEqual(value['sessions'][0]['input'], 100)
 
     def test_schema_one_migrates_without_losing_history(self):
         with tempfile.TemporaryDirectory() as tmp:

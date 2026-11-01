@@ -1,6 +1,7 @@
 """Read-only windows, per-IP aggregates, and completion-time buckets."""
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+import ipaddress
 import math
 from pathlib import Path
 import sqlite3
@@ -11,6 +12,10 @@ from .store import IDENTITY, SCHEMA
 TZ = timezone(timedelta(hours=8))
 BUCKET_SECONDS = 600
 COVERAGE_EPSILON = 1e-6
+REQUEST_SORTS = frozenset(('finished', 'ip', 'session', 'state', 'input', 'output', 'hit_rate',
+                           'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share'))
+SESSION_SORTS = frozenset(('last_finished', 'session', 'ips', 'requests', 'input', 'output', 'hit_rate',
+                           'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share'))
 
 
 def _coverage(runs, start, end, now):
@@ -113,50 +118,124 @@ def _session_views(details):
     return sorted(result, key=lambda item: item['last_finished'], reverse=True)
 
 
-def report(path, window='24h', *, now=None, request_offset=0, request_limit=100, session_offset=0):
-    if window not in ('today', '24h', '7d', 'total'):
-        raise ValueError('INVALID_STATS_WINDOW')
-    if (type(request_offset) is not int or request_offset < 0 or type(session_offset) is not int or session_offset < 0 or
-            type(request_limit) is not int or not 1 <= request_limit <= 200):
-        raise ValueError('INVALID_STATS_PAGE')
+def _ordered_page(items, field, direction, offset, limit, identity):
+    def value(item):
+        result = item.get(field)
+        if field == 'ips':
+            known = [address for address in result if address != '未知来源'] if result else []
+            result = ', '.join(known) if known else None
+        elif field == 'ip' and result is not None:
+            try:
+                address = ipaddress.ip_address(result)
+                return address.version, int(address)
+            except ValueError:
+                return None
+        elif field == 'state':
+            labels = {'known': '已计量', 'missing': '未计量', 'failed': '失败', 'interrupted': '中断'}
+            return labels.get(result, '未知'), item.get('status') or 0
+        if isinstance(result, str):
+            result = result.casefold()
+        return result
+
+    present = [item for item in items if value(item) is not None]
+    missing = [item for item in items if value(item) is None]
+    present.sort(key=lambda item: (value(item), item[identity]), reverse=direction == 'desc')
+    missing.sort(key=lambda item: item[identity])
+    ordered = present + missing
+    offset = min(offset, ((len(ordered) - 1) // limit) * limit) if ordered else 0
+    return ordered[offset:offset + limit], offset
+
+
+def _check_database(db):
+    if db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA:
+        raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH')
+    try:
+        marker = db.execute("SELECT value FROM stats_meta WHERE key='application'").fetchone()
+    except sqlite3.Error as error:
+        raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH') from error
+    if marker != (IDENTITY,):
+        raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH')
+
+
+def _active_snapshot(db, now):
+    samples = list(db.execute('''SELECT r.last_seen,s.seen FROM runs r
+        LEFT JOIN active_samples s ON s.run_id=r.id WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=?''',
+        (now - 15, now)))
+    ready = bool(samples) and all(seen is not None and 0 <= now - seen < 3 for _, seen in samples)
+    rows = list(db.execute('''SELECT a.client_ip,a.session_id,a.started,a.first_visible
+        FROM active_requests a JOIN runs r ON a.run_id=r.id
+        WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=? ORDER BY a.started''', (now - 15, now))) if ready else []
+    current = [{'ip': ip, 'session': session, 'started': started, 'elapsed': max(0, now - started),
+                'first_visible': first, 'input': None, 'output': None, 'cached': None}
+               for ip, session, started, first in rows]
+    return {'as_of': now, 'collector_live': bool(samples), 'active': current, 'active_ready': ready,
+            'active_sampled_at': min((seen for _, seen in samples), default=None) if ready else None}
+
+
+def active_report(path, *, now=None):
     now = time.time() if now is None else float(now)
     uri = Path(path).resolve().as_uri() + '?mode=ro'
     with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
-        if db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA:
-            raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH')
-        try:
-            marker = db.execute("SELECT value FROM stats_meta WHERE key='application'").fetchone()
-        except sqlite3.Error as error:
-            raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH') from error
-        if marker != (IDENTITY,):
-            raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH')
+        _check_database(db)
+        return _active_snapshot(db, now)
+
+
+def report(path, window='24h', *, now=None, request_offset=0, request_limit=100, session_offset=0,
+           session_limit=None, request_sort='finished', request_dir='desc',
+           session_sort='last_finished', session_dir='desc', snapshot_at=None, snapshot_id=None):
+    if window not in ('today', '24h', '7d', 'total'):
+        raise ValueError('INVALID_STATS_WINDOW')
+    if session_limit is None:
+        session_limit = request_limit
+    if (type(request_offset) is not int or request_offset < 0 or type(session_offset) is not int or session_offset < 0 or
+            type(request_limit) is not int or not 1 <= request_limit <= 200 or
+            type(session_limit) is not int or not 1 <= session_limit <= 200 or
+            not isinstance(request_sort, str) or request_sort not in REQUEST_SORTS or
+            not isinstance(session_sort, str) or session_sort not in SESSION_SORTS or
+            request_dir not in ('asc', 'desc') or session_dir not in ('asc', 'desc')):
+        raise ValueError('INVALID_STATS_PAGE')
+    now = time.time() if now is None else float(now)
+    if ((snapshot_at is None) != (snapshot_id is None) or
+            snapshot_id is not None and (type(snapshot_id) is not int or snapshot_id < 0) or
+            snapshot_at is not None and (type(snapshot_at) not in (int, float) or
+                not math.isfinite(snapshot_at) or not 0 < snapshot_at <= now)):
+        raise ValueError('INVALID_STATS_SNAPSHOT')
+    uri = Path(path).resolve().as_uri() + '?mode=ro'
+    with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        _check_database(db)
         runs = list(db.execute('SELECT started,last_seen,ended,dropped FROM runs'))
         since = min((r[0] for r in runs), default=now)
+        if snapshot_at is None:
+            snapshot_at = now
+            snapshot_id = db.execute('SELECT COALESCE(MAX(id),0) FROM requests').fetchone()[0]
         midnight = datetime.fromtimestamp(now, TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         start = {'today': midnight, '24h': now - 86400, '7d': now - 7 * 86400,
                  'total': since}[window]
         start = min(start, now)
+        snapshot_midnight = datetime.fromtimestamp(snapshot_at, TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        snapshot_start = min(snapshot_at, {'today': snapshot_midnight, '24h': snapshot_at - 86400,
+                             '7d': snapshot_at - 7 * 86400, 'total': since}[window])
         rows = list(db.execute('''SELECT finished,client_ip,state,input_tokens,output_tokens,cached_tokens,elapsed,
                 session_id,first_visible,http_status,id
             FROM requests WHERE finished>=? AND finished<? ORDER BY finished''',
-            (min(start, now - 14 * 86400), now)))
-        samples = list(db.execute('''SELECT r.last_seen,s.seen FROM runs r
-            LEFT JOIN active_samples s ON s.run_id=r.id WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=?''',
-            (now - 15, now)))
-        active_ready = bool(samples) and all(seen is not None and 0 <= now - seen < 3 for _, seen in samples)
-        active = list(db.execute('''SELECT a.client_ip,a.session_id,a.started,a.first_visible
-            FROM active_requests a JOIN runs r ON a.run_id=r.id
-            WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=? ORDER BY a.started''', (now - 15, now))) if active_ready else []
+            (min(start, snapshot_start, now - 14 * 86400), now)))
+        live_active = _active_snapshot(db, now)
     selected, grouped, series_rows, day_rows = [], {}, {}, {}
-    details = []
+    details, snapshot_details = [], []
     for row in rows:
         stamp = row[0]
+        view = None
         if stamp >= start:
             selected.append(row[2:7])
             grouped.setdefault(row[1], []).append(row[2:7])
-            details.append(_request_view(row))
+            view = _request_view(row)
+            details.append(view)
+        if snapshot_start <= stamp < snapshot_at and row[-1] <= snapshot_id:
+            snapshot_details.append(view if view is not None else _request_view(row))
         if stamp >= now - 86400:
             bucket = int(stamp // BUCKET_SECONDS) * BUCKET_SECONDS
             series_rows.setdefault(bucket, []).append(row[2:7])
@@ -215,16 +294,19 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
                       complete=bool(runs) and b > a and coverage >= b - a - COVERAGE_EPSILON and lost == 0 and unclean == 0 and
                       counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
         days.append(counts)
-    live = any(ended is None and 0 <= now - seen < 15 for _, seen, ended, _ in runs)
-    recent = list(reversed(details))[request_offset:request_offset + request_limit]
-    sessions = _session_views(details)
-    current = [{'ip': ip, 'session': session, 'started': started, 'elapsed': max(0, now - started),
-                'first_visible': first, 'input': None, 'output': None, 'cached': None}
-               for ip, session, started, first in active]
+    snapshot_covered, snapshot_dropped, snapshot_unclean = _coverage(runs, snapshot_start, snapshot_at, now)
+    snapshot_complete = (bool(runs) and snapshot_at > snapshot_start and
+                         snapshot_covered >= snapshot_at - snapshot_start - COVERAGE_EPSILON and
+                         snapshot_dropped == 0 and snapshot_unclean == 0 and
+                         all(item['state'] == 'known' for item in snapshot_details))
+    sessions = _session_views(snapshot_details)
+    recent, request_offset = _ordered_page(snapshot_details, request_sort, request_dir, request_offset, request_limit, 'id')
+    session_page, session_offset = _ordered_page(sessions, session_sort, session_dir, session_offset, session_limit, 'session')
     return {'schema': SCHEMA, 'as_of': now, 'since': since if runs else None,
-            'window': window, 'collector_live': live, 'totals': totals,
-            'clients': clients, 'series_24h': series, 'days': days, 'active': current, 'active_ready': active_ready,
-            'active_sampled_at': min((seen for _, seen in samples), default=None) if active_ready else None,
-            'requests': recent, 'request_count': len(details), 'request_offset': request_offset,
-            'sessions': sessions[session_offset:session_offset + request_limit],
-            'session_count': len(sessions), 'session_offset': session_offset}
+            'window': window, 'collector_live': live_active['collector_live'], 'totals': totals,
+            'clients': clients, 'series_24h': series, 'days': days, 'active': live_active['active'],
+            'active_ready': live_active['active_ready'], 'active_sampled_at': live_active['active_sampled_at'],
+            'snapshot_at': snapshot_at, 'snapshot_id': snapshot_id, 'snapshot_complete': snapshot_complete,
+            'requests': recent, 'request_count': len(snapshot_details), 'request_offset': request_offset, 'request_limit': request_limit,
+            'sessions': session_page, 'session_count': len(sessions), 'session_offset': session_offset, 'session_limit': session_limit,
+            'session_unknown_count': sum(1 for item in snapshot_details if not item['session'])}

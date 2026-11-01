@@ -7,7 +7,7 @@ import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
 from .backends import read_backend
-from .report import report
+from .report import active_report, report
 
 STATIC = Path(__file__).resolve().parent / 'static'
 ASSETS = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -73,17 +73,44 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.send(503, b'Unavailable', 'text/plain; charset=utf-8')
             return
+        if url.path == '/api/active':
+            if url.query:
+                self.send(400, b'{"error":"INVALID_ACTIVE_QUERY"}', 'application/json; charset=utf-8')
+                return
+            try:
+                value = active_report(self.server.database)
+                body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
+                self.send(200, body, 'application/json; charset=utf-8')
+            except (ValueError, sqlite3.Error, OSError, OverflowError):
+                self.send(503, b'{"error":"STATS_UNAVAILABLE"}', 'application/json; charset=utf-8')
+            return
         if url.path == '/api/stats':
             values = parse_qs(url.query, keep_blank_values=True)
-            if (set(values) - {'window', 'offset', 'session_offset'} or len(values.get('window', ['24h'])) != 1 or
-                    any(len(values.get(key, ['0'])) != 1 or not values.get(key, ['0'])[0].isdigit()
-                        for key in ('offset', 'session_offset'))):
+            defaults = {'window': '24h', 'offset': '0', 'limit': '100', 'sort': 'finished', 'direction': 'desc',
+                        'session_offset': '0', 'session_limit': None, 'session_sort': 'last_finished',
+                        'session_direction': 'desc', 'snapshot_at': None, 'snapshot_id': None}
+            if set(values) - set(defaults) or any(len(value) != 1 for value in values.values()):
                 self.send(400, b'{"error":"INVALID_WINDOW"}', 'application/json; charset=utf-8')
                 return
             try:
-                value = report(self.server.database, values.get('window', ['24h'])[0],
-                               request_offset=int(values.get('offset', ['0'])[0]),
-                               session_offset=int(values.get('session_offset', ['0'])[0]))
+                params = {key: values[key][0] if key in values else default for key, default in defaults.items()}
+                if params['session_limit'] is None:
+                    params['session_limit'] = params['limit']
+                if any(not params[key].isascii() or not params[key].isdigit() or len(params[key]) > 10
+                       for key in ('offset', 'limit', 'session_offset', 'session_limit')):
+                    raise ValueError('INVALID_STATS_PAGE')
+                if params['snapshot_id'] is not None and (not params['snapshot_id'].isascii() or
+                        not params['snapshot_id'].isdigit() or len(params['snapshot_id']) > 19):
+                    raise ValueError('INVALID_STATS_SNAPSHOT')
+                if params['snapshot_at'] is not None and len(params['snapshot_at']) > 32:
+                    raise ValueError('INVALID_STATS_SNAPSHOT')
+                value = report(self.server.database, params['window'],
+                               request_offset=int(params['offset']), request_limit=int(params['limit']),
+                               session_offset=int(params['session_offset']), session_limit=int(params['session_limit']),
+                               request_sort=params['sort'], request_dir=params['direction'],
+                               session_sort=params['session_sort'], session_dir=params['session_direction'],
+                               snapshot_at=float(params['snapshot_at']) if params['snapshot_at'] is not None else None,
+                               snapshot_id=int(params['snapshot_id']) if params['snapshot_id'] is not None else None)
                 value['backends'] = [read_backend(port) for port in self.server.backend_ports]
                 body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
                 self.send(200, body, 'application/json; charset=utf-8')
