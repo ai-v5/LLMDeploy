@@ -31,6 +31,7 @@ const views = {
 };
 const seconds = (value) => value === null || value === undefined ? '—' : `${number.format(value)} s`;
 const rate = (value) => value === null || value === undefined ? '—' : number.format(value);
+const speed = (value) => value === null || value === undefined ? '—' : `${rate(value)} tok/s`;
 const percent = (value) => value === null || value === undefined ? '—' : `${number.format(value * 100)}%`;
 const count = (value) => value === null || value === undefined ? '—' : integer.format(value);
 const fingerprint = (value) => value ? value.slice(0, 12) : '未知';
@@ -400,6 +401,14 @@ function render(data) {
   $('total-cached').textContent = display(stats.cached, stats);
   $('total-tps').textContent = stats.window_tps === null ? '—' : display(stats.window_tps, stats, true);
   $('cache-detail').textContent = stats.hit_rate === null ? '已计量请求命中率 —' : `已计量请求命中率 ${number.format(stats.hit_rate * 100)}%`;
+  $('overview-prefill-tps').textContent = speed(stats.prefill_estimate_tps);
+  $('overview-prefill-wait').textContent = seconds(stats.first_mean);
+  $('overview-decode-tps').textContent = speed(stats.decode_estimate_tps);
+  $('overview-hit-rate').textContent = percent(stats.hit_rate);
+  $('overview-prefill-samples').textContent = `${count(stats.prefill_samples)} 个样本 · 按耗时加权`;
+  $('overview-wait-samples').textContent = `${count(stats.first_samples)} 个可见增量样本`;
+  $('overview-decode-samples').textContent = `${count(stats.decode_samples)} 个样本 · 按耗时加权`;
+  $('overview-hit-samples').textContent = `${count(stats.known)} 个已计量请求`;
   $('success-rate').textContent = percent(stats.success_rate);
   $('success-detail').textContent = `${count(stats.successes)} / ${count(stats.classified)} 个可判定请求`;
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
@@ -453,7 +462,9 @@ async function refresh() {
     $('status-dot').classList.remove('live');
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';
-    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps'].forEach((id) => { $(id).textContent = '—'; });
+    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps', 'overview-prefill-tps',
+      'overview-prefill-wait', 'overview-decode-tps', 'overview-hit-rate'].forEach((id) => { $(id).textContent = '—'; });
+    ['overview-prefill-samples', 'overview-wait-samples', 'overview-decode-samples', 'overview-hit-samples'].forEach((id) => { $(id).textContent = '统计不可用'; });
     ['input', 'output', 'cached'].forEach((field) => { $(`chart-${field}-svg`).replaceChildren(); $(`chart-${field}`).textContent = '暂无数据'; });
     $('clients-body').replaceChildren();
     $('days-body').replaceChildren();

@@ -21,6 +21,13 @@
         <div class="page-title"><div><div class="eyebrow">MODEL OBSERVABILITY</div><h1>模型用量监控</h1><p>按最终响应统计请求来源、Token 用量与缓存复用情况。</p></div><div class="status"><span id="status-dot" class="status-dot"></span><div><strong id="status-label">正在连接</strong><small id="updated">等待统计数据</small></div></div></div>
         <div class="toolbar"><div><span class="section-kicker" id="view-kicker">OVERVIEW</span><h2 id="view-title">用量概览</h2></div><div class="segmented" role="group" aria-label="统计时间范围"><button data-window="today">今天</button><button class="is-active" data-window="24h">近 24 小时</button><button data-window="7d">近 7 天</button><button data-window="total">累计</button></div></div>
         <div id="notice" class="notice" role="status">正在读取采集状态…</div>
+        <div class="cards phase-cards" data-view="overview">
+          <article class="metric"><div class="metric-top"><span>Prefill 速度（估算）</span><span class="metric-icon blue">↘</span></div><strong id="overview-prefill-tps">—</strong><small id="overview-prefill-samples">等待可测样本</small></article>
+          <article class="metric"><div class="metric-top"><span>Prefill 平均等待（估算）</span><span class="metric-icon violet">◷</span></div><strong id="overview-prefill-wait">—</strong><small id="overview-wait-samples">等待可测样本</small></article>
+          <article class="metric"><div class="metric-top"><span>Decode 速度（估算）</span><span class="metric-icon orange">↗</span></div><strong id="overview-decode-tps">—</strong><small id="overview-decode-samples">等待可测样本</small></article>
+          <article class="metric"><div class="metric-top"><span>缓存命中率</span><span class="metric-icon green">◈</span></div><strong id="overview-hit-rate">—</strong><small id="overview-hit-samples">等待已计量样本</small></article>
+        </div>
+        <div class="phase-note" data-view="overview">阶段速度按可测请求的入口时间加权；平均等待包含上传、排队和网络，均非引擎实测，也不是并发总吞吐。</div>
         <div class="cards" data-view="overview">
           <article class="metric"><div class="metric-top"><span>总 Token</span><span class="metric-icon slate">Σ</span></div><strong id="total-usage">—</strong><small>输入 + 输出，缓存不重复计算</small></article>
           <article class="metric"><div class="metric-top"><span>输入 Token</span><span class="metric-icon blue">↘</span></div><strong id="total-input">—</strong><small>包含缓存命中的输入</small></article>

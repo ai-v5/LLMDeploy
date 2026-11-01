@@ -1226,6 +1226,37 @@ http://127.0.0.1:%d {
 
 
 class ReportTests(unittest.TestCase):
+    def test_overview_phase_estimates_use_measurable_success_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            now = time.time()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('fixture', now - 1000, now, now, 0))
+            statement = '''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                input_tokens,output_tokens,cached_tokens,session_id,first_visible) VALUES(?,?,?,?,?,?,?,?,?,?,?)'''
+            db.execute(statement, ('fixture', now - 10, '192.0.2.4', 2, 200, 'known', 100, 7, 50, None, None))
+            db.commit()
+            empty = report(path, 'total', now=now + .01)['totals']
+            self.assertIsNone(empty['first_mean'])
+            self.assertIsNone(empty['prefill_estimate_tps'])
+            self.assertIsNone(empty['decode_estimate_tps'])
+            for elapsed, prompt, output, cached, first in ((2.5, 100, 11, 40, .5),
+                                                            (4.5, 50, 6, 0, 1.5),
+                                                            (2, 50, 1, 10, 1)):
+                db.execute(statement, ('fixture', now - 5, '192.0.2.4', elapsed, 200, 'known',
+                                       prompt, output, cached, None, first))
+            db.execute(statement, ('fixture', now - 5, '192.0.2.4', 2, 500, 'failed',
+                                   None, None, None, None, None))
+            db.commit()
+            db.close()
+            totals = report(path, 'total', now=now + .01)['totals']
+            self.assertEqual((totals['known'], totals['first_samples'], totals['prefill_samples'], totals['decode_samples']),
+                             (4, 3, 3, 2))
+            self.assertAlmostEqual(totals['first_mean'], 1)
+            self.assertAlmostEqual(totals['prefill_estimate_tps'], 50)
+            self.assertAlmostEqual(totals['decode_estimate_tps'], 3)
+            self.assertAlmostEqual(totals['hit_rate'], 1 / 3)
+
     def test_subsecond_coverage_gap_is_incomplete_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'usage.sqlite3'

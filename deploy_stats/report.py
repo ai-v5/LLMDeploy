@@ -254,13 +254,23 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
     classified = [item for item in details if item['state'] in ('known', 'failed', 'interrupted')]
     successes = [item for item in classified if item['state'] == 'known' and item['status'] is not None
                  and 200 <= item['status'] < 300]
-    first_values = [item['first_visible'] for item in successes if item['first_visible'] is not None]
+    timed = [item for item in successes if item['first_visible'] is not None]
+    first_values = [item['first_visible'] for item in timed]
+    prefill_items = [item for item in timed if item['first_visible'] > 0]
+    decode_items = [item for item in timed if item['output'] > 1 and item['after_first'] > 0]
+    prefill_time = sum(item['first_visible'] for item in prefill_items)
+    decode_time = sum(item['after_first'] for item in decode_items)
     duration_values = [item['elapsed'] for item in successes]
     totals.update(successes=len(successes), classified=len(classified),
                   success_rate=len(successes) / len(classified) if classified else None,
                   requests_per_second=len(details) / seconds if seconds else None,
                   first_p50=_percentile(first_values, .50), first_p95=_percentile(first_values, .95),
-                  first_samples=len(first_values), elapsed_p50=_percentile(duration_values, .50),
+                  first_mean=sum(first_values) / len(first_values) if first_values else None,
+                  first_samples=len(first_values),
+                  prefill_estimate_tps=sum(item['input'] - item['cached'] for item in prefill_items) / prefill_time if prefill_time else None,
+                  prefill_samples=len(prefill_items),
+                  decode_estimate_tps=sum(item['output'] - 1 for item in decode_items) / decode_time if decode_time else None,
+                  decode_samples=len(decode_items), elapsed_p50=_percentile(duration_values, .50),
                   elapsed_p95=_percentile(duration_values, .95), elapsed_samples=len(duration_values),
                   identified_sessions=len({item['session'] for item in details if item['session']}),
                   unknown_session=sum(1 for item in details if not item['session']))
