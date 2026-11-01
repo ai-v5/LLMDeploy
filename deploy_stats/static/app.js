@@ -116,7 +116,7 @@ function render(data) {
   const coverage = stats.seconds ? Math.min(100, stats.covered_seconds / stats.seconds * 100) : 0;
   const notice = $('notice');
   notice.classList.toggle('warning', !stats.complete || !data.collector_live || stats.unknown_source > 0);
-  notice.textContent = `已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 相关采集周期队列丢失 ${integer.format(stats.dropped)} 个 · 采集进程运行覆盖 ${number.format(coverage)}%。仅包含经过本代理的请求；部署时须核验所有入口。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
+  notice.textContent = `已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期队列丢失 ${integer.format(stats.dropped)} 个 · 采集进程运行覆盖 ${number.format(coverage)}%。仅展示已写盘且经过本代理的请求；部署时须核验所有入口。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
   ['input', 'output', 'cached'].forEach((field) => renderPlot(field, data.series_24h));
   renderClients(data);
   renderDays(data);

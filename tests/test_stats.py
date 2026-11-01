@@ -552,6 +552,41 @@ http://127.0.0.1:%d {
 
 
 class ReportTests(unittest.TestCase):
+    def test_unclean_stale_run_never_claims_a_historical_day_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            tz = timezone(timedelta(hours=8))
+            now = datetime(2026, 1, 3, 12, tzinfo=tz).timestamp()
+            start = datetime(2026, 1, 1, 0, tzinfo=tz).timestamp()
+            sample = datetime(2026, 1, 2, 12, tzinfo=tz).timestamp()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('unclean', start, now - 7200, None, 0))
+            db.execute('''INSERT INTO requests(run_id,finished,client_ip,elapsed,http_status,state,
+                input_tokens,output_tokens,cached_tokens) VALUES(?,?,?,?,?,?,?,?,?)''',
+                ('unclean', sample, '192.0.2.4', 2, 200, 'known', 100, 7, 60))
+            db.commit()
+            db.close()
+            value = report(path, 'total', now=now)
+            day = next(item for item in value['days'] if item['date'] == '2026-01-02')
+            self.assertEqual(day['covered_seconds'], 86400)
+            self.assertEqual(day['known'], 1)
+            self.assertFalse(day['complete'])
+
+    def test_cleanly_drained_run_can_cover_a_complete_historical_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'usage.sqlite3'
+            tz = timezone(timedelta(hours=8))
+            now = datetime(2026, 1, 3, 12, tzinfo=tz).timestamp()
+            start = datetime(2026, 1, 1, 0, tzinfo=tz).timestamp()
+            db = _open(path)
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?)', ('clean', start, now - 7200, now - 7200, 0))
+            db.commit()
+            db.close()
+            value = report(path, 'total', now=now)
+            day = next(item for item in value['days'] if item['date'] == '2026-01-02')
+            self.assertTrue(day['complete'])
+            self.assertEqual(day['unclean_runs'], 0)
+
     def test_local_days_and_gaps_are_reported_without_zero_filling(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'usage.sqlite3'

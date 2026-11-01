@@ -14,18 +14,24 @@ BUCKET_SECONDS = 600
 def _coverage(runs, start, end, now):
     intervals = []
     dropped = 0
+    unclean = 0
     for run in runs:
         left, seen, ended, lost = run
-        right = ended if ended is not None else (now if 0 <= now - seen < 15 else seen)
+        live = ended is None and 0 <= now - seen < 15
+        right = ended if ended is not None else (now if live else seen)
         if left < end and right > start:
             intervals.append((max(start, left), min(end, right)))
             dropped += lost
+            if ended is None and not live:
+                # Events queued before the last heartbeat may never have been
+                # committed when a process exited without a clean drain.
+                unclean += 1
     intervals.sort()
     covered, edge = 0.0, start
     for left, right in intervals:
         covered += max(0, right - max(left, edge))
         edge = max(edge, right)
-    return min(max(0.0, end - start), covered), dropped
+    return min(max(0.0, end - start), covered), dropped, unclean
 
 
 def _counts(rows):
@@ -86,13 +92,14 @@ def report(path, window='24h', *, now=None):
             day_rows.setdefault(day, []).append(row[2:])
     totals = _counts(selected)
     seconds = max(0.0, now - start)
-    covered, dropped = _coverage(runs, start, now, now)
+    covered, dropped, unclean = _coverage(runs, start, now, now)
     totals['window_tps'] = totals['output'] / seconds if seconds else None
     totals['unknown_source'] = len(grouped.get(None, []))
     totals['covered_seconds'] = covered
     totals['seconds'] = seconds
     totals['dropped'] = dropped
-    totals['complete'] = (bool(runs) and seconds > 0 and covered >= seconds - 1 and dropped == 0 and
+    totals['unclean_runs'] = unclean
+    totals['complete'] = (bool(runs) and seconds > 0 and covered >= seconds - 1 and dropped == 0 and unclean == 0 and
                           totals['missing'] == 0 and totals['interrupted'] == 0 and totals['failed'] == 0)
     clients = []
     for ip, items in grouped.items():
@@ -107,19 +114,19 @@ def report(path, window='24h', *, now=None):
     for bucket in range(first_bucket, last_bucket + 1, BUCKET_SECONDS):
         a, b = max(bucket, now - 86400), min(bucket + BUCKET_SECONDS, now)
         counts = _counts(series_rows.get(bucket, []))
-        coverage, lost = _coverage(runs, a, b, now)
-        counts.update(start=a, end=b, covered_seconds=coverage, dropped=lost,
-                      complete=bool(runs) and b > a and coverage >= b - a - 1 and lost == 0 and
+        coverage, lost, unclean = _coverage(runs, a, b, now)
+        counts.update(start=a, end=b, covered_seconds=coverage, dropped=lost, unclean_runs=unclean,
+                      complete=bool(runs) and b > a and coverage >= b - a - 1 and lost == 0 and unclean == 0 and
                       counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
         series.append(counts)
     days = []
     for day in range(13, -1, -1):
         a, b = midnight - day * 86400, min(midnight - (day - 1) * 86400, now)
         counts = _counts(day_rows.get(a, []))
-        coverage, lost = _coverage(runs, a, b, now)
+        coverage, lost, unclean = _coverage(runs, a, b, now)
         counts.update(date=datetime.fromtimestamp(a, TZ).strftime('%Y-%m-%d'), start=a, end=b,
-                      covered_seconds=coverage, dropped=lost,
-                      complete=bool(runs) and b > a and coverage >= b - a - 1 and lost == 0 and
+                      covered_seconds=coverage, dropped=lost, unclean_runs=unclean,
+                      complete=bool(runs) and b > a and coverage >= b - a - 1 and lost == 0 and unclean == 0 and
                       counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
         days.append(counts)
     live = any(ended is None and 0 <= now - seen < 15 for _, seen, ended, _ in runs)
