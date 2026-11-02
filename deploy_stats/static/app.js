@@ -99,6 +99,70 @@ function telemetryValues(data, port, now) {
     mfu: read(prefill && prefill.mfu_estimate), hbm: read(hbm && hbm.mean_percent, 100)};
 }
 
+function latestHistoricalSample(history, phase, now, bucketStart = null) {
+  if (!history || !['prefill', 'decode'].includes(phase) || !Number.isFinite(now) ||
+      history.method !== 'deepinfer-log-step-approx-v1' || history.bucket_seconds !== 600 ||
+      !Array.isArray(history.points) || history.points.length !== 144) return null;
+  const points = history.points;
+  if (points.some((point, i) => !point || !Number.isSafeInteger(point.start) || point.start < 0 ||
+      point.end !== point.start + 600 || point.end > now || (i && point.start !== points[i - 1].start + 600))) return null;
+  if (history.aggregate && (!Number.isSafeInteger(history.group_count) || history.group_count <= 0)) return null;
+  for (let i = points.length - 1; i >= 0; i--) {
+    const point = points[i], value = point[`${phase}_tps`], samples = point[`${phase}_samples`];
+    if (bucketStart !== null && point.start !== bucketStart) continue;
+    const groups = history.aggregate ? point[`${phase}_groups`] : 1;
+    const total = history.aggregate ? history.group_count : 1;
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 &&
+        Number.isSafeInteger(samples) && samples > 0 && Number.isSafeInteger(groups) && groups > 0 && groups <= total) {
+      return {value, samples, start: point.start, end: point.end, groups, total};
+    }
+  }
+  return null;
+}
+
+function latestGroupHistory(data, nodes, port, phase, now) {
+  if (!data || data.available !== true || data.history_available !== true || !Array.isArray(nodes) || !nodes.length ||
+      new Set(nodes.map((node) => node && node.backend_port)).size !== nodes.length) return null;
+  const selected = port === 'all' ? nodes : nodes.filter((node) => node && node.backend_port === port);
+  if (!selected.length || (port !== 'all' && selected.length !== 1)) return null;
+  const candidates = selected.flatMap((node) => {
+    if (!node || node.source_ok !== true || !node.history || node.history.aggregate) return [];
+    const value = latestHistoricalSample(node.history, phase, now);
+    return value ? [value] : [];
+  });
+  if (!candidates.length) return null;
+  const newest = Math.max(...candidates.map((value) => value.start));
+  const matching = candidates.filter((value) => value.start === newest);
+  const value = matching.reduce((sum, point) => sum + point.value, 0);
+  if (!Number.isFinite(value)) return null;
+  return {value, start: newest, end: newest + 600, groups: matching.length,
+    total: selected.length, samples: port === 'all' ? 1 : matching[0].samples};
+}
+
+function historicalPrefillMfu(nodes, port, sample, now) {
+  if (!sample || !Array.isArray(nodes)) return null;
+  let work = 0, peak = 0, groups = 0;
+  nodes.forEach((node) => {
+    if (!node || (port !== 'all' && node.backend_port !== port) || node.source_ok !== true ||
+        node.clock_ok !== true || typeof node.clock_uncertainty_seconds !== 'number' ||
+        !Number.isFinite(node.clock_uncertainty_seconds) || node.clock_uncertainty_seconds < 0 ||
+        node.clock_uncertainty_seconds > 20) return;
+    const point = latestHistoricalSample(node.history, 'prefill', now, sample.start);
+    const hbm = freshTelemetry(node.hbm, now), assumptions = node.assumptions;
+    if (!point || point.end !== sample.end || !hbm || !Number.isSafeInteger(hbm.device_count) ||
+        hbm.device_count < 1 || hbm.device_count > 64 || !assumptions ||
+        typeof assumptions.prefill_flops_per_token !== 'number' || !Number.isFinite(assumptions.prefill_flops_per_token) ||
+        assumptions.prefill_flops_per_token <= 0 || typeof assumptions.peak_flops_per_device !== 'number' ||
+        !Number.isFinite(assumptions.peak_flops_per_device) || assumptions.peak_flops_per_device <= 0) return;
+    const numerator = point.value * assumptions.prefill_flops_per_token;
+    const denominator = hbm.device_count * assumptions.peak_flops_per_device;
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return;
+    work += numerator; peak += denominator; groups++;
+  });
+  const value = work / peak;
+  return groups && Number.isFinite(value) && value >= 0 ? {...sample, value, groups} : null;
+}
+
 function renderTelemetry(data) {
   telemetrySnapshot = data;
   if (telemetryExpiry) clearTimeout(telemetryExpiry);
@@ -127,11 +191,30 @@ function renderTelemetry(data) {
   const decodeSample = selectedNode && freshTelemetry(selectedNode.decode, now);
   const measured = (value) => value === null || value === undefined ? '—' : speed(value);
   const showMfu = (value) => value !== null && value !== undefined && value > 0 && value < .0001 ? '<0.01%' : percent(value);
-  setTextIfPresent('live-prefill-tps', measured(values.prefill));
-  setTextIfPresent('live-decode-tps', measured(values.decode));
-  setTextIfPresent('live-mfu', showMfu(values.mfu));
+  const previousPrefill = latestGroupHistory(data, nodes, telemetryNodePort, 'prefill', now);
+  const previousDecode = latestGroupHistory(data, nodes, telemetryNodePort, 'decode', now);
+  const previousMfu = historicalPrefillMfu(nodes, telemetryNodePort, previousPrefill, now);
+  // A browser can receive old HTML and new JS across a local restart. Never
+  // place a historical value in the primary position unless both its title
+  // and its non-real-time detail can be shown by that HTML version.
+  const usePrefillHistory = values.prefill === null && previousPrefill && $('live-prefill-title') && $('live-prefill-samples');
+  const useDecodeHistory = values.decode === null && previousDecode && $('live-decode-title') && $('live-decode-samples');
+  const useMfuHistory = values.mfu === null && previousMfu && $('live-mfu-title') && $('live-mfu-detail');
+  setTextIfPresent('live-prefill-title', usePrefillHistory ? 'Prefill 并发吞吐（历史均值）' : 'Prefill 并发吞吐（采样）');
+  setTextIfPresent('live-decode-title', useDecodeHistory ? 'Decode 并发吞吐（历史均值）' : 'Decode 并发吞吐（采样）');
+  setTextIfPresent('live-mfu-title', useMfuHistory ? 'Prefill-MFU（历史估算）' : 'Prefill-MFU（单步估算）');
+  setTextIfPresent('live-prefill-tps', measured(usePrefillHistory ? previousPrefill.value : values.prefill));
+  setTextIfPresent('live-decode-tps', measured(useDecodeHistory ? previousDecode.value : values.decode));
+  setTextIfPresent('live-mfu', showMfu(useMfuHistory ? previousMfu.value : values.mfu));
   setTextIfPresent('live-mbu', '—');
   setTextIfPresent('live-hbm', values.hbm === null ? '—' : `${number.format(values.hbm)}%`);
+  const historicalDetail = (sample, method) => {
+    if (!sample) return '';
+    const period = `${dateTime.format(new Date(sample.start * 1000))}–${clock.format(new Date(sample.end * 1000))}`;
+    const scope = `${sample.groups}/${sample.total} 组` +
+      (telemetryNodePort === 'all' ? '' : ` · ${count(sample.samples)} 个采样`);
+    return `${method} · ${period} · 非实时 · ${scope}`;
+  };
   const groupDetail = (key, method) => {
     const item = values.coverage[key];
     if (!item.total) return '采集未连接 · 组数未知';
@@ -142,10 +225,13 @@ function renderTelemetry(data) {
   };
   const detail = (key, value, sample) => telemetryNodePort === 'all' ? groupDetail(key, '采样和') :
     value === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(sample.log_at * 1000))} 写出 · rank 近似和`;
-  setTextIfPresent('live-prefill-samples', detail('prefill', values.prefill, prefillSample));
-  setTextIfPresent('live-decode-samples', detail('decode', values.decode, decodeSample));
-  setTextIfPresent('live-mfu-detail', telemetryNodePort === 'all' ? groupDetail('mfu', '按峰值算力加权') :
-    values.mfu === null ? '所选设备组暂无有效样本' : '引擎吞吐与模型假设换算');
+  setTextIfPresent('live-prefill-samples', usePrefillHistory ? historicalDetail(previousPrefill, '历史采样均值') :
+    detail('prefill', values.prefill, prefillSample));
+  setTextIfPresent('live-decode-samples', useDecodeHistory ? historicalDetail(previousDecode, '历史采样均值') :
+    detail('decode', values.decode, decodeSample));
+  setTextIfPresent('live-mfu-detail', useMfuHistory ? historicalDetail(previousMfu, '按当前假设估算') :
+    telemetryNodePort === 'all' ? groupDetail('mfu', '按峰值算力加权') :
+      values.mfu === null ? '所选设备组暂无有效样本' : '引擎吞吐与模型假设换算');
   setTextIfPresent('live-hbm-detail', telemetryNodePort === 'all' ? groupDetail('hbm', '按卡数加权') :
     values.hbm === null ? '所选设备组暂无有效样本' : '所选设备组驱动读数的平均');
   setTextIfPresent('telemetry-status', nodes.length ? `最近读取于 ${clock.format(new Date(data.sampled_at * 1000))}` : '采样未连接');

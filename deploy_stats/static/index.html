@@ -24,18 +24,18 @@
         <div class="telemetry-scope" data-view="overview"><label for="telemetry-node">设备组</label><select id="telemetry-node"><option value="all">跨设备组（全部）</option></select><span>默认汇总全部设备组，也可选择单个后端；入口请求用量不受此选择影响</span></div>
         <div class="phase-heading" data-view="overview">PREFILL</div>
         <div class="cards phase-cards prefill-cards" data-view="overview">
-          <article class="metric"><div class="metric-top"><span>Prefill 并发吞吐（采样）</span><span class="metric-icon blue">↘</span></div><strong id="live-prefill-tps">—</strong><small id="live-prefill-samples">等待引擎采样</small></article>
+          <article class="metric"><div class="metric-top"><span id="live-prefill-title">Prefill 并发吞吐（采样）</span><span class="metric-icon blue">↘</span></div><strong id="live-prefill-tps">—</strong><small id="live-prefill-samples">等待引擎采样</small></article>
           <article class="metric"><div class="metric-top"><span>Prefill 平均等待（估算）</span><span class="metric-icon violet">◷</span></div><strong id="overview-prefill-wait">—</strong><small id="overview-wait-samples">等待可测样本</small></article>
-          <article class="metric"><div class="metric-top"><span>Prefill-MFU（单步估算）</span><span class="metric-icon blue">%</span></div><strong id="live-mfu">—</strong><small id="live-mfu-detail">等待引擎采样</small></article>
+          <article class="metric"><div class="metric-top"><span id="live-mfu-title">Prefill-MFU（单步估算）</span><span class="metric-icon blue">%</span></div><strong id="live-mfu">—</strong><small id="live-mfu-detail">等待引擎采样</small></article>
           <article class="metric"><div class="metric-top"><span>缓存命中率</span><span class="metric-icon green">◈</span></div><strong id="overview-hit-rate">—</strong><small id="overview-hit-samples">等待已计量样本</small></article>
         </div>
         <div class="phase-heading" data-view="overview">DECODE</div>
         <div class="cards phase-cards decode-cards" data-view="overview">
-          <article class="metric"><div class="metric-top"><span>Decode 并发吞吐（采样）</span><span class="metric-icon orange">↗</span></div><strong id="live-decode-tps">—</strong><small id="live-decode-samples">等待引擎采样</small></article>
-          <article class="metric"><div class="metric-top"><span>Decode-MBU（纯阶段）</span><span class="metric-icon violet">%</span></div><strong id="live-mbu">—</strong><small id="live-mbu-detail">缺少带宽阶段归因</small></article>
+          <article class="metric"><div class="metric-top"><span id="live-decode-title">Decode 并发吞吐（采样）</span><span class="metric-icon orange">↗</span></div><strong id="live-decode-tps">—</strong><small id="live-decode-samples">等待引擎采样</small></article>
+          <article class="metric"><div class="metric-top"><span>Decode-MBU（纯阶段）</span><span class="metric-icon violet">%</span></div><strong id="live-mbu">—</strong><small id="live-mbu-detail">尚未接入阶段带宽归因</small></article>
           <article class="metric"><div class="metric-top"><span>HBM 带宽利用率（设备采样）</span><span class="metric-icon green">%</span></div><strong id="live-hbm">—</strong><small id="live-hbm-detail">等待设备采样</small></article>
         </div>
-        <div class="phase-note" data-view="overview">并发吞吐是相同日志 step 的各 DP rank 单步速率近似和。跨组视图对有效采样求和，缺失组不参与并标注覆盖数；利用率只对有效组加权。各组并非同时测量，时间跨度超过 30 秒时会显示提示，两个阶段也可能来自不同时刻。日志写出可能滞后执行，且无法识别 worker 重启；全部缺失时显示“—”。Decode 的引擎计数可能使用回退口径，并非客户端实际收到的 Token。</div>
+        <div class="phase-note" data-view="overview">并发吞吐是相同日志 step 的各 DP rank 单步速率近似和。跨组视图对有效采样求和，缺失组不参与并标注覆盖数；利用率只对有效组加权。各组并非同时测量，时间跨度超过 30 秒时会显示提示，两个阶段也可能来自不同时刻。当前没有有效采样时，卡片显示最近一个有样本的 10 分钟历史均值并标注非实时；无历史时显示“—”。日志写出可能滞后执行，且无法识别 worker 重启。Decode 的引擎计数可能使用回退口径，并非客户端实际收到的 Token。</div>
         <div class="phase-note efficiency-note" id="live-efficiency-note" data-view="overview">Prefill-MFU 按引擎吞吐和模型假设估算，并非硬件算力实测；HBM 为设备级混合阶段采样，无法直接归因 Decode。</div>
         <section class="panel table-panel" data-view="overview" aria-labelledby="telemetry-heading"><div class="panel-head"><div><span class="section-kicker">ENGINE &amp; NPU</span><h2 id="telemetry-heading">引擎与设备采样</h2><p>按实例分别展示，避免把不同设备组或未对齐的采样合并。</p></div><span class="outline-pill" id="telemetry-status">等待采样</span></div><div class="table-wrap"><table><thead><tr><th>实例</th><th>Prefill 吞吐</th><th>Decode 吞吐</th><th>Prefill-MFU</th><th>HBM 带宽</th><th>Prefill 步耗时</th><th>Decode 步耗时</th><th>状态</th></tr></thead><tbody id="telemetry-body"><tr><td colspan="8" class="empty">等待采样</td></tr></tbody></table></div><div class="panel-foot">步耗时来自引擎 CPU 计时日志，包含调度等开销；括号内为有有效计时的 rank 数。HBM 为驱动设备级百分比，可能包含同卡其他工作负载；现有数据不能可靠分离纯 Decode 阶段。</div></section>
         <div class="cards" data-view="overview">

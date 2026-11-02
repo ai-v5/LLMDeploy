@@ -94,7 +94,8 @@ const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePo
   $: (id) => id === 'telemetry-body' ? body : null, document: {createElement: () => ({cells: []})},
   cell: (row, value) => row.cells.push(value), setTextIfPresent: () => {},
   number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
-  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {}};
+  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {},
+  latestGroupHistory: () => null, historicalPrefillMfu: () => null};
 context.freshTelemetry = extract('freshTelemetry', context); context.telemetryValues = extract('telemetryValues', context);
 const render = extract('renderTelemetry', context);
 const n = {backend_port: 1, source_ok: true, backend_ready: true, clock_ok: true, clock_uncertainty_seconds: .1,
@@ -226,7 +227,8 @@ const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePo
   Date: class extends Date {static now() {return 100000;}}, clearTimeout: () => {},
   $: (id) => elements[id] || null, setTextIfPresent: (id, value) => {if (elements[id]) elements[id].textContent = value;},
   number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
-  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {}};
+  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {},
+  latestGroupHistory: () => null, historicalPrefillMfu: () => null};
 context.freshTelemetry = extract('freshTelemetry', context);
 context.telemetryValues = extract('telemetryValues', context);
 const render = extract('renderTelemetry', context);
@@ -250,6 +252,73 @@ assert.equal(elements['live-prefill-samples'].textContent, '采集未连接 · �
 '''
         source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_overview_adds_clearly_labeled_history_only_when_live_samples_are_missing(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+function extract(name, ctx) {
+  const start = source.indexOf(`function ${name}(`), end = source.indexOf('\n}\n', start);
+  assert(start >= 0 && end > start, `missing ${name}`); return vm.runInNewContext('(' + source.slice(start, end + 2) + ')', ctx);
+}
+const elements = {};
+for (const id of ['live-prefill-tps','live-decode-tps','live-mfu','live-mbu','live-hbm',
+  'live-prefill-samples','live-decode-samples','live-mfu-detail','live-hbm-detail',
+  'live-prefill-title','live-decode-title','live-mfu-title']) elements[id] = {textContent:''};
+const context = {telemetrySnapshot:null,telemetryExpiry:null,telemetryNodePort:'all',telemetryOptionsKey:null,
+  Date:class extends Date {static now() {return 86400000;}},clearTimeout:()=>{},setTimeout:()=>1,
+  $:(id)=>elements[id]||null,setTextIfPresent:(id,value)=>{if(elements[id])elements[id].textContent=value;},
+  number:{format:String},speed:(v)=>`${v} tok/s`,percent:(v)=>v===null||v===undefined?'—':`${v*100}%`,
+  clock:{format:(v)=>`clock-${v.getTime()/1000}`},dateTime:{format:(v)=>`date-${v.getTime()/1000}`},
+  renderDeviceHistory:()=>{}};
+for (const name of ['freshTelemetry','telemetryValues','combinedDeviceHistory','latestHistoricalSample','latestGroupHistory','historicalPrefillMfu'])
+  context[name]=extract(name,context);
+const render=extract('renderTelemetry',context);
+const points=Array.from({length:144},(_,i)=>({start:i*600,end:(i+1)*600,
+  prefill_tps:null,prefill_samples:0,decode_tps:null,decode_samples:0}));
+points[142].prefill_tps=100;points[142].prefill_samples=2;
+points[143].decode_tps=40;points[143].decode_samples=1;
+const a={backend_port:1,source_ok:true,backend_ready:true,clock_ok:true,clock_uncertainty_seconds:.1,
+  prefill:null,decode:null,hbm:{mean_percent:0,device_count:2,sample_at:86399,span_seconds:0,valid_until:86401},
+  assumptions:{prefill_flops_per_token:4,peak_flops_per_device:1000},
+  history:{method:'deepinfer-log-step-approx-v1',bucket_seconds:600,points}};
+const b={backend_port:2,source_ok:false,backend_ready:false,clock_ok:true,clock_uncertainty_seconds:.1};
+const data={available:true,history_available:true,sampled_at:86400,nodes:[a,b]};
+render(data);
+assert.equal(elements['live-prefill-tps'].textContent,'100 tok/s');
+assert.equal(elements['live-decode-tps'].textContent,'40 tok/s');
+assert.equal(elements['live-mfu'].textContent,'20%');
+assert.match(elements['live-prefill-title'].textContent,/历史/);
+assert.match(elements['live-decode-title'].textContent,/历史/);
+assert.match(elements['live-mfu-title'].textContent,/历史/);
+assert.match(elements['live-prefill-samples'].textContent,/历史.*非实时.*1\/2/);
+assert.match(elements['live-decode-samples'].textContent,/历史.*非实时.*1\/2/);
+assert.match(elements['live-mfu-detail'].textContent,/当前假设.*非实时.*1\/2/);
+assert.equal(elements['live-mbu'].textContent,'—');
+// Old HTML loaded across a dashboard switch lacks the new title nodes.
+const savedTitles={};
+for(const id of ['live-prefill-title','live-decode-title','live-mfu-title']){savedTitles[id]=elements[id];delete elements[id];}
+render(data);
+for(const id of ['live-prefill-tps','live-decode-tps','live-mfu'])assert.equal(elements[id].textContent,'—');
+Object.assign(elements,savedTitles);
+const savedDetail=elements['live-decode-samples'];delete elements['live-decode-samples'];
+render(data);assert.equal(elements['live-decode-tps'].textContent,'—');elements['live-decode-samples']=savedDetail;
+a.prefill={tokens_per_second:0,mfu_estimate:0,peak_flops:2000,log_at:86399,log_skew_seconds:0,valid_until:86401};
+a.decode={tokens_per_second:3,log_at:86399,log_skew_seconds:0,valid_until:86401};
+render(data);
+assert.equal(elements['live-prefill-tps'].textContent,'0 tok/s');
+assert.doesNotMatch(elements['live-prefill-title'].textContent,/历史/);
+assert.doesNotMatch(elements['live-decode-title'].textContent,/历史/);
+assert.doesNotMatch(elements['live-mfu-title'].textContent,/历史/);
+a.prefill=null;a.decode=null;data.history_available=false;render(data);
+for(const id of ['live-prefill-tps','live-decode-tps','live-mfu'])assert.equal(elements[id].textContent,'—');
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, encoding='utf-8', timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cross_group_history_sums_available_groups_and_labels_coverage(self):
@@ -288,6 +357,60 @@ assert.equal(combine(data, [a, b]), null); // Duplicate buckets cannot be truste
 a.history.points[1].start = 600; a.history.points[1].end = 1200;
 a.source_ok = false; assert.equal(combine(data, [a, b]), null);
 assert.equal(combine({available: true, history_available: false}, [a]), null);
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_history_fallback_uses_same_bucket_and_weights_only_verified_groups(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const src=fs.readFileSync(process.argv[1],'utf8'),ctx={};
+for(const name of ['freshTelemetry','combinedDeviceHistory','latestHistoricalSample','latestGroupHistory','historicalPrefillMfu']){
+  const start=src.indexOf(`function ${name}(`),end=src.indexOf('\n}\n',start);
+  assert(start>=0&&end>start);ctx[name]=vm.runInNewContext('('+src.slice(start,end+2)+')',ctx);
+}
+function group(port,rate,count,peak,flops) {
+  const points=Array.from({length:144},(_,i)=>({start:i*600,end:(i+1)*600,
+    prefill_tps:null,prefill_samples:0,decode_tps:null,decode_samples:0}));
+  points[143].prefill_tps=rate; points[143].prefill_samples=3;
+  return {backend_port:port,source_ok:true,clock_ok:true,clock_uncertainty_seconds:.1,
+    hbm:{device_count:count,valid_until:90000},assumptions:{prefill_flops_per_token:flops,peak_flops_per_device:peak},
+    history:{method:'deepinfer-log-step-approx-v1',bucket_seconds:600,points}};
+}
+const a=group(1,100,2,1000,4),b=group(2,300,3,2000,10),nodes=[a,b];
+const data={available:true,history_available:true}, now=86400;
+let combined=ctx.combinedDeviceHistory(data,nodes);
+let sample=ctx.latestHistoricalSample(combined.history,'prefill',now);
+assert.equal(sample.value,400);assert.equal(sample.groups,2);
+let mfu=ctx.historicalPrefillMfu(nodes,'all',sample,now);
+assert.equal(mfu.value,.425);assert.equal(mfu.groups,2);assert.equal(mfu.total,2);
+b.hbm.valid_until=now; mfu=ctx.historicalPrefillMfu(nodes,'all',sample,now);
+assert.equal(mfu.value,.2);assert.equal(mfu.groups,1);assert.equal(mfu.total,2);
+b.history.points[143].prefill_samples=0;b.history.points[142].prefill_tps=300;b.history.points[142].prefill_samples=2;
+combined=ctx.combinedDeviceHistory(data,nodes);sample=ctx.latestHistoricalSample(combined.history,'prefill',now);
+assert.equal(sample.value,100);assert.equal(sample.groups,1); // Never add different time buckets.
+a.history.points[143].prefill_tps=0;combined=ctx.combinedDeviceHistory(data,nodes);
+sample=ctx.latestHistoricalSample(combined.history,'prefill',now);assert.equal(sample.value,0);
+assert.equal(ctx.latestHistoricalSample(a.history,'prefill',86399),null); // Future end cannot be historical.
+a.history.points[1].start=a.history.points[0].start;
+assert.equal(ctx.latestHistoricalSample(a.history,'prefill',now),null);
+assert.equal(ctx.latestHistoricalSample({method:'other',bucket_seconds:600,points:[]},'prefill',now),null);
+// Misaligned grids: prefer the actual newest complete bucket across groups.
+const c=group(3,100,2,1000,4),d=group(4,500,3,2000,10);
+d.history.points.forEach((p)=>{p.start+=600;p.end+=600;});
+d.history.points[142].prefill_tps=300;d.history.points[142].prefill_samples=1;
+let latest=ctx.latestGroupHistory(data,[c,d],'all','prefill',87000);
+assert.equal(latest.start,86400);assert.equal(latest.value,500);assert.equal(latest.groups,1);
+// Restricting the available timeline to the prior bucket must include both groups.
+d.history.points[143].prefill_samples=0;
+latest=ctx.latestGroupHistory(data,[c,d],'all','prefill',87000);
+assert.equal(latest.start,85800);assert.equal(latest.value,400);assert.equal(latest.groups,2);
+const weighted=ctx.historicalPrefillMfu([c,d],'all',latest,87000);
+assert.equal(weighted.value,.425);assert.equal(weighted.groups,2);
 '''
         source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
