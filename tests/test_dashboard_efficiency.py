@@ -132,8 +132,8 @@ for (const phase of ['prefill', 'decode']) {
   elements[`chart-device-${phase}`] = makeElement();
   elements[`chart-device-${phase}-svg`] = makeElement();
 }
-const context = {$: (id) => elements[id], svgElement: () => makeElement(), setTextIfPresent: () => {},
-  clock: {format: () => 'time'}, speed: (v) => `${v.toFixed(2)} tok/s`, count: String};
+const context = {$: (id) => elements[id], svgElement: () => makeElement(), setTextIfPresent: () => {}, attachTrendTooltip: () => {},
+  clock: {format: () => 'time'}, dateTime: {format: () => 'date'}, speed: (v) => `${v.toFixed(2)} tok/s`, count: String};
 const render = vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
 const points = Array.from({length: 144}, (_, i) => ({start: i*600, end: (i+1)*600,
   prefill_tps: null, decode_tps: null, prefill_samples: 0, decode_samples: 0, prefill_estimate_tps: 99999}));
@@ -434,8 +434,8 @@ for (const phase of ['prefill', 'decode']) {
   elements[`chart-device-${phase}`] = element('label');
   elements[`chart-device-${phase}-svg`] = element('svg');
 }
-const context = {$: (id) => elements[id], svgElement: element, setTextIfPresent: () => {},
-  clock: {format: () => 'time'}, speed: (value) => `${value} tok/s`, count: String};
+const context = {$: (id) => elements[id], svgElement: element, setTextIfPresent: () => {}, attachTrendTooltip: () => {},
+  clock: {format: () => 'time'}, dateTime: {format: () => 'date'}, speed: (value) => `${value} tok/s`, count: String};
 const render = vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
 const points = Array.from({length: 144}, (_, i) => ({start:i*600,end:(i+1)*600,
   prefill_tps:null,prefill_samples:0,prefill_groups:0,decode_tps:null,decode_samples:0,decode_groups:0}));

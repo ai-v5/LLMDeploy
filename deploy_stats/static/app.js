@@ -625,10 +625,79 @@ function svgElement(name, attributes) {
   return el;
 }
 
+function attachTrendTooltip(svg, descriptions) {
+  const tooltip = $('trend-tooltip');
+  const previousPointer = tooltip && tooltip._trendActive === svg ? svg._trendPointer : null;
+  const previousKeyboard = tooltip && tooltip._trendActive === svg ? svg._trendKeyboardIndex : null;
+  const hide = () => {
+    if (tooltip && tooltip._trendOwner === svg) { tooltip.hidden = true; tooltip._trendOwner = null; }
+  };
+  hide();
+  svg.onpointermove = svg.onpointerleave = svg.onfocus = svg.onblur = svg.onkeydown = null;
+  svg.removeAttribute('tabindex');
+  svg.removeAttribute('aria-describedby');
+  if (!tooltip || !Array.isArray(descriptions) || !descriptions.some((text) => typeof text === 'string' && text)) {
+    svg._trendPointer = null; svg._trendKeyboardIndex = null;
+    if (tooltip && tooltip._trendActive === svg) tooltip._trendActive = null;
+    return;
+  }
+  svg.appendChild(svgElement('rect', {x: 0, y: 0, width: 800, height: 68, fill: 'transparent', class: 'trend-hover-overlay'}));
+  svg.setAttribute('tabindex', '0');
+  svg.setAttribute('aria-describedby', 'trend-tooltip');
+  let selected = Number.isSafeInteger(svg._trendKeyboardIndex) ? svg._trendKeyboardIndex : -1;
+  const activate = () => {
+    if (tooltip._trendOwner && tooltip._trendOwner !== svg) { tooltip.hidden = true; tooltip._trendOwner = null; }
+    tooltip._trendActive = svg;
+  };
+  const show = (index, x, y) => {
+    const description = descriptions[index];
+    selected = index;
+    if (typeof description !== 'string' || !description) { hide(); return; }
+    tooltip._trendOwner = svg;
+    tooltip.textContent = description;
+    tooltip.hidden = false;
+    const box = tooltip.getBoundingClientRect();
+    const width = document.documentElement.clientWidth || window.innerWidth;
+    const height = document.documentElement.clientHeight || window.innerHeight;
+    tooltip.style.left = `${Math.max(8, Math.min(x + 12, width - box.width - 8))}px`;
+    tooltip.style.top = `${Math.max(8, Math.min(y + 12, height - box.height - 8))}px`;
+  };
+  svg.onpointermove = (event) => {
+    const bounds = svg.getBoundingClientRect();
+    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY) || bounds.width <= 0 ||
+        event.clientX < bounds.left || event.clientX > bounds.left + bounds.width) { svg._trendPointer = null; hide(); return; }
+    activate();
+    svg._trendPointer = {clientX: event.clientX, clientY: event.clientY};
+    svg._trendKeyboardIndex = null;
+    const index = descriptions.length === 1 ? 0 : Math.round((event.clientX - bounds.left) / bounds.width * (descriptions.length - 1));
+    show(index, event.clientX, event.clientY);
+  };
+  const showSelected = (index) => {
+    const bounds = svg.getBoundingClientRect();
+    const fraction = descriptions.length === 1 ? 0 : index / (descriptions.length - 1);
+    svg._trendKeyboardIndex = index;
+    svg._trendPointer = null;
+    show(index, bounds.left + fraction * bounds.width, bounds.top);
+  };
+  svg.onpointerleave = () => { svg._trendPointer = null; hide(); if (tooltip._trendActive === svg) tooltip._trendActive = null; };
+  svg.onfocus = () => { activate(); const first = descriptions.findIndex((value) => typeof value === 'string' && value); if (first >= 0) showSelected(first); };
+  svg.onblur = () => { svg._trendKeyboardIndex = null; hide(); if (tooltip._trendActive === svg) tooltip._trendActive = null; };
+  svg.onkeydown = (event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    activate();
+    const direction = event.key === 'ArrowRight' ? 1 : -1;
+    for (let index = selected + direction; index >= 0 && index < descriptions.length; index += direction) {
+      if (typeof descriptions[index] === 'string' && descriptions[index]) { event.preventDefault(); showSelected(index); break; }
+    }
+  };
+  if (previousPointer) svg.onpointermove(previousPointer);
+  else if (Number.isSafeInteger(previousKeyboard) && previousKeyboard >= 0 && previousKeyboard < descriptions.length) showSelected(previousKeyboard);
+}
+
 const charts = [
-  {id: 'input', field: 'input', kind: 'tokens'},
-  {id: 'output', field: 'output', kind: 'tokens'},
-  {id: 'cache-rate', style: 'cached', field: 'mean_request_hit_rate', kind: 'hit', samples: 'request_hit_samples'},
+  {id: 'input', field: 'input', kind: 'tokens', label: '输入'},
+  {id: 'output', field: 'output', kind: 'tokens', label: '输出'},
+  {id: 'cache-rate', style: 'cached', field: 'mean_request_hit_rate', kind: 'hit', label: '平均请求命中率', samples: 'request_hit_samples'},
 ];
 
 function combinedDeviceHistory(data, nodes) {
@@ -678,13 +747,14 @@ function renderDeviceHistory(data, selectedNode) {
     if (!svg || !label) return;
     svg.replaceChildren();
     [16, 34, 52].forEach((y) => svg.appendChild(svgElement('line', {x1: 0, y1: y, x2: 800, y2: y, class: 'grid'})));
-    if (!points) { label.textContent = '设备历史采样未连接'; return; }
+    if (!points) { attachTrendTooltip(svg, []); label.textContent = '设备历史采样未连接'; return; }
     const valid = points.map((point) => {
       const value = point && point[`${phase}_tps`];
       const samples = point && point[`${phase}_samples`];
       return typeof value === 'number' && Number.isFinite(value) && value >= 0 && Number.isSafeInteger(samples) && samples > 0 ? value : null;
     });
     const peak = Math.max(1, ...valid.filter((value) => value !== null));
+    const descriptions = Array(points.length).fill(null);
     let segment = [], total = 0, samples = 0, segmentPartial = false, partialBuckets = 0;
     const draw = () => {
       if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: `${phase}${segmentPartial ? ' partial' : ''}`}));
@@ -700,12 +770,15 @@ function renderDeviceHistory(data, selectedNode) {
       const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: `${phase}${partial ? ' partial' : ''}`});
       const title = svgElement('title', {});
       const scope = history.aggregate ? `${points[i][`${phase}_groups`]}/${history.group_count} 组采样均值之和${partial ? ' · 部分数据' : ''}` : `${count(points[i][`${phase}_samples`])} 个采样`;
-      title.textContent = `${clock.format(new Date(points[i].start * 1000))}–${clock.format(new Date(points[i].end * 1000))}：${speed(value)} · ${scope}`;
+      const period = `${dateTime.format(new Date(points[i].start * 1000))}–${dateTime.format(new Date(points[i].end * 1000))}`;
+      title.textContent = `${period}：${speed(value)} · ${scope}`;
+      descriptions[i] = `${period}\n${phase === 'prefill' ? 'Prefill' : 'Decode'} 并发吞吐：${speed(value)}\n${scope}`;
       marker.appendChild(title); svg.appendChild(marker);
       if (partial) partialBuckets++;
       total += value * points[i][`${phase}_samples`]; samples += points[i][`${phase}_samples`];
     });
     draw();
+    attachTrendTooltip(svg, descriptions);
     label.textContent = samples ? `${speed(total / samples)} · ${count(samples)} ${history.aggregate ? `个有采样区间${partialBuckets ? ` · ${count(partialBuckets)} 个仅部分组` : ''}` : '个采样'}` : '暂无设备采样';
   });
 }
@@ -720,12 +793,14 @@ function renderPlot(chart, points) {
   const required = kind === 'hit' ? [field, 'request_hit_sum', 'request_hit_samples'] :
     kind === 'speed' ? [field, `${id}_tokens`, `${id}_seconds`, chart.samples] : [];
   if (points.some((point) => required.some((key) => !Object.prototype.hasOwnProperty.call(point, key)))) {
+    attachTrendTooltip(svg, []);
     label.textContent = '当前数据版本不支持';
     return;
   }
   const values = points.map((point) => point.end - point.start >= 599.99 && (point.known || point.complete) &&
     typeof point[field] === 'number' && Number.isFinite(point[field]) ? point[field] : null);
   const peak = Math.max(1, ...values.filter((value) => value !== null));
+  const descriptions = Array(points.length).fill(null);
   let segment = [];
   const draw = () => {
     if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: chart.style || id}));
@@ -741,11 +816,14 @@ function renderPlot(chart, points) {
     const formatted = kind === 'tokens' ? `${integer.format(value)} Token` : kind === 'hit' ? percent(value) : speed(value);
     const boundary = points[i].complete ? '' : kind === 'tokens' ? '至少 ' : '已观测样本 ';
     const samples = chart.samples ? ` · ${count(points[i][chart.samples])} 个样本` : '';
-    title.textContent = `${clock.format(new Date(points[i].start * 1000))}–${clock.format(new Date(points[i].end * 1000))}：${boundary}${formatted}${samples}`;
+    const period = `${dateTime.format(new Date(points[i].start * 1000))}–${dateTime.format(new Date(points[i].end * 1000))}`;
+    title.textContent = `${period}：${boundary}${formatted}${samples}`;
+    descriptions[i] = `${period}\n${chart.label || id}：${boundary}${formatted}${samples}`;
     marker.appendChild(title);
     svg.appendChild(marker);
   });
   draw();
+  attachTrendTooltip(svg, descriptions);
   const sum = (key) => points.reduce((total, point) => total + (point[key] || 0), 0);
   if (kind === 'tokens') {
     const any = points.some((point) => point.known || point.complete);
@@ -842,7 +920,11 @@ async function refresh() {
     ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps',
       'overview-prefill-wait', 'overview-hit-rate'].forEach((id) => setTextIfPresent(id, '—'));
     ['overview-wait-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
-    charts.forEach(({id}) => { $(`chart-${id}-svg`)?.replaceChildren(); const label = $(`chart-${id}`); if (label) label.textContent = '暂无数据'; });
+    charts.forEach(({id}) => {
+      const svg = $(`chart-${id}-svg`), label = $(`chart-${id}`);
+      if (svg) { svg.replaceChildren(); attachTrendTooltip(svg, []); }
+      if (label) label.textContent = '暂无数据';
+    });
     $('clients-body').replaceChildren();
     $('days-body').replaceChildren();
     empty($('clients-body'), 8, '统计不可用');
