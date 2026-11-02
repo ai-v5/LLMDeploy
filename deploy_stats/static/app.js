@@ -15,7 +15,7 @@ let pendingActive = null;
 let pendingTelemetry = null;
 let telemetrySnapshot = null;
 let telemetryExpiry = null;
-let telemetryNodePort = null;
+let telemetryNodePort = 'all';
 let telemetryOptionsKey = null;
 let latestActiveAsOf = 0;
 let currentView = 'overview';
@@ -48,11 +48,36 @@ function freshTelemetry(part, now) {
 
 function telemetryValues(data, port, now) {
   const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes : [];
+  const read = (value, max = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
+  if (port === 'all') {
+    const empty = {prefill: null, decode: null, mfu: null, hbm: null};
+    if (!nodes.length || new Set(nodes.map((node) => node && node.backend_port)).size !== nodes.length ||
+        nodes.some((node) => !node || node.source_ok !== true || node.backend_ready !== true || node.clock_ok !== true ||
+          read(node.clock_uncertainty_seconds, 20) === null)) return empty;
+    const parts = (name, timestamp, duration) => {
+      const values = nodes.map((node) => freshTelemetry(node[name], now));
+      if (values.some((part) => !part || read(part[timestamp]) === null || read(part[duration], 60) === null)) return null;
+      const first = Math.min(...values.map((part, i) => part[timestamp] - part[duration] - nodes[i].clock_uncertainty_seconds));
+      const last = Math.max(...values.map((part, i) => part[timestamp] + nodes[i].clock_uncertainty_seconds));
+      return last - first <= 30 ? values : null;
+    };
+    const prefill = parts('prefill', 'log_at', 'log_skew_seconds');
+    const decode = parts('decode', 'log_at', 'log_skew_seconds');
+    const hbm = parts('hbm', 'sample_at', 'span_seconds');
+    const sumRate = (values) => values && values.every((part) => read(part.tokens_per_second) !== null) ?
+      values.reduce((sum, part) => sum + part.tokens_per_second, 0) : null;
+    const peak = prefill && prefill.every((part) => read(part.mfu_estimate) !== null && read(part.peak_flops) > 0) ?
+      prefill.reduce((sum, part) => sum + part.peak_flops, 0) : 0;
+    const devices = hbm && hbm.every((part) => read(part.mean_percent, 100) !== null &&
+      Number.isSafeInteger(part.device_count) && part.device_count > 0) ? hbm.reduce((sum, part) => sum + part.device_count, 0) : 0;
+    return {prefill: sumRate(prefill), decode: sumRate(decode),
+      mfu: peak ? prefill.reduce((sum, part) => sum + part.mfu_estimate * part.peak_flops, 0) / peak : null,
+      hbm: devices ? hbm.reduce((sum, part) => sum + part.mean_percent * part.device_count, 0) / devices : null};
+  }
   const item = nodes.find((node) => node && node.backend_port === port && node.source_ok === true);
   const prefill = item && freshTelemetry(item.prefill, now);
   const decode = item && freshTelemetry(item.decode, now);
   const hbm = item && freshTelemetry(item.hbm, now);
-  const read = (value, max = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
   return {prefill: read(prefill && prefill.tokens_per_second), decode: read(decode && decode.tokens_per_second),
     mfu: read(prefill && prefill.mfu_estimate), hbm: read(hbm && hbm.mean_percent, 100)};
 }
@@ -63,25 +88,24 @@ function renderTelemetry(data) {
   telemetryExpiry = null;
   const now = Date.now() / 1000;
   const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes.filter((item) => item && typeof item === 'object') : [];
-  if (!nodes.some((item) => item.backend_port === telemetryNodePort)) telemetryNodePort = nodes.length ? nodes[0].backend_port : null;
+  if (telemetryNodePort !== 'all' && !nodes.some((item) => item.backend_port === telemetryNodePort)) telemetryNodePort = 'all';
   const select = $('telemetry-node');
   if (select) {
     const key = JSON.stringify(nodes.map((item) => [item.backend_port, item.label]));
     if (key !== telemetryOptionsKey) {
       select.replaceChildren();
+      const all = document.createElement('option'); all.value = 'all'; all.textContent = '跨设备组（全部）'; select.appendChild(all);
       nodes.forEach((item) => {
         const option = document.createElement('option'); option.value = String(item.backend_port);
         option.textContent = item.label || '未知实例'; select.appendChild(option);
       });
-      if (!nodes.length) {
-        const option = document.createElement('option'); option.value = ''; option.textContent = '等待采样'; select.appendChild(option);
-      }
       telemetryOptionsKey = key;
     }
-    select.value = telemetryNodePort === null ? '' : String(telemetryNodePort);
+    select.value = String(telemetryNodePort);
   }
   const values = telemetryValues(data, telemetryNodePort, now);
-  const selectedNode = nodes.find((item) => item.backend_port === telemetryNodePort);
+  const selectedNode = telemetryNodePort === 'all' ? combinedDeviceHistory(data, nodes) : nodes.find((item) => item.backend_port === telemetryNodePort);
+  renderDeviceHistory(data, selectedNode);
   const prefillSample = selectedNode && freshTelemetry(selectedNode.prefill, now);
   const decodeSample = selectedNode && freshTelemetry(selectedNode.decode, now);
   const measured = (value) => value === null || value === undefined ? '—' : speed(value);
@@ -91,10 +115,12 @@ function renderTelemetry(data) {
   setTextIfPresent('live-mfu', showMfu(values.mfu));
   setTextIfPresent('live-mbu', '—');
   setTextIfPresent('live-hbm', values.hbm === null ? '—' : `${number.format(values.hbm)}%`);
-  setTextIfPresent('live-prefill-samples', values.prefill === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(prefillSample.log_at * 1000))} 写出 · rank 近似和`);
-  setTextIfPresent('live-decode-samples', values.decode === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(decodeSample.log_at * 1000))} 写出 · rank 近似和`);
-  setTextIfPresent('live-mfu-detail', values.mfu === null ? '等待所选设备组 Prefill 样本' : '引擎吞吐与模型假设换算');
-  setTextIfPresent('live-hbm-detail', values.hbm === null ? '所选设备组暂无有效样本' : '所选设备组驱动读数的平均');
+  const detail = (value, sample) => value === null ? '样本不完整或采样时间未对齐' : telemetryNodePort === 'all' ?
+    `${nodes.length} 个设备组的近似采样和` : `日志 ${clock.format(new Date(sample.log_at * 1000))} 写出 · rank 近似和`;
+  setTextIfPresent('live-prefill-samples', detail(values.prefill, prefillSample));
+  setTextIfPresent('live-decode-samples', detail(values.decode, decodeSample));
+  setTextIfPresent('live-mfu-detail', values.mfu === null ? '等待完整 Prefill 样本' : telemetryNodePort === 'all' ? '按设备峰值算力加权估算' : '引擎吞吐与模型假设换算');
+  setTextIfPresent('live-hbm-detail', values.hbm === null ? '等待完整设备样本' : telemetryNodePort === 'all' ? '按卡数加权的驱动读数平均' : '所选设备组驱动读数的平均');
   setTextIfPresent('telemetry-status', nodes.length ? `最近读取于 ${clock.format(new Date(data.sampled_at * 1000))}` : '采样未连接');
   const tbody = $('telemetry-body');
   if (!tbody) return;
@@ -487,9 +513,73 @@ const charts = [
   {id: 'input', field: 'input', kind: 'tokens'},
   {id: 'output', field: 'output', kind: 'tokens'},
   {id: 'cache-rate', style: 'cached', field: 'mean_request_hit_rate', kind: 'hit', samples: 'request_hit_samples'},
-  {id: 'prefill', field: 'prefill_estimate_tps', kind: 'speed', samples: 'prefill_samples'},
-  {id: 'decode', field: 'decode_estimate_tps', kind: 'speed', samples: 'decode_samples'},
 ];
+
+function combinedDeviceHistory(data, nodes) {
+  if (!data || data.available !== true || data.history_available !== true || !nodes.length ||
+      new Set(nodes.map((node) => node.backend_port)).size !== nodes.length ||
+      nodes.some((node) => node.source_ok !== true || !node.history ||
+        node.history.method !== 'deepinfer-log-step-approx-v1' || node.history.bucket_seconds !== 600 ||
+        !Array.isArray(node.history.points) || node.history.points.length !== 144)) return null;
+  const points = nodes[0].history.points.map((point, index) => {
+    const all = nodes.map((node) => node.history.points[index]);
+    if (!point || !Number.isSafeInteger(point.start) || point.end !== point.start + 600 ||
+        all.some((item) => !item || item.start !== point.start || item.end !== point.end)) return null;
+    const combined = {start: point.start, end: point.end};
+    ['prefill', 'decode'].forEach((phase) => {
+      const valid = all.every((item) => typeof item[`${phase}_tps`] === 'number' &&
+        Number.isFinite(item[`${phase}_tps`]) && item[`${phase}_tps`] >= 0 &&
+        Number.isSafeInteger(item[`${phase}_samples`]) && item[`${phase}_samples`] > 0);
+      const total = valid ? all.reduce((sum, item) => sum + item[`${phase}_tps`], 0) : null;
+      combined[`${phase}_tps`] = total !== null && Number.isFinite(total) ? total : null;
+      combined[`${phase}_samples`] = combined[`${phase}_tps`] === null ? 0 : 1;
+    });
+    return combined;
+  });
+  if (points.some((point) => point === null)) return null;
+  return {history: {method: 'deepinfer-log-step-approx-v1', bucket_seconds: 600,
+    aggregate: true, group_count: nodes.length, points}};
+}
+
+function renderDeviceHistory(data, selectedNode) {
+  const dropped = data && Number.isSafeInteger(data.history_dropped) && data.history_dropped > 0 ? data.history_dropped : 0;
+  setTextIfPresent('device-history-health', dropped ? ` 历史队列已跳过 ${count(dropped)} 次采集。` : '');
+  const history = data && data.available === true && data.history_available === true && selectedNode && selectedNode.history;
+  const points = history && history.method === 'deepinfer-log-step-approx-v1' && history.bucket_seconds === 600 &&
+    Array.isArray(history.points) && history.points.length === 144 ? history.points : null;
+  ['prefill', 'decode'].forEach((phase) => {
+    const svg = $(`chart-device-${phase}-svg`);
+    const label = $(`chart-device-${phase}`);
+    if (!svg || !label) return;
+    svg.replaceChildren();
+    [16, 34, 52].forEach((y) => svg.appendChild(svgElement('line', {x1: 0, y1: y, x2: 800, y2: y, class: 'grid'})));
+    if (!points) { label.textContent = '设备历史采样未连接'; return; }
+    const valid = points.map((point) => {
+      const value = point && point[`${phase}_tps`];
+      const samples = point && point[`${phase}_samples`];
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 && Number.isSafeInteger(samples) && samples > 0 ? value : null;
+    });
+    const peak = Math.max(1, ...valid.filter((value) => value !== null));
+    let segment = [], total = 0, samples = 0;
+    const draw = () => {
+      if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: phase}));
+      segment = [];
+    };
+    valid.forEach((value, i) => {
+      if (value === null) { draw(); return; }
+      const x = i * 800 / (points.length - 1), y = 59 - value / peak * 50;
+      segment.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+      const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: phase});
+      const title = svgElement('title', {});
+      const scope = history.aggregate ? `${history.group_count} 组区间采样均值之和` : `${count(points[i][`${phase}_samples`])} 个采样`;
+      title.textContent = `${clock.format(new Date(points[i].start * 1000))}–${clock.format(new Date(points[i].end * 1000))}：${speed(value)} · ${scope}`;
+      marker.appendChild(title); svg.appendChild(marker);
+      total += value * points[i][`${phase}_samples`]; samples += points[i][`${phase}_samples`];
+    });
+    draw();
+    label.textContent = samples ? `${speed(total / samples)} · ${count(samples)} ${history.aggregate ? '个各组均有采样的区间' : '个采样'}` : '暂无设备采样';
+  });
+}
 
 function renderPlot(chart, points) {
   const {id, field, kind} = chart;
@@ -655,7 +745,7 @@ $('refresh').addEventListener('click', () => {
 setupTables();
 setupNavigation();
 $('telemetry-node')?.addEventListener('change', (event) => {
-  telemetryNodePort = event.target.value === '' ? null : Number(event.target.value);
+  telemetryNodePort = event.target.value === 'all' ? 'all' : Number(event.target.value);
   if (telemetrySnapshot) renderTelemetry(telemetrySnapshot);
 });
 document.addEventListener('visibilitychange', () => {
