@@ -46,7 +46,8 @@ const start = source.indexOf('function telemetryValues(');
 const end = source.indexOf('\n}\n', start);
 assert(start >= 0 && end > start);
 const read = vm.runInNewContext('(' + source.slice(start, end + 2) + ')', {freshTelemetry});
-let data = {available: true, nodes: [{backend_port: 1, source_ok: true,
+let data = {available: true, nodes: [{backend_port: 1, source_ok: true, backend_ready: true,
+  clock_ok: true, clock_uncertainty_seconds: .1,
   prefill: {tokens_per_second: 0, mfu_estimate: .25, valid_until: 101},
   decode: {tokens_per_second: 100, valid_until: 101}, hbm: {mean_percent: 35, valid_until: 101}}]};
 let value = read(data, 1, 100);
@@ -54,13 +55,59 @@ assert.equal(value.prefill, 0);
 assert.equal(value.decode, 100);
 assert.equal(value.mfu, .25);
 assert.equal(value.hbm, 35);
-value = read({available: true, nodes: [{backend_port: 1, source_ok: true,
+value = read({available: true, nodes: [{backend_port: 1, source_ok: true, backend_ready: true,
+  clock_ok: true, clock_uncertainty_seconds: .1,
   prefill: {tokens_per_second: null, mfu_estimate: -1, valid_until: 101},
   decode: {tokens_per_second: Infinity, valid_until: 101}, hbm: {mean_percent: 101, valid_until: 101}}]}, 1, 100);
 for (const key of ['prefill', 'decode', 'mfu', 'hbm']) assert.equal(value[key], null);
 assert.equal(read(data, 1, 101).prefill, null);
 assert.equal(read(data, 2, 100).prefill, null);
 assert.equal(read({available: false, nodes: data.nodes}, 1, 100).prefill, null);
+data.nodes[0].backend_ready = false;
+value = read(data, 1, 100);
+assert.equal(value.prefill, null); assert.equal(value.decode, null); assert.equal(value.mfu, null);
+assert.equal(value.hbm, 35); // Device reading remains separately valid.
+data.nodes[0].backend_ready = true; data.nodes[0].clock_ok = false;
+value = read(data, 1, 100);
+for (const key of ['prefill', 'decode', 'mfu', 'hbm']) assert.equal(value[key], null);
+data.nodes[0].clock_ok = true; data.nodes[0].clock_uncertainty_seconds = null;
+assert.equal(read(data, 1, 100).decode, null);
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_backend_table_does_not_show_unready_or_clock_invalid_rates(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+function extract(name, ctx) {
+  const start = source.indexOf(`function ${name}(`), end = source.indexOf('\n}\n', start);
+  assert(start >= 0 && end > start); return vm.runInNewContext('(' + source.slice(start, end + 2) + ')', ctx);
+}
+const body = {children: [], replaceChildren() {this.children = [];}, appendChild(row) {this.children.push(row);}};
+const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePort: 'all', telemetryOptionsKey: null,
+  Date: class extends Date {static now() {return 100000;}}, clearTimeout: () => {}, setTimeout: () => 1,
+  $: (id) => id === 'telemetry-body' ? body : null, document: {createElement: () => ({cells: []})},
+  cell: (row, value) => row.cells.push(value), setTextIfPresent: () => {},
+  number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
+  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {}};
+context.freshTelemetry = extract('freshTelemetry', context); context.telemetryValues = extract('telemetryValues', context);
+const render = extract('renderTelemetry', context);
+const n = {backend_port: 1, source_ok: true, backend_ready: true, clock_ok: true, clock_uncertainty_seconds: .1,
+  prefill: {tokens_per_second: 20, mfu_estimate: .2, log_at: 95, log_skew_seconds: 0, valid_until: 110},
+  decode: {tokens_per_second: 100, log_at: 95, log_skew_seconds: 0, valid_until: 110},
+  hbm: {mean_percent: 30, device_count: 1, sample_at: 95, span_seconds: 0, valid_until: 110}};
+const data = {available: true, sampled_at: 100, nodes: [n]};
+render(data); assert.match(body.children[0].cells[2], /^100 tok\/s/);
+n.backend_ready = false; render(data);
+assert.equal(body.children[0].cells[1], '—'); assert.equal(body.children[0].cells[2], '—');
+assert.equal(body.children[0].cells[4], '30% · 1 卡');
+n.backend_ready = true; n.clock_ok = false; render(data);
+assert.equal(body.children[0].cells[2], '—'); assert.equal(body.children[0].cells[4], '—');
 '''
         source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)

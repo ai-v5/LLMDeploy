@@ -90,9 +90,11 @@ function telemetryValues(data, port, now) {
       hbm: weighted('hbm', hbm, 'mean_percent', 'device_count', 100), coverage};
   }
   const item = nodes.find((node) => node && node.backend_port === port && node.source_ok === true);
-  const prefill = item && freshTelemetry(item.prefill, now);
-  const decode = item && freshTelemetry(item.decode, now);
-  const hbm = item && freshTelemetry(item.hbm, now);
+  const usable = item && item.clock_ok === true && read(item.clock_uncertainty_seconds, 20) !== null;
+  const engineReady = usable && item.backend_ready === true;
+  const prefill = engineReady && freshTelemetry(item.prefill, now);
+  const decode = engineReady && freshTelemetry(item.decode, now);
+  const hbm = usable && freshTelemetry(item.hbm, now);
   return {prefill: read(prefill && prefill.tokens_per_second), decode: read(decode && decode.tokens_per_second),
     mfu: read(prefill && prefill.mfu_estimate), hbm: read(hbm && hbm.mean_percent, 100)};
 }
@@ -152,9 +154,12 @@ function renderTelemetry(data) {
   tbody.replaceChildren();
   nodes.forEach((item) => {
     const row = document.createElement('tr');
-    const prefill = item.source_ok === true ? freshTelemetry(item.prefill, now) : null;
-    const decode = item.source_ok === true ? freshTelemetry(item.decode, now) : null;
-    const hbm = item.source_ok === true ? freshTelemetry(item.hbm, now) : null;
+    const usable = item.source_ok === true && item.clock_ok === true &&
+      typeof item.clock_uncertainty_seconds === 'number' && Number.isFinite(item.clock_uncertainty_seconds) &&
+      item.clock_uncertainty_seconds >= 0 && item.clock_uncertainty_seconds <= 20;
+    const prefill = usable && item.backend_ready === true ? freshTelemetry(item.prefill, now) : null;
+    const decode = usable && item.backend_ready === true ? freshTelemetry(item.decode, now) : null;
+    const hbm = usable ? freshTelemetry(item.hbm, now) : null;
     const timerStep = item.phase_timers && item.phase_timers.step;
     const timersFresh = prefill && prefill.step === timerStep || decode && decode.step === timerStep;
     const timer = (phase) => {
