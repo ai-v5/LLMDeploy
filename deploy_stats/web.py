@@ -12,7 +12,7 @@ from .report import active_report, report
 STATIC = Path(__file__).resolve().parent / 'static'
 ASSETS = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.css': ('app.css', 'text/css; charset=utf-8'),
-          '/app-telemetry-v3.js': ('app.js', 'text/javascript; charset=utf-8')}
+          '/app-telemetry-v4.js': ('app.js', 'text/javascript; charset=utf-8')}
 
 
 class Dashboard(ThreadingHTTPServer):

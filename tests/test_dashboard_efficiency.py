@@ -16,8 +16,9 @@ class DashboardEfficiencyTests(unittest.TestCase):
         for legacy in legacy_ids:
             self.assertNotIn(f'id="{legacy}"', html)
             self.assertNotIn(f"'{legacy}'", script)
-        self.assertIn('/app-telemetry-v3.js', html)
-        self.assertIn('/app-telemetry-v3.js', ASSETS)
+        self.assertIn('/app-telemetry-v4.js', html)
+        self.assertIn('/app-telemetry-v4.js', ASSETS)
+        self.assertNotIn('/app-telemetry-v3.js', ASSETS)
         self.assertNotIn('/app-telemetry-v2.js', ASSETS)
         self.assertIn('chart-device-prefill', html)
         self.assertIn('chart-device-decode', html)
@@ -103,7 +104,7 @@ assert.equal(elements['chart-device-prefill'].textContent, '设备历史采样�
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_cross_group_values_require_complete_aligned_samples_and_weight_percentages(self):
+    def test_cross_group_values_ignore_missing_and_weight_only_valid_groups(self):
         node = shutil.which('node')
         if node is None:
             self.skipTest('Node.js is required to validate dashboard calculations')
@@ -130,11 +131,26 @@ let data = {available: true, nodes: [a, b]};
 let value = read(data, 'all', 100);
 assert.equal(value.prefill, 400); assert.equal(value.decode, 800);
 assert(Math.abs(value.mfu - .5) < 1e-12); assert.equal(value.hbm, 50);
+assert.equal(value.coverage.prefill.valid, 2); assert.equal(value.coverage.prefill.total, 2);
 assert.equal(read(data, 1, 100).prefill, 100);
 b.prefill.tokens_per_second = 0; assert.equal(read(data, 'all', 100).prefill, 100);
-b.prefill.log_at = 60; assert.equal(read(data, 'all', 100).prefill, null);
-b.prefill.log_at = 95; b.decode = null; assert.equal(read(data, 'all', 100).decode, null);
-b.source_ok = false; assert.equal(read(data, 'all', 100).prefill, null);
+b.prefill.log_at = 60; value = read(data, 'all', 100);
+assert.equal(value.prefill, 100); assert(value.coverage.prefill.span_seconds > 30);
+b.prefill.log_at = 95; b.decode = null; value = read(data, 'all', 100);
+assert.equal(value.decode, 200); assert.equal(value.coverage.decode.valid, 1);
+b.source_ok = false; value = read(data, 'all', 100);
+assert.equal(value.prefill, 100); assert.equal(value.coverage.prefill.valid, 1);
+assert.equal(value.coverage.prefill.total, 2); assert.equal(value.mfu, .2); assert.equal(value.hbm, 20);
+b.source_ok = true; b.prefill = null; value = read(data, 'all', 100);
+assert.equal(value.prefill, 100); assert.equal(value.mfu, .2);
+assert.equal(value.coverage.mfu.valid, 1); assert.equal(value.hbm, 50);
+b.backend_ready = false; value = read(data, 'all', 100);
+assert.equal(value.hbm, 50); assert.equal(value.coverage.hbm.valid, 2);
+b.backend_ready = true;
+a.prefill.tokens_per_second = 0; value = read(data, 'all', 100);
+assert.equal(value.prefill, 0); assert.equal(value.coverage.prefill.valid, 1);
+a.prefill.valid_until = 100; value = read(data, 'all', 100);
+assert.equal(value.prefill, null); assert.equal(value.coverage.prefill.valid, 0);
 b.source_ok = true; b.backend_port = 1; assert.equal(read(data, 'all', 100).prefill, null);
 assert.equal(read({available: false, nodes: [a]}, 'all', 100).prefill, null);
 '''
@@ -142,7 +158,54 @@ assert.equal(read({available: false, nodes: [a]}, 'all', 100).prefill, null);
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_cross_group_history_requires_each_group_and_matching_buckets(self):
+    def test_overview_shows_partial_coverage_and_no_fake_decode_mbu(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+function extract(name, context) {
+  const start = source.indexOf(`function ${name}(`), end = source.indexOf('\n}\n', start);
+  assert(start >= 0 && end > start);
+  return vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
+}
+const elements = {};
+for (const id of ['live-prefill-tps', 'live-decode-tps', 'live-mfu', 'live-mbu', 'live-hbm',
+  'live-prefill-samples', 'live-decode-samples', 'live-mfu-detail', 'live-hbm-detail']) elements[id] = {textContent: ''};
+const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePort: 'all', telemetryOptionsKey: null,
+  Date: class extends Date {static now() {return 100000;}}, clearTimeout: () => {},
+  $: (id) => elements[id] || null, setTextIfPresent: (id, value) => {if (elements[id]) elements[id].textContent = value;},
+  number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
+  clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {}};
+context.freshTelemetry = extract('freshTelemetry', context);
+context.telemetryValues = extract('telemetryValues', context);
+const render = extract('renderTelemetry', context);
+const base = {source_ok: true, backend_ready: true, clock_ok: true, clock_uncertainty_seconds: .1};
+const a = {...base, backend_port: 1, prefill: {tokens_per_second: 100, mfu_estimate: .2, peak_flops: 100,
+  log_at: 95, log_skew_seconds: 0, valid_until: 110}, decode: null,
+  hbm: {mean_percent: 20, device_count: 2, sample_at: 95, span_seconds: 0, valid_until: 110}};
+const b = {...base, backend_port: 2, prefill: null, decode: null, hbm: null};
+render({available: true, sampled_at: 100, nodes: [a, b]});
+assert.equal(elements['live-prefill-tps'].textContent, '100 tok/s');
+assert.match(elements['live-prefill-samples'].textContent, /1\/2 组有样本 · 部分数据/);
+assert.match(elements['live-mfu-detail'].textContent, /1\/2 组有样本 · 部分数据/);
+assert.equal(elements['live-decode-tps'].textContent, '—');
+assert.match(elements['live-decode-samples'].textContent, /0\/2 组有样本/);
+assert.equal(elements['live-mbu'].textContent, '—');
+assert.equal(elements['live-hbm'].textContent, '20%');
+assert.match(elements['live-hbm-detail'].textContent, /1\/2 组有样本 · 部分数据/);
+render({available:false,nodes:[]});
+assert.equal(elements['live-prefill-tps'].textContent, '—');
+assert.equal(elements['live-prefill-samples'].textContent, '采集未连接 · 组数未知');
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cross_group_history_sums_available_groups_and_labels_coverage(self):
         node = shutil.which('node')
         if node is None:
             self.skipTest('Node.js is required to validate dashboard calculations')
@@ -165,10 +228,57 @@ assert.equal(result.history.points[0].prefill_tps, 400); // Sum group means, nev
 assert.equal(result.history.points[0].prefill_samples, 1); // Each complete bucket has equal weight.
 assert.equal(result.history.points[0].decode_tps, null);
 b.history.points[2].prefill_samples = 0;
-result = combine(data, [a, b]); assert.equal(result.history.points[2].prefill_tps, null);
-b.history.points[3].start += 600; assert.equal(combine(data, [a, b]), null);
-b.history.points[3].start -= 600; b.source_ok = false; assert.equal(combine(data, [a, b]), null);
+result = combine(data, [a, b]); assert.equal(result.history.points[2].prefill_tps, 100);
+assert.equal(result.history.points[2].prefill_groups, 1); assert.equal(result.history.group_count, 2);
+b.history = null; result = combine(data, [a, b]);
+assert.equal(result.history.points[0].prefill_tps, 100); assert.equal(result.history.points[0].prefill_groups, 1);
+const shifted = group(2, 300, 1); shifted.history.points.forEach((point) => {point.start += 600; point.end += 600;});
+result = combine(data, [a, shifted]); assert.equal(result.history.points[0].prefill_tps, 100);
+assert.equal(result.history.points[0].prefill_groups, 1);
+assert.equal(result.history.points[1].prefill_tps, 400); assert.equal(result.history.points[1].prefill_groups, 2);
+a.history.points[1].start = a.history.points[0].start; a.history.points[1].end = a.history.points[0].end;
+assert.equal(combine(data, [a, b]), null); // Duplicate buckets cannot be trusted.
+a.history.points[1].start = 600; a.history.points[1].end = 1200;
+a.source_ok = false; assert.equal(combine(data, [a, b]), null);
 assert.equal(combine({available: true, history_available: false}, [a]), null);
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_history_marks_partially_observed_buckets(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function renderDeviceHistory('), end = source.indexOf('\n}\n', start);
+assert(start >= 0 && end > start);
+function element(name, attrs = {}) {return {name, attrs, textContent: '', children: [],
+  replaceChildren() {this.children=[];}, appendChild(value) {this.children.push(value);}};}
+const elements = {};
+for (const phase of ['prefill', 'decode']) {
+  elements[`chart-device-${phase}`] = element('label');
+  elements[`chart-device-${phase}-svg`] = element('svg');
+}
+const context = {$: (id) => elements[id], svgElement: element, setTextIfPresent: () => {},
+  clock: {format: () => 'time'}, speed: (value) => `${value} tok/s`, count: String};
+const render = vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
+const points = Array.from({length: 144}, (_, i) => ({start:i*600,end:(i+1)*600,
+  prefill_tps:null,prefill_samples:0,prefill_groups:0,decode_tps:null,decode_samples:0,decode_groups:0}));
+points[1].prefill_tps = 100; points[1].prefill_samples = 1; points[1].prefill_groups = 1;
+points[2].prefill_tps = 120; points[2].prefill_samples = 1; points[2].prefill_groups = 1;
+points[3].prefill_tps = 200; points[3].prefill_samples = 1; points[3].prefill_groups = 2;
+render({available:true,history_available:true},{history:{method:'deepinfer-log-step-approx-v1',
+  bucket_seconds:600,aggregate:true,group_count:2,points}});
+assert.match(elements['chart-device-prefill'].textContent, /3 个有采样区间 · 2 个仅部分组/);
+const children = elements['chart-device-prefill-svg'].children;
+assert(children.some((item) => item.name === 'polyline' && item.attrs.class === 'prefill partial'));
+const partial = children.find((item) => item.name === 'circle' && item.attrs.class === 'prefill partial');
+assert.match(partial.children[0].textContent, /1\/2 组采样均值之和 · 部分数据/);
 '''
         source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
         result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
