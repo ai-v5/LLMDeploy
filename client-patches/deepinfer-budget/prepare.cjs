@@ -5,10 +5,10 @@ const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 const { createHash } = require('node:crypto');
 
-const PINNED = {
+const PINNED = Object.freeze({
   'llm-pi-ai': '99b5c20830a52f69641df8a18a39206079b0c725201958cce2c4a934f1d4f7cd',
   'compaction-basic': 'b7ac52f20a36430cf01a66b3a36f23a48ffdb22708d714dbe1fff541b5df4ec5',
-};
+});
 const sha = value => createHash('sha256').update(value).digest('hex');
 const UPSTREAM_LICENSE = `MIT License
 
@@ -106,7 +106,7 @@ if (runtimeHash('sha256').update(readRuntimeSource(${JSON.stringify(original)}))
   fs.writeFileSync(path.join(output, 'manifest.json'), JSON.stringify(manifest, null, 2), { flag: 'wx' });
   return manifest;
 }
-module.exports = { prepare };
+module.exports = { prepare, PINNED };
 if (require.main === module) {
   const [runtimeModules, output, counter, tokenizer] = process.argv.slice(2);
   prepare({ runtimeModules, output, counter, tokenizer });
