@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
@@ -42,6 +43,16 @@ class RecipeTests(unittest.TestCase):
         self.assertIn('/data/model:/model:ro',args)
         self.assertIn('ASCEND_OPP_PATH=/opt/Ascend/cann-9.2.0/opp',args)
         self.assertIn('--port 9890',args[-1])
+
+    def test_optional_hccl_rootinfo_must_be_a_file(self):
+        mount='/etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json:ro'
+        with patch.object(Path,'exists',return_value=True), patch.object(Path,'is_file',return_value=False):
+            args=render.command(self.host,self.recipe,repo_path='/srv/LLMDeploy',optional_devices=[])
+        self.assertNotIn(mount,args)
+        self.assertIn('/etc/hixlep:/etc/hixlep:ro',args)
+        with patch.object(Path,'exists',return_value=True), patch.object(Path,'is_file',return_value=True):
+            args=render.command(self.host,self.recipe,repo_path='/srv/LLMDeploy',optional_devices=[])
+        self.assertIn(mount,args)
 
     def test_reject_bad_host_contract(self):
         for update in [{'devices':[0,1,2,3]},{'model_dir':'/'},{'model_dir':'/data/../model'},{'runtime_dir':self.host['model_dir']},{'image_id':'latest'},{'port':True},{'unknown':'value'}]:
