@@ -25,8 +25,9 @@ HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authoriz
 
 
 class Backends(SessionRouter):
-    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None):
+    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, readiness_ports=None):
         super().__init__(ports, bindings_file, max_active=max_active, max_waiting=max_waiting, queue_timeout=queue_timeout)
+        self.readiness_ports = dict(readiness_ports or {})
         self.control_file = Path(control_file) if control_file else None
         self.stop = threading.Event()
         self.state_path = Path(state_path) if state_path else None
@@ -58,12 +59,18 @@ class Backends(SessionRouter):
             versions = dict(self.versions)
         observed = {}
         for port in self.ports:
-            connection = HTTPConnection('127.0.0.1', port, timeout=1)
+            readiness_port = self.readiness_ports.get(port)
+            connection = HTTPConnection('127.0.0.1', readiness_port or port, timeout=1)
             try:
-                connection.request('GET', '/health', headers={'Connection': 'close'})
+                connection.request('GET', '/readiness' if readiness_port else '/health', headers={'Connection': 'close'})
                 response = connection.getresponse()
-                observed[port] = response.status == 200
-            except (OSError, HTTPException):
+                if readiness_port and response.status == 200:
+                    body = response.read(65537)
+                    data = json.loads(body) if len(body) <= 65536 else None
+                    observed[port] = isinstance(data, dict) and data.get('ready') is True
+                else:
+                    observed[port] = response.status == 200 and not readiness_port
+            except (OSError, HTTPException, ValueError, RecursionError):
                 observed[port] = False
             finally:
                 connection.close()
@@ -92,7 +99,7 @@ class Gateway(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 256
 
-    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False):
+    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False, backend_readiness_ports=None):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
         if state_path and Path(state_path).resolve() in (Path(key_store).resolve(), Path(bindings_file).resolve()):
@@ -113,6 +120,10 @@ class Gateway(ThreadingHTTPServer):
         ports = list(backend_ports) if backend_ports is not None else [upstream_port, backup_port]
         if not ports or len(set(ports)) != len(ports) or any(type(p) is not int or not 1 <= p <= 65535 for p in ports):
             raise ValueError('Invalid backend ports')
+        readiness_ports = dict(backend_readiness_ports or {})
+        if any(type(p) is not int or p not in ports or type(target) is not int or not 1 <= target <= 65535
+               for p, target in readiness_ports.items()):
+            raise ValueError('Invalid backend readiness mapping')
         self.backend_context_limits = dict(backend_context_limits or {})
         if self.backend_context_limits and (set(self.backend_context_limits) != set(ports)
                 or any(type(p) is not int or type(limit) is not int or not 0 < limit <= 10**9 for p, limit in self.backend_context_limits.items())):
@@ -131,7 +142,7 @@ class Gateway(ThreadingHTTPServer):
             raise ValueError('No active gateway keys')
         super().__init__(address, Handler)
         try:
-            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file)
+            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file, readiness_ports)
         except Exception:
             super().server_close()
             raise
@@ -407,6 +418,7 @@ def main():
     parser.add_argument('--upstream-timeout', type=float, default=10800)
     parser.add_argument('--model-context-limit', type=int)
     parser.add_argument('--backend-context-limit', action='append', default=[], metavar='PORT=TOKENS')
+    parser.add_argument('--backend-readiness-port', action='append', default=[], metavar='PORT=MANAGEMENT_PORT')
     args = parser.parse_args()
     limits = {}
     for item in args.backend_context_limit:
@@ -416,9 +428,18 @@ def main():
         if port in limits:
             parser.error('Duplicate backend context limit')
         limits[port] = limit
+    readiness_ports = {}
+    for item in args.backend_readiness_port:
+        if not re.fullmatch(r'[0-9]{1,5}=[0-9]{1,5}', item):
+            parser.error('Backend readiness mappings must use PORT=MANAGEMENT_PORT')
+        port, management_port = map(int, item.split('='))
+        if port in readiness_ports:
+            parser.error('Duplicate backend readiness mapping')
+        readiness_ports[port] = management_port
     server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit, limits,
                      backend_ports=args.backend_port, max_active=args.max_active_per_backend, max_waiting=args.max_waiting,
-                     queue_timeout=args.queue_timeout, control_file=args.control_file, backend_managed_affinity=args.backend_managed_affinity)
+                     queue_timeout=args.queue_timeout, control_file=args.control_file, backend_managed_affinity=args.backend_managed_affinity,
+                     backend_readiness_ports=readiness_ports)
     print(json.dumps({'state': 'LISTENING', 'listen': args.listen, 'port': args.port}), flush=True)
     server.serve_forever()
 
