@@ -20,7 +20,7 @@ python -m deploy_gateway --key-store local/gateway-keys.json --bindings-file loc
 
 DeepInfer 等自行调度 DP rank 的后端使用 `--backend-managed-affinity`：网关保留上述会话头和 `x-deepinfer-cache-namespace`，不注入 vLLM 的 `X-data-parallel-rank`。机器层绑定与原生 token 前缀缓存调度各自保留；机器故障或满载迁移后需要在新机器重新建立缓存。
 
-后端如在独立管理端口提供就绪检查，可重复设置 `--backend-readiness-port 19001=19101`，将推理端口映射到 loopback 管理端口。映射后网关请求管理端口的 `/readiness`，仅在 HTTP 200 且 JSON 的 `ready` 为 `true` 时认为该后端可用；其他后端继续使用其推理端口的 `/health`。例如 MindIE Motor Coordinator 的推理和管理接口分离时应配置此映射，并使用 `--backend-managed-affinity`。管理端口须限制为本机访问；该检查不提供 Coordinator 自身的注册状态持久化或入口高可用。
+后端如在独立管理端口提供就绪检查，可重复设置 `--backend-readiness-port 19001=19101`，将推理端口映射到 loopback 管理端口。映射后网关请求管理端口的 `/readiness`，仅在 HTTP 200 且 JSON 的 `ready` 为 `true` 时认为该后端可用；其他后端继续使用其推理端口的 `/health`。例如 MindIE Motor Coordinator 的推理和管理接口分离时应配置此映射，并使用 `--backend-managed-affinity`。Motor 的 `ready` 不保证 P、D 同时存在：仅有 P 时也可能返回 `true`。需要同时验证 `/instances` 和端到端请求，才能判断实际 PD 拓扑以及 P 侧回退的服务能力。管理端口须限制为本机访问；该检查不提供 Coordinator 自身的注册状态持久化或入口高可用。
 
 重复 `--backend-port` 可配置任意数量的 loopback 后端，替代默认的两个端口。例如三个后端使用 `--backend-port 19001 --backend-port 19002 --backend-port 19008`。`--max-active-per-backend` 默认 32；全池同时等待上限由 `--max-waiting` 控制，默认 32，最长等待由 `--queue-timeout` 控制，默认 5 秒。选机和占用配额在同一把锁内完成；全池满载、队列满额或等待超时返回 429 和 `Retry-After: 1`，没有健康且准入的后端返回 503。该等待时限不包含模型执行时间。请求体最多 64 MiB，读取请求体也计入服务请求槽位；客户端断开时关闭对应上游连接并释放在途配额。
 
