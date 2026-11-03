@@ -78,11 +78,12 @@ class GatewayCliTests(unittest.TestCase):
         argv = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
                 '--backend-state', 'state.json', '--backend-port', '19001', '--backend-port', '19002',
                 '--backend-readiness-port', '19001=19101', '--backend-readiness-port', '19002=19102',
-                '--backend-pd-model', 'example']
+                '--backend-pd-model', 'example', '--backend-pd-probe-endpoints']
         with patch.object(sys, 'argv', argv), patch('deploy_gateway.server.Gateway') as gateway, patch('builtins.print'):
             main()
         self.assertEqual(gateway.call_args.kwargs['backend_readiness_ports'], {19001: 19101, 19002: 19102})
         self.assertEqual(gateway.call_args.kwargs['pd_model'], 'example')
+        self.assertTrue(gateway.call_args.kwargs['pd_probe_endpoints'])
         gateway.return_value.serve_forever.assert_called_once()
 
     def test_duplicate_or_malformed_management_mapping_is_rejected(self):
@@ -267,6 +268,41 @@ class GatewayTests(unittest.TestCase):
             Gateway(('127.0.0.1', 0), self.store, *self.ports,
                     self.root / 'pd-invalid-state.json', self.root / 'pd-invalid-bindings.json',
                     backend_readiness_ports={self.ports[0]: 12345}, pd_model='example')
+        with self.assertRaises(ValueError):
+            Gateway(('127.0.0.1', 0), self.store, *self.ports,
+                    self.root / 'pd-invalid-state.json', self.root / 'pd-invalid-bindings.json',
+                    pd_probe_endpoints=True)
+
+    def test_pd_endpoint_probe_rejects_stale_motor_health_and_accepts_a_live_alternative(self):
+        management = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        management.daemon_threads = True
+        management.status, management.body, management.paths = 200, b'{"ready":true}', []
+        self.start(management)
+        endpoint = lambda port: {'ip': '127.0.0.1', 'business_port': str(port), 'headless': False}
+        row = lambda role, port: {'role': role, 'pool': 'available', 'status': 'active',
+                                  'healthy': True, 'model_name': 'example', 'endpoints': [endpoint(port)]}
+        prefill, decode = row('prefill', self.ports[0]), row('decode', self.ports[1])
+        management.instance_body = json.dumps({'instances': [prefill, decode]}).encode()
+        self.models[1].up = False
+        gateway = Gateway(('127.0.0.1', 0), self.store, self.ports[0], self.ports[0] + 1,
+                          self.root / 'endpoint-state.json', self.root / 'endpoint-bindings.json', 3,
+                          backend_ports=[self.ports[0]],
+                          backend_readiness_ports={self.ports[0]: management.server_port},
+                          pd_model='example', pd_probe_endpoints=True)
+        gateway.backends.stop.set()
+        gateway.backends.thread.join(3)
+        self.start(gateway)
+        self.assertFalse(gateway.backends.healthy[self.ports[0]])
+
+        management.instance_body = json.dumps({'instances': [prefill, decode, row('decode', self.ports[0])]}).encode()
+        gateway.backends.probe()
+        gateway.backends.probe()
+        self.assertTrue(gateway.backends.healthy[self.ports[0]])
+        for invalid in ([], [{'ip': [], 'business_port': '123'}], [endpoint(0)]):
+            management.instance_body = json.dumps({'instances': [prefill, {**decode, 'endpoints': invalid}]}).encode()
+            gateway.backends.probe()
+            gateway.backends.probe()
+            self.assertFalse(gateway.backends.healthy[self.ports[0]])
 
     def test_transport_failover_persists_after_recovery_and_restart(self):
         first = self.request('sticky')

@@ -22,7 +22,7 @@ DeepInfer 等自行调度 DP rank 的后端使用 `--backend-managed-affinity`�
 
 后端如在独立管理端口提供就绪检查，可重复设置 `--backend-readiness-port 19001=19101`，将推理端口映射到 loopback 管理端口。映射后网关请求管理端口的 `/readiness`，仅在 HTTP 200 且 JSON 的 `ready` 为 `true` 时认为该后端可用；其他后端继续使用其推理端口的 `/health`。MindIE Motor Coordinator 的推理和管理接口分离时应配置此映射，并使用 `--backend-managed-affinity`。
 
-严格 P/D 分离部署还应设置 `--backend-pd-model <served-model-name>`，并为每个后端配置管理端口。网关会同时读取 `/instances`，要求该模型至少有一个 `active`、`available` 且 `healthy` 的 P 和 D；请求失败、响应无效或任一角色缺失时，将该协调器视为不可用。Motor 的 `ready` 单独为真不保证 P、D 同时存在。此检查依赖 Motor 报告的实例状态，不能替代真实请求及硬件故障测试。管理端口须限制为本机访问；该检查不提供 Coordinator 自身的注册状态持久化或入口高可用。
+严格 P/D 分离部署还应设置 `--backend-pd-model <served-model-name>`，并为每个后端配置管理端口。网关会同时读取 `/instances`，要求该模型至少有一个 `active`、`available` 且 `healthy` 的 P 和 D；请求失败、响应无效或任一角色缺失时，将该协调器视为不可用。Motor 的 `ready` 单独为真不保证 P、D 同时存在。再设置 `--backend-pd-probe-endpoints` 后，网关还会对候选实例报告的每个 rank 请求 `/health`；该模式要求网关主机能直接访问这些端点。Motor 报告的健康状态可能滞后，端点探测也不能证明实际推理或集体通信正常；同一协调器内的故障实例摘除和恢复仍需另行验证。管理端口须限制为本机访问；该检查不提供 Coordinator 自身的注册状态持久化或入口高可用。
 
 重复 `--backend-port` 可配置任意数量的 loopback 后端，替代默认的两个端口。例如三个后端使用 `--backend-port 19001 --backend-port 19002 --backend-port 19008`。`--max-active-per-backend` 默认 32；全池同时等待上限由 `--max-waiting` 控制，默认 32，最长等待由 `--queue-timeout` 控制，默认 5 秒。选机和占用配额在同一把锁内完成；全池满载、队列满额或等待超时返回 429 和 `Retry-After: 1`，没有健康且准入的后端返回 503。该等待时限不包含模型执行时间。请求体最多 64 MiB，读取请求体也计入服务请求槽位；客户端断开时关闭对应上游连接并释放在途配额。
 
