@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover the pinned vLLM PD container after sampled NPU idleness
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/llmdeploy-pd-recovery
+ExecStart=/usr/bin/python3 -B -m deploy_recovery.pd --config /etc/llmdeploy-pd-recovery.json
+Restart=always
+RestartSec=60
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target docker.service

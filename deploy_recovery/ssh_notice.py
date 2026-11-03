@@ -18,11 +18,13 @@ DESTINATION = Path('/etc/profile.d/llmdeploy-deepinfer-notice.sh')
 CGROUP_ROOT = '/sys/fs/cgroup/pids/docker'
 
 
-def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc_root='/proc'):
+def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc_root='/proc', notice=NOTICE):
     if not isinstance(container_id, str) or not re.fullmatch('[0-9a-f]{64}', container_id):
         raise ValueError('INVALID_CONTAINER_ID')
     if not isinstance(container_name, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', container_name):
         raise ValueError('INVALID_CONTAINER_NAME')
+    if not isinstance(notice, str) or not notice or any(c in notice for c in '\x00\r\n'):
+        raise ValueError('INVALID_NOTICE')
     for root in (cgroup_root, proc_root):
         if (not isinstance(root, str) or not PurePosixPath(root).is_absolute()
                 or '..' in PurePosixPath(root).parts or any(c in root for c in '\x00\r\n')):
@@ -44,7 +46,7 @@ case $- in
                             /^NSpid:/ {{ init = ($NF == 1) }}
                             END {{ exit !(alive && init) }}
                         ' "$_llmdeploy_proc/$_llmdeploy_pid/status" 2>/dev/null; then
-                            printf '%s\\n' {shlex.quote(NOTICE)} {shlex.quote(target)}
+                            printf '%s\\n' {shlex.quote(notice)} {shlex.quote(target)}
                             break
                         fi
                     done 2>/dev/null < "$_llmdeploy_cgroup"
