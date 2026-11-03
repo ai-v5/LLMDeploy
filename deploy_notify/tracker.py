@@ -120,20 +120,23 @@ class Tracker:
                             and sample_time - n['good_since'] >= recovery
                             for p, n in self.state['nodes'].items())
         labels = self.config['nodes']
-        redundancy = '双机' if len(labels) == 2 else str(len(labels)) + ' 机'
+        paths = self.config.get('monitor_kind') == 'pd_paths'
+        unit = '路径' if paths else '机'
+        redundancy = '双' + unit if len(labels) == 2 else str(len(labels)) + ' ' + unit
+        subject = 'P/D 推理路径' if paths else '后端'
         active = routing_text(labels, snapshot, observed)
         events = []
         if all_down and not both.get('alerted') and sample_time - both['bad_since'] >= down:
             both['alerted'] = True
             events.append(self.enqueue('BOTH_DOWN',
-                f'【推理服务紧急告警】后端 {"、".join(labels.values())} 均持续不可用至少 {down} 秒。当前推理服务不可用，请检查模型、SSH 隧道和网络。', now))
+                f'【推理服务紧急告警】{subject} {"、".join(labels.values())} 均持续不可用至少 {down} 秒。当前推理服务不可用，请检查模型、SSH 隧道和网络。', now))
             for port in ready_bad:
                 self.state['nodes'][port]['alerted'] = True
         elif not all_down and not both.get('alerted'):
             for port in ready_bad:
                 self.state['nodes'][port]['alerted'] = True
                 events.append(self.enqueue('NODE_DOWN',
-                    f'【推理服务告警】后端 {labels[port]} 持续不可用至少 {node_down} 秒。当前承载：{active}。{redundancy}冗余已丢失，健康后端 {sum(observed.values())}/{len(labels)}。', now))
+                    f'【推理服务告警】{subject} {labels[port]} 持续不可用至少 {node_down} 秒。当前承载：{active}。{redundancy}冗余已丢失，健康后端 {sum(observed.values())}/{len(labels)}。', now))
         if not all_down and both.get('alerted') and stable_up:
             both['alerted'] = False
             for port in ready_good:
@@ -145,7 +148,7 @@ class Tracker:
                             and sample_time - self.state['nodes'][p]['good_since'] >= recovery for p in observed)
             note = redundancy + '冗余已恢复。' if redundant else '仍有后端未恢复，冗余尚未恢复。'
             events.append(self.enqueue('SERVICE_RECOVERED',
-                f'【推理服务恢复】后端 {restored} 已稳定恢复，推理服务恢复可用。当前承载：{active}。{note}', now))
+                f'【推理服务恢复】{subject} {restored} 已稳定恢复，推理服务恢复可用。当前承载：{active}。{note}', now))
         elif ready_good:
             for port in ready_good:
                 self.state['nodes'][port]['alerted'] = False
@@ -154,7 +157,7 @@ class Tracker:
                             for p, n in self.state['nodes'].items())
             note = redundancy + '冗余已恢复。' if redundant else '仍有后端尚未稳定恢复。'
             events.append(self.enqueue('NODE_RECOVERED',
-                f'【推理服务恢复】后端 {"、".join(labels[p] for p in ready_good)} 已稳定恢复。当前承载：{active}。{note}', now))
+                f'【推理服务恢复】{subject} {"、".join(labels[p] for p in ready_good)} 已稳定恢复。当前承载：{active}。{note}', now))
         return events
 
 
@@ -170,7 +173,10 @@ def status_text(config, snapshot, now):
         ('可用' if health[p] else '不可用') if fresh else '状态未知') + '）'
         for p, label in labels.items())
     note = '' if fresh else '\n健康快照缺失或过期，不能确认当前可用性。'
-    text = f'{len(labels)} 个 {config.get("engine_name", "vLLM")} 实例已配置部署，分别是 {instances}。{note}'
+    if config.get('monitor_kind') == 'pd_paths':
+        text = f'{len(labels)} 条 {config.get("engine_name", "vLLM")} P/D 推理路径已配置，分别是 {instances}。{note}'
+    else:
+        text = f'{len(labels)} 个 {config.get("engine_name", "vLLM")} 实例已配置部署，分别是 {instances}。{note}'
     if fresh and snapshot.get('routing_mode') == 'session_affinity':
         text += '\n当前承载：' + routing_text(labels, snapshot, health) + '；故障迁移后不自动回迁。'
     if config.get('usage'):

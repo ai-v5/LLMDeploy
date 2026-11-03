@@ -115,6 +115,20 @@ class AlertTests(unittest.TestCase):
         snapshot['epoch'] = 100
         self.assertNotIn('会话均衡', n.status_text(self.config, snapshot, 200))
 
+    def test_pd_path_messages_describe_paths_not_independent_machines(self):
+        config = {**self.config, 'monitor_kind': 'pd_paths'}
+        tracker = n.Tracker(config)
+        snapshot = {'epoch': 100, 'active_port': 19001, 'routing_mode': 'session_affinity',
+                    'backends': [{'port': 19001, 'healthy': True}, {'port': 19002, 'healthy': True}]}
+        self.assertIn('P/D 推理路径', n.status_text(config, snapshot, 100))
+        events = self.interval(100, 160, False, True, tracker)
+        self.assertEqual([e['kind'] for e in events], ['NODE_DOWN'])
+        self.assertIn('双路径冗余已丢失', events[0]['content'])
+        self.assertNotIn('双机', events[0]['content'])
+        events = self.interval(162, 172, True, True, tracker)
+        self.assertEqual([e['kind'] for e in events], ['NODE_RECOVERED'])
+        self.assertIn('双路径冗余已恢复', events[0]['content'])
+
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
