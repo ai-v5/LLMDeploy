@@ -25,9 +25,10 @@ HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authoriz
 
 
 class Backends(SessionRouter):
-    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, readiness_ports=None):
+    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, readiness_ports=None, pd_model=None):
         super().__init__(ports, bindings_file, max_active=max_active, max_waiting=max_waiting, queue_timeout=queue_timeout)
         self.readiness_ports = dict(readiness_ports or {})
+        self.pd_model = pd_model
         self.control_file = Path(control_file) if control_file else None
         self.stop = threading.Event()
         self.state_path = Path(state_path) if state_path else None
@@ -68,6 +69,19 @@ class Backends(SessionRouter):
                     body = response.read(65537)
                     data = json.loads(body) if len(body) <= 65536 else None
                     observed[port] = isinstance(data, dict) and data.get('ready') is True
+                    if observed[port] and self.pd_model is not None:
+                        connection.close()
+                        connection.request('GET', '/instances', headers={'Connection': 'close'})
+                        response = connection.getresponse()
+                        body = response.read(1048577)
+                        data = json.loads(body) if response.status == 200 and len(body) <= 1048576 else None
+                        instances = data.get('instances') if isinstance(data, dict) else None
+                        roles = {row.get('role') for row in instances if isinstance(row, dict)
+                                 and row.get('role') in ('prefill', 'decode')
+                                 and row.get('model_name') == self.pd_model
+                                 and row.get('healthy') is True and row.get('pool') == 'available'
+                                 and row.get('status') == 'active'} if isinstance(instances, list) else set()
+                        observed[port] = {'prefill', 'decode'} <= roles
                 else:
                     observed[port] = response.status == 200 and not readiness_port
             except (OSError, HTTPException, ValueError, RecursionError):
@@ -99,7 +113,7 @@ class Gateway(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 256
 
-    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False, backend_readiness_ports=None):
+    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False, backend_readiness_ports=None, pd_model=None):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
         if state_path and Path(state_path).resolve() in (Path(key_store).resolve(), Path(bindings_file).resolve()):
@@ -124,6 +138,9 @@ class Gateway(ThreadingHTTPServer):
         if any(type(p) is not int or p not in ports or type(target) is not int or not 1 <= target <= 65535
                for p, target in readiness_ports.items()):
             raise ValueError('Invalid backend readiness mapping')
+        if pd_model is not None and (not isinstance(pd_model, str) or not pd_model.strip()
+                                     or set(readiness_ports) != set(ports)):
+            raise ValueError('PD model requires a management readiness port for each backend')
         self.backend_context_limits = dict(backend_context_limits or {})
         if self.backend_context_limits and (set(self.backend_context_limits) != set(ports)
                 or any(type(p) is not int or type(limit) is not int or not 0 < limit <= 10**9 for p, limit in self.backend_context_limits.items())):
@@ -142,7 +159,7 @@ class Gateway(ThreadingHTTPServer):
             raise ValueError('No active gateway keys')
         super().__init__(address, Handler)
         try:
-            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file, readiness_ports)
+            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file, readiness_ports, pd_model)
         except Exception:
             super().server_close()
             raise
@@ -419,6 +436,7 @@ def main():
     parser.add_argument('--model-context-limit', type=int)
     parser.add_argument('--backend-context-limit', action='append', default=[], metavar='PORT=TOKENS')
     parser.add_argument('--backend-readiness-port', action='append', default=[], metavar='PORT=MANAGEMENT_PORT')
+    parser.add_argument('--backend-pd-model', help='Require healthy Motor prefill and decode instances for this model')
     args = parser.parse_args()
     limits = {}
     for item in args.backend_context_limit:
@@ -439,7 +457,7 @@ def main():
     server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit, limits,
                      backend_ports=args.backend_port, max_active=args.max_active_per_backend, max_waiting=args.max_waiting,
                      queue_timeout=args.queue_timeout, control_file=args.control_file, backend_managed_affinity=args.backend_managed_affinity,
-                     backend_readiness_ports=readiness_ports)
+                     backend_readiness_ports=readiness_ports, pd_model=args.backend_pd_model)
     print(json.dumps({'state': 'LISTENING', 'listen': args.listen, 'port': args.port}), flush=True)
     server.serve_forever()
 

@@ -64,10 +64,11 @@ class Readiness(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.paths.append(self.path)
         self.send_response(self.server.status)
-        self.send_header('Content-Length', str(len(self.server.body)))
+        body = self.server.instance_body if self.path == '/instances' and hasattr(self.server, 'instance_body') else self.server.body
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         try:
-            self.wfile.write(self.server.body)
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -76,10 +77,12 @@ class GatewayCliTests(unittest.TestCase):
     def test_repeated_management_mappings_reach_gateway(self):
         argv = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
                 '--backend-state', 'state.json', '--backend-port', '19001', '--backend-port', '19002',
-                '--backend-readiness-port', '19001=19101', '--backend-readiness-port', '19002=19102']
+                '--backend-readiness-port', '19001=19101', '--backend-readiness-port', '19002=19102',
+                '--backend-pd-model', 'example']
         with patch.object(sys, 'argv', argv), patch('deploy_gateway.server.Gateway') as gateway, patch('builtins.print'):
             main()
         self.assertEqual(gateway.call_args.kwargs['backend_readiness_ports'], {19001: 19101, 19002: 19102})
+        self.assertEqual(gateway.call_args.kwargs['pd_model'], 'example')
         gateway.return_value.serve_forever.assert_called_once()
 
     def test_duplicate_or_malformed_management_mapping_is_rejected(self):
@@ -214,6 +217,56 @@ class GatewayTests(unittest.TestCase):
                 Gateway(('127.0.0.1', 0), self.store, *self.ports,
                         self.root / 'invalid-state.json', self.root / 'invalid-bindings.json',
                         backend_readiness_ports=mapping)
+
+    def test_motor_pd_requires_healthy_prefill_and_decode_despite_ready(self):
+        management = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        management.daemon_threads = True
+        management.status, management.body, management.paths = 200, b'{"ready":true}', []
+        prefill = {'role': 'prefill', 'pool': 'available', 'status': 'active', 'healthy': True, 'model_name': 'example'}
+        decode = {'role': 'decode', 'pool': 'available', 'status': 'active', 'healthy': True, 'model_name': 'example'}
+        management.instance_body = json.dumps({'instances': [prefill]}).encode()
+        self.start(management)
+        backup_management = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        backup_management.daemon_threads = True
+        backup_management.status, backup_management.body, backup_management.paths = 200, b'{"ready":true}', []
+        backup_management.instance_body = json.dumps({'instances': [prefill, decode]}).encode()
+        self.start(backup_management)
+        gateway = Gateway(('127.0.0.1', 0), self.store, *self.ports,
+                          self.root / 'pd-state.json', self.root / 'pd-bindings.json', 3,
+                          backend_readiness_ports={self.ports[0]: management.server_port,
+                                                   self.ports[1]: backup_management.server_port},
+                          pd_model='example')
+        gateway.backends.stop.set()
+        gateway.backends.thread.join(3)
+        self.start(gateway)
+        self.assertFalse(gateway.backends.healthy[self.ports[0]])
+        self.assertEqual(self.request('only-prefill', gateway=gateway)[1], str(self.ports[1]))
+
+        for instances in ([decode], [prefill, {**decode, 'healthy': False}],
+                          [prefill, {**decode, 'pool': 'unavailable'}],
+                          [prefill, {**decode, 'healthy': 1}],
+                          [prefill, {**decode, 'model_name': 'other'}],
+                          [prefill, {**decode, 'role': []}], []):
+            with self.subTest(instances=instances):
+                management.instance_body = json.dumps({'instances': instances}).encode()
+                gateway.backends.probe()
+                self.assertFalse(gateway.backends.healthy[self.ports[0]])
+        for body in (b'invalid', b'[]', b'{"instances":{}}', b' ' * 1048577):
+            management.instance_body = body
+            gateway.backends.probe()
+            self.assertFalse(gateway.backends.healthy[self.ports[0]])
+
+        management.instance_body = json.dumps({'instances': [prefill, decode]}).encode()
+        gateway.backends.probe()
+        self.assertFalse(gateway.backends.healthy[self.ports[0]])
+        gateway.backends.probe()
+        self.assertTrue(gateway.backends.healthy[self.ports[0]])
+
+    def test_pd_model_requires_all_management_mappings(self):
+        with self.assertRaises(ValueError):
+            Gateway(('127.0.0.1', 0), self.store, *self.ports,
+                    self.root / 'pd-invalid-state.json', self.root / 'pd-invalid-bindings.json',
+                    backend_readiness_ports={self.ports[0]: 12345}, pd_model='example')
 
     def test_transport_failover_persists_after_recovery_and_restart(self):
         first = self.request('sticky')
