@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -80,8 +81,14 @@ class NoticeRenderingTests(unittest.TestCase):
             self.assertEqual(dest.read_text(encoding='utf-8'), 'first\n')
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ['notice.sh'])
 
+    def test_rendered_command_checks_identity_after_sudo(self):
+        notice = render_notice('a' * 64, 'target')
+        self.assertIn('sudo sh -c', notice)
+        self.assertIn('kill -9 -- "$1"', notice)
+        self.assertIn('/' + 'a' * 64 + '/cgroup.procs', notice)
 
-@unittest.skipUnless(os.name == 'posix' and shutil.which('bash') and shutil.which('awk'),
+
+@unittest.skipUnless(os.name == 'posix' and all(shutil.which(tool) for tool in ('bash', 'sh', 'awk', 'grep')),
                      'POSIX shell and pseudo-terminal required')
 class InteractiveNoticeTests(unittest.TestCase):
     def setUp(self):
@@ -161,6 +168,43 @@ class InteractiveNoticeTests(unittest.TestCase):
         output = self.run_notice()
         self.assertEqual(output.count(NOTICE), 1)
         self.assertIn('deepinfer-test', output)
+
+    def test_command_only_signals_the_pinned_live_init(self):
+        self.set_process(123)
+        output = self.run_notice()
+        commands = [line for line in output.splitlines() if line.startswith('sudo sh -c ')]
+        self.assertEqual(len(commands), 1, output)
+        args = shlex.split(commands[0])
+        self.assertEqual(args[:3], ['sudo', 'sh', '-c'])
+        # Replace only the signal action; all actual command guards still run.
+        safe_script = 'kill() { printf "SIGNAL %s\\n" "$*"; }; ' + args[3]
+
+        def run_command():
+            return subprocess.run(['sh', '-c', safe_script, *args[4:]], capture_output=True, text=True, timeout=10)
+
+        result = run_command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'SIGNAL -9 -- 123')
+
+        (self.cgroup / 'cgroup.procs').write_text('456\n', encoding='utf-8')
+        result = run_command()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('SIGNAL', result.stdout)
+
+        (self.cgroup / 'cgroup.procs').write_text('123\n', encoding='utf-8')
+        (self.proc / '123' / 'status').write_text('State:\tS\nNSpid:\t123\t2\n', encoding='utf-8')
+        result = run_command()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('SIGNAL', result.stdout)
+
+        (self.proc / '123' / 'status').write_text('State:\tZ\nNSpid:\t123\t1\n', encoding='utf-8')
+        result = run_command()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('SIGNAL', result.stdout)
+
+    def test_host_pid_one_never_shows_a_kill_command(self):
+        self.set_process(1)
+        self.assertNotIn('sudo sh -c ', self.run_notice())
 
     def test_stopped_or_non_init_process_does_not_show_notice(self):
         self.assertNotIn(NOTICE, self.run_notice())
