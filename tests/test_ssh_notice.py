@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from deploy_recovery import pd_ssh_notice
 from deploy_recovery.ssh_notice import NOTICE, install_atomic, render_notice, verify_target
 
 
@@ -71,6 +72,14 @@ class NoticeRenderingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             render_notice('a' * 64, 'target', proc_root='/proc/../other')
 
+    def test_custom_message_requires_an_absolute_safe_path(self):
+        for path in ('relative', '/etc/../notice', '/etc/notice\nother', '/etc/notice\x00'):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                render_notice('a' * 64, 'target', message_file=path)
+        rendered = render_notice('a' * 64, 'target', message_file='/etc/site-notice.txt')
+        self.assertIn('/etc/site-notice.txt', rendered)
+        self.assertIn('kill -TERM', rendered)
+
     def test_install_does_not_replace_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / 'notice.sh'
@@ -104,7 +113,7 @@ class InteractiveNoticeTests(unittest.TestCase):
             f'State:\t{state} (fixture)\nNSpid:\t{pid}\t{namespace_pid}\n', encoding='utf-8')
         (self.cgroup / 'cgroup.procs').write_text(str(pid) + '\n', encoding='utf-8')
 
-    def run_notice(self, *, ssh=True, tty=True, interactive=True, disappearing_cgroup=False):
+    def run_notice(self, *, ssh=True, tty=True, interactive=True, disappearing_cgroup=False, fake_nonroot=False):
         import pty
         import select
         import time
@@ -112,6 +121,13 @@ class InteractiveNoticeTests(unittest.TestCase):
         env.pop('SSH_CONNECTION', None)
         if ssh:
             env['SSH_CONNECTION'] = '192.0.2.10 1234 192.0.2.11 22'
+        if fake_nonroot:
+            bindir = self.root / 'identity-bin'
+            bindir.mkdir(exist_ok=True)
+            identity = bindir / 'id'
+            identity.write_text('#!/bin/sh\nprintf "1000\\n"\n', encoding='utf-8')
+            identity.chmod(0o755)
+            env['PATH'] = str(bindir) + os.pathsep + env.get('PATH', '')
         command = ['bash', '--noprofile', '--norc'] + (['-i'] if interactive else [])
         prelude = ''
         if disappearing_cgroup:
@@ -182,6 +198,53 @@ class InteractiveNoticeTests(unittest.TestCase):
         output = self.run_notice(disappearing_cgroup=True)
         self.assertNotIn(NOTICE, output)
         self.assertIn('NOTICE_TEST_COMPLETE', output)
+
+    def test_custom_message_is_read_at_login_and_kill_is_pinned_to_cgroup(self):
+        import shlex
+        message = self.root / 'site notice.txt'
+        message.write_text('first line\nsecond $(not-a-command)\n', encoding='utf-8')
+        self.notice_file.write_text(render_notice(self.cid, 'deepinfer-test',
+            cgroup_root=str(self.cgroup.parent), proc_root=str(self.proc), message_file=str(message)), encoding='utf-8')
+        child = subprocess.Popen(['sleep', '30'])
+        def cleanup_child():
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+        self.addCleanup(cleanup_child)
+        self.set_process(child.pid)
+        output = self.run_notice()
+        self.assertIn('first line', output)
+        self.assertIn('second $(not-a-command)', output)
+        line = next(line.strip() for line in output.splitlines() if line.strip().startswith('grep -qx '))
+        self.assertIn('kill -TERM ' + str(child.pid), line)
+        self.assertIn(shlex.quote(str(self.cgroup / 'cgroup.procs')), line)
+        self.assertIn('&& sudo kill -TERM ' + str(child.pid), self.run_notice(fake_nonroot=True))
+        message.write_text('updated text\n', encoding='utf-8')
+        self.assertIn('updated text', self.run_notice())
+        (self.cgroup / 'cgroup.procs').write_text('', encoding='utf-8')
+        subprocess.run(['bash', '-c', line], timeout=10, check=False)
+        self.assertIsNone(child.poll(), 'stale command must not signal a process outside the pinned cgroup')
+        if os.geteuid() == 0:
+            (self.cgroup / 'cgroup.procs').write_text(str(child.pid) + '\n', encoding='utf-8')
+            subprocess.run(['bash', '-c', line], timeout=10, check=True)
+            self.assertEqual(child.wait(timeout=5), -15)
+
+    @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root-owned fixture required')
+    def test_pd_installer_references_local_message_without_embedding_text(self):
+        message = self.root / 'message.txt'
+        message.write_text('fixture site-specific text\n', encoding='utf-8')
+        message.chmod(0o644)
+        config = self.root / 'config.json'
+        config.write_text(json.dumps({'container_id': self.cid, 'container_name': 'fixture'}), encoding='utf-8')
+        destination = self.root / 'installed.sh'
+        args = ['pd_ssh_notice', '--config', str(config), '--install', '--message-file', str(message)]
+        with patch.object(pd_ssh_notice, 'DESTINATION', destination), \
+             patch.object(pd_ssh_notice, 'verify_target', return_value=True), \
+             patch('sys.argv', args):
+            pd_ssh_notice.main()
+        script = destination.read_text(encoding='utf-8')
+        self.assertIn(str(message), script)
+        self.assertNotIn('fixture site-specific text', script)
 
 
 if __name__ == '__main__':

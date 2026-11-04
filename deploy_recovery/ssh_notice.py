@@ -18,7 +18,8 @@ DESTINATION = Path('/etc/profile.d/llmdeploy-deepinfer-notice.sh')
 CGROUP_ROOT = '/sys/fs/cgroup/pids/docker'
 
 
-def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc_root='/proc', notice=NOTICE):
+def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc_root='/proc', notice=NOTICE,
+                  message_file=None):
     if not isinstance(container_id, str) or not re.fullmatch('[0-9a-f]{64}', container_id):
         raise ValueError('INVALID_CONTAINER_ID')
     if not isinstance(container_name, str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', container_name):
@@ -31,6 +32,30 @@ def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc
             raise ValueError('INVALID_ROOT')
     cgroup_file = str(PurePosixPath(cgroup_root) / container_id / 'cgroup.procs')
     target = '对应容器：' + container_name + '；请只结束此服务，避免误杀其他任务。'
+    if message_file is None:
+        output = f"printf '%s\\n' {shlex.quote(notice)} {shlex.quote(target)}"
+    else:
+        try:
+            message_file = os.fspath(message_file)
+        except TypeError as exc:
+            raise ValueError('INVALID_MESSAGE_FILE') from exc
+        if (not isinstance(message_file, str) or not PurePosixPath(message_file).is_absolute()
+                or '..' in PurePosixPath(message_file).parts or any(c in message_file for c in '\x00\r\n')):
+            raise ValueError('INVALID_MESSAGE_FILE')
+        printable_cgroup = shlex.quote(shlex.quote(cgroup_file))
+        output = f'''_llmdeploy_message={shlex.quote(message_file)}
+                            if [ -r "$_llmdeploy_message" ] && [ -s "$_llmdeploy_message" ]; then
+                                while IFS= read -r _llmdeploy_line || [ -n "$_llmdeploy_line" ]; do
+                                    printf '%s\\n' "$_llmdeploy_line"
+                                done < "$_llmdeploy_message"
+                            else
+                                printf '%s\\n' 'NPU service is running; local notice is unavailable.'
+                            fi
+                            if [ "$(id -u 2>/dev/null)" = 0 ]; then
+                                printf 'grep -qx -- %s %s && kill -TERM %s\\n' "$_llmdeploy_pid" {printable_cgroup} "$_llmdeploy_pid"
+                            else
+                                printf 'grep -qx -- %s %s && sudo kill -TERM %s\\n' "$_llmdeploy_pid" {printable_cgroup} "$_llmdeploy_pid"
+                            fi'''
     return f'''# Read-only notice for an interactive SSH login. Installed from the pinned recovery config.
 case $- in
     *i*)
@@ -46,7 +71,7 @@ case $- in
                             /^NSpid:/ {{ init = ($NF == 1) }}
                             END {{ exit !(alive && init) }}
                         ' "$_llmdeploy_proc/$_llmdeploy_pid/status" 2>/dev/null; then
-                            printf '%s\\n' {shlex.quote(notice)} {shlex.quote(target)}
+                            {output}
                             break
                         fi
                     done 2>/dev/null < "$_llmdeploy_cgroup"
