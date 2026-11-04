@@ -6,7 +6,7 @@
 
 配置在旧 vLLM 配方列出的固定身份字段之外增加 `launcher_file`、`launcher_sha256`、`fault_receipt` 和 `fault_receipt_sha256`。启动脚本和故障基线均以 SHA256 固定，变化会使旧空闲窗口失效；基线至少包含实际运行镜像 ID、`failure`、8 卡 `health_before` 和逐卡 `faults_before`。基线必须准确标明它是设备快照还是 HCCL 测试，不能把当前设备快照写成一次新的通信测试。启动脚本应允许容器重启后保留已有日志继续写入，不能因独占创建同名日志而立即退出。
 
-将模块放在 `/opt/llmdeploy-pd-recovery`，将仅由管理员写入的配置和状态分别放在 `/etc/llmdeploy-pd-recovery.json`、`/var/lib/llmdeploy-pd-recovery/state.json`，核实单元中的 Python 路径后安装两个 service 模板。执行 `systemctl daemon-reload`，再分别启用 `llmdeploy-pd-safety-monitor.service` 和 `llmdeploy-pd-recovery.service`。前者持续核对固定容器内的 NPU 进程及故障基线；确认其他进程占卡或设备状态改变时，只停止已重新核验身份的目标容器。检查结果未知时记录未知，不把未知当成空闲。后者负责两小时等待和启动；运行但健康接口卡住的容器不会仅因 HTTP 失败而自动重启。
+将模块放在 `/opt/llmdeploy-pd-recovery`，将仅由管理员写入的配置和状态分别放在 `/etc/llmdeploy-pd-recovery.json`、`/var/lib/llmdeploy-pd-recovery/state.json`，核实单元中的 Python 路径后安装两个 service 模板。执行 `systemctl daemon-reload`，再分别启用 `llmdeploy-pd-safety-monitor.service` 和 `llmdeploy-pd-recovery.service`。前者持续核对固定容器内的 NPU 进程及故障基线；只有确认其他进程占卡时，才停止已重新核验身份的目标容器。运行期间设备健康状态或故障事件变化只记录在状态文件和 systemd 日志中，继续检查占卡冲突，不因此主动停止容器；日志记录状态变化和涉及的设备编号。检查结果未知时记录未知，不把未知当成空闲。后者负责两小时等待和启动；运行但健康接口卡住的容器不会仅因 HTTP 失败而自动重启。容器已退出后的自动恢复仍要求设备状态及故障事件与验收基线一致。
 
 在已验收的运行实例上执行 `python3 -m deploy_recovery.pd_ssh_notice --config /etc/llmdeploy-pd-recovery.json --install`，会为使用 cgroupfs v1 的交互式 SSH 登录创建独立提示，普通远程命令保持安静。安装时可附加 `--message-file <绝对路径>`：文件须由 root 持有、所有用户可读且不可由组或其他用户写入。每次登录读取该本机文件，并显示带固定容器 cgroup 校验的主进程终止命令；非 root 用户需要相应 sudo 权限。修改文件可替换提示，无需重装或重启模型服务。升级、替换或主动停用前先停止两个 service，保留旧配置和状态；新实例验收后重新固定容器、启动脚本和故障基线，再重新启用并验证看护与登录提示。有限采样可能错过间隙内的短任务，启动前检查与其他使用者启动任务之间也没有跨用户原子租约。
 

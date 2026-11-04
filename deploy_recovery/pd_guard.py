@@ -36,10 +36,11 @@ def probe(config, *, check_faults=True):
     top = deepinfer.docker_command(config, ['top', config['container_id'], '-o', 'pid'])
     known = {int(line.strip()) for line in top.splitlines() if line.strip().isdigit()}
     health, processes = npu_processes(deepinfer.command([config['npu_smi'], 'info']))
-    if health != receipt['health_before']:
-        return {'state': 'HEALTH_CHANGED'}
     if any(pid not in known for _, pid in processes):
         return {'state': 'NPU_CONFLICT'}
+    changed_health = sorted((device for device in health if health[device] != receipt['health_before'][device]),
+                            key=int)
+    changed_faults = []
     if check_faults:
         faults = {}
         for device in range(8):
@@ -47,8 +48,17 @@ def probe(config, *, check_faults=True):
                                         '-i', str(device), '-p', '0'])
             faults[str(device)] = [list(x) for x in sorted(re.findall(
                 r'event id=(0x[0-9A-Fa-f]+),\s*severity=(\d+)', result))]
-        if faults != receipt['faults_before']:
-            return {'state': 'FAULT_CHANGED'}
+        changed_faults = sorted((device for device in faults if faults[device] != receipt['faults_before'][device]),
+                                key=int)
+    if changed_health:
+        result = {'state': 'HEALTH_CHANGED', 'owned_npu_processes': len(processes),
+                  'health_changed_devices': changed_health}
+        if check_faults:
+            result['fault_changed_devices'] = changed_faults
+        return result
+    if changed_faults:
+        return {'state': 'FAULT_CHANGED', 'owned_npu_processes': len(processes),
+                'fault_changed_devices': changed_faults}
     return {'state': 'MONITORING', 'owned_npu_processes': len(processes)}
 
 
@@ -58,6 +68,21 @@ def stop_owned(config):
         deepinfer.docker_command(config, ['stop', '--time', '5', config['container_id']], timeout=40)
 
 
+def check_once(config, *, check_faults=True):
+    result = probe(config, check_faults=check_faults)
+    if result['state'] == 'NPU_CONFLICT':
+        time.sleep(1)
+        result = probe(config, check_faults=False)
+        if result['state'] == 'NPU_CONFLICT':
+            stop_owned(config)
+            result = {'state': 'STOPPED_BY_GUARD', 'reason': 'NPU_CONFLICT'}
+    return result
+
+
+def poll_interval(state):
+    return 3 if state in ('MONITORING', 'HEALTH_CHANGED', 'FAULT_CHANGED') else 30
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -65,27 +90,38 @@ def main():
     config = pd.load_pd_config(args.config)
     status = Path(config['state_file']).with_name('guard.json')
     last_fault = 0.0
+    last_fault_devices = []
+    last_event = None
     while True:
         try:
             check_faults = time.monotonic() - last_fault >= 60
-            result = probe(config, check_faults=check_faults)
-            if check_faults and result['state'] == 'MONITORING':
+            result = check_once(config, check_faults=check_faults)
+            if check_faults and result['state'] in ('MONITORING', 'HEALTH_CHANGED', 'FAULT_CHANGED'):
                 last_fault = time.monotonic()
-            if result['state'] == 'NPU_CONFLICT':
-                time.sleep(1)
-                result = probe(config, check_faults=False)
-            if result['state'] in ('NPU_CONFLICT', 'HEALTH_CHANGED', 'FAULT_CHANGED'):
-                reason = result['state']
-                stop_owned(config)
-                result = {'state': 'STOPPED_BY_GUARD', 'reason': reason}
+                last_fault_devices = result.get('fault_changed_devices', [])
+            elif not check_faults and last_fault_devices:
+                if result['state'] == 'MONITORING':
+                    result['state'] = 'FAULT_CHANGED'
+                    result['fault_changed_devices'] = last_fault_devices
+                elif result['state'] == 'HEALTH_CHANGED':
+                    result['fault_changed_devices'] = last_fault_devices
+            if result['state'] not in ('MONITORING', 'HEALTH_CHANGED', 'FAULT_CHANGED'):
+                last_fault = 0.0
+                last_fault_devices = []
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
             result = {'state': 'UNKNOWN'}
+            last_fault = 0.0
+            last_fault_devices = []
+        event = json.dumps(result, sort_keys=True)
+        if event != last_event:
+            print('PD_GUARD_EVENT ' + event, flush=True)
+            last_event = event
         result['epoch'] = time.time()
         try:
             write_state(status, result)
         except OSError:
             pass
-        time.sleep(3 if result['state'] == 'MONITORING' else 30)
+        time.sleep(poll_interval(result['state']))
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -120,6 +121,80 @@ class PdRecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pd_guard.stop_owned(self.config)
             command.assert_not_called()
+
+    def test_device_health_change_does_not_stop_a_running_service(self):
+        for condition in ('HEALTH_CHANGED', 'FAULT_CHANGED'):
+            with self.subTest(condition=condition), \
+                 patch('deploy_recovery.pd_guard.probe', return_value={'state': condition}), \
+                 patch('deploy_recovery.pd_guard.stop_owned') as stop:
+                self.assertEqual(pd_guard.check_once(self.config)['state'], condition)
+                stop.assert_not_called()
+                self.assertEqual(pd_guard.poll_interval(condition), 3)
+
+    def test_main_loop_does_not_stop_on_health_or_fault_change(self):
+        for condition in ('HEALTH_CHANGED', 'FAULT_CHANGED'):
+            args = SimpleNamespace(config=Path('unused.json'))
+            with self.subTest(condition=condition), \
+                 patch('argparse.ArgumentParser.parse_args', return_value=args), \
+                 patch('deploy_recovery.pd.load_pd_config', return_value={'state_file': 'state.json'}), \
+                 patch('deploy_recovery.pd_guard.probe', side_effect=[{'state': condition}, KeyboardInterrupt]), \
+                 patch('deploy_recovery.pd_guard.stop_owned') as stop, \
+                 patch('deploy_recovery.pd_guard.write_state'), \
+                 patch('deploy_recovery.pd_guard.time.sleep'):
+                with self.assertRaises(KeyboardInterrupt):
+                    pd_guard.main()
+                stop.assert_not_called()
+
+    def test_conflict_is_detected_even_when_device_health_changes(self):
+        output = snapshot(alarm_card=4, busy_card=5)
+        with patch('deploy_recovery.deepinfer.inspect_target', return_value={'Running': True}), \
+             patch('deploy_recovery.deepinfer.command', side_effect=self.command(output)), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value='PID\n99\n'):
+            self.assertEqual(pd_guard.probe(self.config)['state'], 'NPU_CONFLICT')
+
+    def test_probe_reports_changed_device_without_stopping(self):
+        output = snapshot(alarm_card=4, busy_card=5)
+        with patch('deploy_recovery.deepinfer.inspect_target', return_value={'Running': True}), \
+             patch('deploy_recovery.deepinfer.command', side_effect=self.command(output)), \
+             patch('deploy_recovery.deepinfer.docker_command', return_value='PID\n42\n'), \
+             patch('deploy_recovery.pd_guard.stop_owned') as stop:
+            result = pd_guard.check_once(self.config)
+            self.assertEqual(result['state'], 'HEALTH_CHANGED')
+            self.assertEqual(result['health_changed_devices'], ['4', '5'])
+            stop.assert_not_called()
+
+    def test_fault_change_remains_visible_between_full_fault_checks(self):
+        args = SimpleNamespace(config=Path('unused.json'))
+        fault = {'state': 'FAULT_CHANGED', 'owned_npu_processes': 1, 'fault_changed_devices': ['4']}
+        normal = {'state': 'MONITORING', 'owned_npu_processes': 1}
+        with patch('argparse.ArgumentParser.parse_args', return_value=args), \
+             patch('deploy_recovery.pd.load_pd_config', return_value={'state_file': 'state.json'}), \
+             patch('deploy_recovery.pd_guard.probe', side_effect=[fault, normal, KeyboardInterrupt]), \
+             patch('deploy_recovery.pd_guard.time.monotonic', side_effect=[100, 100, 101, 102]), \
+             patch('deploy_recovery.pd_guard.stop_owned') as stop, \
+             patch('deploy_recovery.pd_guard.write_state') as write, \
+             patch('deploy_recovery.pd_guard.time.sleep'), patch('builtins.print') as log:
+            with self.assertRaises(KeyboardInterrupt):
+                pd_guard.main()
+            stop.assert_not_called()
+            self.assertEqual(write.call_args_list[1].args[1]['state'], 'FAULT_CHANGED')
+            self.assertEqual(write.call_args_list[1].args[1]['fault_changed_devices'], ['4'])
+            self.assertEqual(log.call_count, 1)
+
+    def test_conflict_is_rechecked_and_only_stops_when_confirmed(self):
+        with patch('deploy_recovery.pd_guard.probe', side_effect=[{'state': 'NPU_CONFLICT'},
+                                                                  {'state': 'HEALTH_CHANGED'}]), \
+             patch('deploy_recovery.pd_guard.time.sleep'), \
+             patch('deploy_recovery.pd_guard.stop_owned') as stop:
+            self.assertEqual(pd_guard.check_once(self.config)['state'], 'HEALTH_CHANGED')
+            stop.assert_not_called()
+        with patch('deploy_recovery.pd_guard.probe', side_effect=[{'state': 'NPU_CONFLICT'},
+                                                                  {'state': 'NPU_CONFLICT'}]), \
+             patch('deploy_recovery.pd_guard.time.sleep'), \
+             patch('deploy_recovery.pd_guard.stop_owned') as stop:
+            self.assertEqual(pd_guard.check_once(self.config),
+                             {'state': 'STOPPED_BY_GUARD', 'reason': 'NPU_CONFLICT'})
+            stop.assert_called_once_with(self.config)
 
     def test_safety_guard_does_not_probe_stopped_container(self):
         with patch('deploy_recovery.deepinfer.inspect_target', return_value={'Running': False}), \
