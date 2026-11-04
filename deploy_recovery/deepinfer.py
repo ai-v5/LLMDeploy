@@ -69,6 +69,9 @@ def docker_command(config, args, timeout=20):
 def target_fingerprint(config):
     fields = ('container_id', 'container_name', 'image_id', 'spec_sha256')
     data = {key: config.get(key) for key in fields}
+    for key in ('launcher_file', 'launcher_sha256', 'fault_receipt', 'fault_receipt_sha256'):
+        if key in config:
+            data[key] = config[key]
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -436,13 +439,13 @@ def step(config, previous, *, inspect=inspect_target, events=docker_events,
         return current
 
 
-def main():
+def main(*, config_loader=load_deepinfer_config, sample=machine_observation, start=None):
     import fcntl
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--rearm-stopped', action='store_true')
     args = parser.parse_args()
-    config = load_deepinfer_config(args.config)
+    config = config_loader(args.config)
     path = Path(config['state_file'])
     with path.with_suffix('.lock').open('a') as lock:
         try:
@@ -465,8 +468,8 @@ def main():
             time.sleep(delay)
         while True:
             began = time.monotonic()
-            previous = step(config, previous, persist=lambda s: write_state(path, s),
-                            start=lambda c: docker_command(c, ['start', c['container_id']], timeout=45))
+            previous = step(config, previous, sample=sample, persist=lambda s: write_state(path, s),
+                            start=start or (lambda c: docker_command(c, ['start', c['container_id']], timeout=45)))
             elapsed = time.monotonic() - began
             # No overlapping requests, no catch-up burst after a slow cycle.
             interval = next_interval(previous)

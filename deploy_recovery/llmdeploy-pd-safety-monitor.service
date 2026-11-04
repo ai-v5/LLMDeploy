@@ -1,0 +1,15 @@
+[Unit]
+Description=Monitor NPU ownership for the pinned vLLM PD container
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/llmdeploy-pd-recovery
+ExecStart=/usr/bin/python3 -B -m deploy_recovery.pd_guard --config /etc/llmdeploy-pd-recovery.json
+Restart=always
+RestartSec=10
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target docker.service
