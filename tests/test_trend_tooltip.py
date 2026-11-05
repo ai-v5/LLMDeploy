@@ -79,7 +79,7 @@ assert.equal(tooltip.hidden,true);assert.equal(svg.onpointermove,null);
 render({id:'input',field:'input',kind:'tokens',label:'输入'},points);
 svg=elements['chart-input-svg'];svg.onpointermove({clientX:100,clientY:130});assert.equal(tooltip.hidden,false);
 ctx.$=(id)=>elements[id]||(elements[id]=element('div'));
-Object.assign(ctx,{revision:0,pendingRefresh:null,activeExpiry:null,lastSnapshot:null,selected:'24h',
+Object.assign(ctx,{revision:0,pendingRefresh:null,activeExpiry:null,backendExpiry:null,lastSnapshot:null,selected:'24h',
   tables:{requests:{offset:0,size:20,sort:'finished',direction:'desc'},
           sessions:{offset:0,size:20,sort:'last_finished',direction:'desc'}},
   charts:[{id:'input'},{id:'output'},{id:'cache-rate'}],empty:()=>{},updatePager:()=>{},

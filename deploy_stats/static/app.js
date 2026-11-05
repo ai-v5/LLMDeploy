@@ -15,6 +15,7 @@ let pendingActive = null;
 let pendingTelemetry = null;
 let telemetrySnapshot = null;
 let telemetryExpiry = null;
+let backendExpiry = null;
 let telemetryNodePort = 'all';
 let telemetryOptionsKey = null;
 let latestActiveAsOf = 0;
@@ -49,13 +50,18 @@ function freshTelemetry(part, now) {
 function telemetryValues(data, port, now) {
   const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes : [];
   const read = (value, max = Infinity) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
+  const motor = data && data.kind === 'vllm-motor-telemetry';
   if (port === 'all') {
     const coverage = Object.fromEntries(['prefill', 'decode', 'mfu', 'hbm'].map((key) =>
-      [key, {valid: 0, total: nodes.length, span_seconds: null}]));
+      [key, {valid: 0, total: nodes.filter((node) => node && (!motor || key === 'hbm' ||
+        node.role === (key === 'mfu' ? 'prefill' : key))).length, span_seconds: null,
+      workers_valid: 0, workers_total: nodes.filter((node) => node && (!motor || key === 'hbm' ||
+        node.role === (key === 'mfu' ? 'prefill' : key))).reduce((sum, node) => sum + (node.expected_endpoints || 0), 0), partial: false}]));
     const empty = {prefill: null, decode: null, mfu: null, hbm: null, coverage};
     if (!nodes.length || new Set(nodes.map((node) => node && node.backend_port)).size !== nodes.length) return empty;
     const parts = (name, timestamp, duration, requireReady = true) => {
       return nodes.flatMap((node) => {
+        if (motor && name !== 'hbm' && node && node.role !== name) return [];
         if (!node || node.source_ok !== true || (requireReady && node.backend_ready !== true) || node.clock_ok !== true ||
             read(node.clock_uncertainty_seconds, 20) === null) return [];
         const part = freshTelemetry(node[name], now);
@@ -69,6 +75,8 @@ function telemetryValues(data, port, now) {
     const hbm = parts('hbm', 'sample_at', 'span_seconds', false);
     const recordCoverage = (key, values) => {
       coverage[key].valid = values.length;
+      coverage[key].workers_valid = values.reduce((sum, {part}) => sum + (part.valid_endpoints || 0), 0);
+      coverage[key].partial = values.some(({part}) => part.partial === true);
       if (values.length) coverage[key].span_seconds = Math.max(...values.map((x) => x.last)) - Math.min(...values.map((x) => x.first));
     };
     const sumRate = (key, values) => {
@@ -101,7 +109,7 @@ function telemetryValues(data, port, now) {
 
 function latestHistoricalSample(history, phase, now, bucketStart = null) {
   if (!history || !['prefill', 'decode'].includes(phase) || !Number.isFinite(now) ||
-      history.method !== 'deepinfer-log-step-approx-v1' || history.bucket_seconds !== 600 ||
+      !['deepinfer-log-step-approx-v1', 'vllm-counter-rate-v1'].includes(history.method) || history.bucket_seconds !== 600 ||
       !Array.isArray(history.points) || history.points.length !== 144) return null;
   const points = history.points;
   if (points.some((point, i) => !point || !Number.isSafeInteger(point.start) || point.start < 0 ||
@@ -111,10 +119,10 @@ function latestHistoricalSample(history, phase, now, bucketStart = null) {
     const point = points[i], value = point[`${phase}_tps`], samples = point[`${phase}_samples`];
     if (bucketStart !== null && point.start !== bucketStart) continue;
     const groups = history.aggregate ? point[`${phase}_groups`] : 1;
-    const total = history.aggregate ? history.group_count : 1;
+    const total = history.aggregate ? (history[`${phase}_group_count`] ?? history.group_count) : 1;
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0 &&
         Number.isSafeInteger(samples) && samples > 0 && Number.isSafeInteger(groups) && groups > 0 && groups <= total) {
-      return {value, samples, start: point.start, end: point.end, groups, total};
+      return {value, samples, start: point.start, end: point.end, groups, total, partial: point[`${phase}_partial`] === true};
     }
   }
   return null;
@@ -123,7 +131,8 @@ function latestHistoricalSample(history, phase, now, bucketStart = null) {
 function latestGroupHistory(data, nodes, port, phase, now) {
   if (!data || data.available !== true || data.history_available !== true || !Array.isArray(nodes) || !nodes.length ||
       new Set(nodes.map((node) => node && node.backend_port)).size !== nodes.length) return null;
-  const selected = port === 'all' ? nodes : nodes.filter((node) => node && node.backend_port === port);
+  const selected = (port === 'all' ? nodes : nodes.filter((node) => node && node.backend_port === port))
+    .filter((node) => data.kind !== 'vllm-motor-telemetry' || node.role === phase);
   if (!selected.length || (port !== 'all' && selected.length !== 1)) return null;
   const candidates = selected.flatMap((node) => {
     if (!node || node.source_ok !== true || !node.history || node.history.aggregate) return [];
@@ -136,7 +145,8 @@ function latestGroupHistory(data, nodes, port, phase, now) {
   const value = matching.reduce((sum, point) => sum + point.value, 0);
   if (!Number.isFinite(value)) return null;
   return {value, start: newest, end: newest + 600, groups: matching.length,
-    total: selected.length, samples: port === 'all' ? 1 : matching[0].samples};
+    total: selected.length, samples: port === 'all' ? 1 : matching[0].samples,
+    partial: matching.some((point) => point.partial)};
 }
 
 function historicalPrefillMfu(nodes, port, sample, now) {
@@ -168,6 +178,7 @@ function renderTelemetry(data) {
   if (telemetryExpiry) clearTimeout(telemetryExpiry);
   telemetryExpiry = null;
   const now = Date.now() / 1000;
+  const motor = data && data.kind === 'vllm-motor-telemetry';
   const nodes = data && data.available === true && Array.isArray(data.nodes) ? data.nodes.filter((item) => item && typeof item === 'object') : [];
   if (telemetryNodePort !== 'all' && !nodes.some((item) => item.backend_port === telemetryNodePort)) telemetryNodePort = 'all';
   const select = $('telemetry-node');
@@ -213,18 +224,21 @@ function renderTelemetry(data) {
     const period = `${dateTime.format(new Date(sample.start * 1000))}–${clock.format(new Date(sample.end * 1000))}`;
     const scope = `${sample.groups}/${sample.total} 组` +
       (telemetryNodePort === 'all' ? '' : ` · ${count(sample.samples)} 个采样`);
-    return `${method} · ${period} · 非实时 · ${scope}`;
+    return `${method} · ${period} · 非实时 · ${scope}${sample.partial ? ' · 部分数据' : ''}`;
   };
   const groupDetail = (key, method) => {
     const item = values.coverage[key];
     if (!item.total) return '采集未连接 · 组数未知';
     if (!item.valid) return `0/${item.total} 组有样本 · 暂无有效数据`;
-    const partial = item.valid < item.total ? ' · 部分数据' : '';
+    const partial = item.valid < item.total || item.partial ? ' · 部分数据' : '';
     const span = item.span_seconds > 30 ? ` · 时间跨度约 ${number.format(item.span_seconds)} s` : '';
-    return `${item.valid}/${item.total} 组有样本${partial} · ${method}${span}`;
+    const workers = motor && (key === 'prefill' || key === 'decode') ? ` · ${item.workers_valid}/${item.workers_total} worker` : '';
+    return `${item.valid}/${item.total} 组有样本${partial}${workers} · ${method}${span}`;
   };
-  const detail = (key, value, sample) => telemetryNodePort === 'all' ? groupDetail(key, '采样和') :
-    value === null ? '所选设备组暂无有效样本' : `日志 ${clock.format(new Date(sample.log_at * 1000))} 写出 · rank 近似和`;
+  const detail = (key, value, sample) => telemetryNodePort === 'all' ? groupDetail(key, motor ? '计数差 / 间隔' : '采样和') :
+    value === null ? '所选设备组暂无有效样本' : motor ?
+      `${sample.valid_endpoints}/${sample.expected_endpoints} worker · 计数差 / 间隔${sample.partial ? ' · 部分数据' : ''}` :
+      `日志 ${clock.format(new Date(sample.log_at * 1000))} 写出 · rank 近似和`;
   setTextIfPresent('live-prefill-samples', usePrefillHistory ? historicalDetail(previousPrefill, '历史采样均值') :
     detail('prefill', values.prefill, prefillSample));
   setTextIfPresent('live-decode-samples', useDecodeHistory ? historicalDetail(previousDecode, '历史采样均值') :
@@ -234,7 +248,8 @@ function renderTelemetry(data) {
       values.mfu === null ? '所选设备组暂无有效样本' : '引擎吞吐与模型假设换算');
   setTextIfPresent('live-hbm-detail', telemetryNodePort === 'all' ? groupDetail('hbm', '按卡数加权') :
     values.hbm === null ? '所选设备组暂无有效样本' : '所选设备组驱动读数的平均');
-  setTextIfPresent('telemetry-status', nodes.length ? `最近读取于 ${clock.format(new Date(data.sampled_at * 1000))}` : '采样未连接');
+  const topology = motor && data.topology_sources ? ` · 管理源 ${data.topology_sources.available}/${data.topology_sources.total}${data.topology_ambiguous ? ' · 拓扑待确认' : ''}` : '';
+  setTextIfPresent('telemetry-status', nodes.length ? `最近读取于 ${clock.format(new Date(data.sampled_at * 1000))}${topology}` : '采样未连接');
   const tbody = $('telemetry-body');
   if (!tbody) return;
   tbody.replaceChildren();
@@ -250,11 +265,12 @@ function renderTelemetry(data) {
     const timersFresh = prefill && prefill.step === timerStep || decode && decode.step === timerStep;
     const timer = (phase) => {
       const value = timersFresh && item.phase_timers && item.phase_timers[phase];
-      return value && value.mean_ms !== null ? `${number.format(value.mean_ms)} ms · ${value.ranks}/${value.expected_ranks} rank` : '—';
+      return value && value.mean_ms !== null ? motor ? `${number.format(value.mean_ms)} ms · ${count(value.samples)} 请求 · ${value.ranks}/${value.expected_ranks} worker` :
+        `${number.format(value.mean_ms)} ms · ${value.ranks}/${value.expected_ranks} rank` : '—';
     };
     cell(row, item.label || '未知实例');
-    cell(row, prefill ? `${measured(prefill.tokens_per_second)} · 日志 ${clock.format(new Date(prefill.log_at * 1000))}` : '—');
-    cell(row, decode ? `${measured(decode.tokens_per_second)} · 日志 ${clock.format(new Date(decode.log_at * 1000))}` : '—');
+    cell(row, prefill ? `${measured(prefill.tokens_per_second)} · ${motor ? '采样' : '日志'} ${clock.format(new Date(prefill.log_at * 1000))}` : '—');
+    cell(row, decode ? `${measured(decode.tokens_per_second)} · ${motor ? '采样' : '日志'} ${clock.format(new Date(decode.log_at * 1000))}` : '—');
     cell(row, prefill ? showMfu(prefill.mfu_estimate) : '—');
     cell(row, hbm ? `${number.format(hbm.mean_percent)}% · ${hbm.device_count} 卡` : '—');
     cell(row, timer('prefill'));
@@ -262,8 +278,8 @@ function renderTelemetry(data) {
     const engine = Boolean(prefill || decode);
     const device = Boolean(hbm);
     cell(row, item.duplicate_source ? '设备组重复，待核验' : !item.clock_ok ? '时钟不可用' :
-      !item.source_ok ? '引擎版本待核验' : item.backend_ready === false ? '后端未就绪' :
-      item.driver_ok === false ? '驱动版本待核验' :
+      !item.source_ok ? (motor ? '指标不可达或实例未就绪' : '引擎版本待核验') : item.backend_ready === false ? '后端未就绪' :
+      item.driver_ok === false && !motor ? '驱动版本待核验' :
       engine && device ? '引擎与设备有样本' : engine ? '仅引擎有样本' : device ? '仅设备有样本' : '来源已核验，暂无样本');
     tbody.appendChild(row);
   });
@@ -274,7 +290,17 @@ function renderTelemetry(data) {
   }
   const profile = selectedNode && selectedNode.assumptions;
   const assumption = profile ? `当前假设 ${number.format(profile.prefill_flops_per_token / 1e9)} GFLOP/输入 Token、${number.format(profile.peak_flops_per_device / 1e12)} TFLOP/s/卡；` : '';
-  setTextIfPresent('live-efficiency-note', `${assumption}Prefill-MFU 按引擎吞吐和模型假设估算，未计上下文 Attention 等，并非硬件算力实测。HBM 为设备级混合阶段采样，无法直接归因 Decode。`);
+  setTextIfPresent('live-efficiency-note', motor ? '当前 vLLM 指标未提供可用的真实阶段算力或 HBM 带宽归因；Prefill-MFU、Decode-MBU 和 HBM 利用率暂显示未知。' :
+    `${assumption}Prefill-MFU 按引擎吞吐和模型假设估算，未计上下文 Attention 等，并非硬件算力实测。HBM 为设备级混合阶段采样，无法直接归因 Decode。`);
+  setTextIfPresent('phase-source-note', motor ?
+    '吞吐为各 worker 在连续两次采样间的计数增量除以墙钟间隔并相加；Prefill 只计本地计算的输入，Decode 只计输出。采样前后核对拓扑，但无法保证两次读取之间没有变化；通过进程标识和计数回退检测重启，仍可能漏掉内部重启。缺失或冲突的样本不作为零。' :
+    '并发吞吐是相同日志 step 的各 DP rank 单步速率近似和。跨组视图对有效采样求和，缺失组不参与并标注覆盖数；利用率只对有效组加权。各组并非同时测量，两个阶段也可能来自不同时刻。');
+  setTextIfPresent('telemetry-source-note', motor ?
+    '阶段耗时为引擎请求阶段直方图的增量均值，不能还原单个会话；Prefill 和 Decode 分别取对应角色。HBM 阶段带宽尚未接入。' :
+    '步耗时来自引擎 CPU 计时日志，包含调度等开销；括号内为有有效计时的 rank 数。HBM 为驱动设备级百分比，不能可靠分离纯 Decode 阶段。');
+  setTextIfPresent('device-history-note', motor ?
+    '速度为每个 10 分钟区间内的 vLLM 计数差速率采样均值；跨组对当前设备组的有效采样求和。空心点表示部分采集；采集前或不可用期间留空。' :
+    '速度是各组日志步骤速率的区间采样均值之和；空心点表示部分设备组有样本。采集前或不可用期间留空。');
   const deadlines = nodes.flatMap((item) => [item.prefill, item.decode, item.hbm])
     .map((part) => part && part.valid_until).filter((value) => typeof value === 'number' && Number.isFinite(value) && value > now);
   if (deadlines.length) telemetryExpiry = setTimeout(() => renderTelemetry(telemetrySnapshot),
@@ -287,7 +313,7 @@ async function refreshTelemetry() {
   const timeout = setTimeout(() => controller.abort(), 4000);
   pendingTelemetry = (async () => {
     try {
-      const response = await fetch('/api/telemetry', {cache: 'no-store', signal: controller.signal});
+      const response = await fetch('/api/v5/telemetry', {cache: 'no-store', signal: controller.signal});
       if (!response.ok) throw new Error('telemetry unavailable');
       renderTelemetry(await response.json());
     } catch (_) {
@@ -332,8 +358,8 @@ function setupNavigation() {
   navigate();
 }
 
-function display(value, stats, digits = false) {
-  if (!stats.known && !stats.complete) return '—';
+function display(value, stats, digits = false, includePartial = true) {
+  if (!stats.known && !(includePartial && stats.partial) && !stats.complete) return '—';
   const prefix = stats.complete ? '' : '≥';
   return prefix + (digits ? number.format(value) : integer.format(value));
 }
@@ -439,9 +465,11 @@ function localValue(name, item, key, data) {
   if (name === 'active' && key === 'phase') return item.first_visible === null ? 0 : 1;
   if (name === 'active' && (key === 'hit_rate' || key === 'tps')) return null;
   if (name === 'backends' && key !== 'port' && !item.available) return null;
-  if (name === 'clients' && key === 'total') return item.known || data.totals.complete ? item.input + item.output : null;
-  if (name === 'clients' && ['input', 'output', 'cached', 'window_tps'].includes(key) && !item.known && !data.totals.complete) return null;
-  if (name === 'days' && key !== 'date' && !item.known && !item.complete) return null;
+  if (name === 'clients' && key === 'total') return item.known || item.partial || data.totals.complete ? item.input + item.output : null;
+  if (name === 'clients' && key === 'cached' && !item.known && !data.totals.complete) return null;
+  if (name === 'clients' && ['input', 'output', 'window_tps'].includes(key) && !item.known && !item.partial && !data.totals.complete) return null;
+  if (name === 'days' && key === 'cached' && !item.known && !item.complete) return null;
+  if (name === 'days' && key !== 'date' && !item.known && !item.partial && !item.complete) return null;
   return item[key] ?? null;
 }
 
@@ -472,15 +500,16 @@ function renderClients(data) {
   }
   clients.forEach((client) => {
     const row = document.createElement('tr');
-    const complete = data.totals.complete && !client.missing && !client.failed && !client.interrupted;
+    const complete = data.totals.complete && !client.partial && !client.missing && !client.failed && !client.interrupted;
     const view = {...client, complete, covered_seconds: data.totals.covered_seconds};
     const unknown = client.missing + client.failed + client.interrupted;
     cell(row, client.ip || '未知来源');
-    cell(row, unknown ? `${integer.format(client.requests)}（${integer.format(unknown)} 未计量）` : integer.format(client.requests));
+    const details = [client.partial ? `${integer.format(client.partial)} 部分` : '', unknown ? `${integer.format(unknown)} 未计量` : ''].filter(Boolean).join('，');
+    cell(row, details ? `${integer.format(client.requests)}（${details}）` : integer.format(client.requests));
     cell(row, display(client.input + client.output, view));
     cell(row, display(client.input, view));
     cell(row, display(client.output, view));
-    cell(row, display(client.cached, view));
+    cell(row, display(client.cached, view, false, false));
     cell(row, rate(client.request_tps));
     cell(row, client.window_tps === null ? '—' : display(client.window_tps, view, true));
     body.appendChild(row);
@@ -530,7 +559,7 @@ async function refreshActive() {
   pendingActive = controller;
   const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const response = await fetch('/api/active', {cache: 'no-store', signal: controller.signal});
+    const response = await fetch('/api/v5/active', {cache: 'no-store', signal: controller.signal});
     if (!response.ok) throw new Error('unavailable');
     const data = await response.json();
     if (currentView === 'overview' || currentView === 'active') renderActive(data);
@@ -543,25 +572,36 @@ async function refreshActive() {
 }
 
 function renderBackends(data) {
+  if (backendExpiry) clearTimeout(backendExpiry);
+  backendExpiry = null;
+  const now = Date.now() / 1000;
   const body = $('backends-body');
   body.replaceChildren();
   if (!data.backends.length) { empty(body, 7, '未配置后端原生指标'); return; }
   localPage('backends', data.backends, data).forEach((backend) => {
     const row = document.createElement('tr');
-    cell(row, String(backend.port));
-    if (!backend.available) {
+    cell(row, backend.label || String(backend.port));
+    const hasDeadline = Object.prototype.hasOwnProperty.call(backend, 'valid_until');
+    const current = backend.available && (!hasDeadline || typeof backend.valid_until === 'number' &&
+      Number.isFinite(backend.valid_until) && now < backend.valid_until);
+    if (!current) {
       cell(row, '不可用');
       for (let i = 0; i < 5; i++) cell(row, '—');
     } else {
-      cell(row, count(backend.running));
-      cell(row, count(backend.waiting));
-      cell(row, count(backend.workers_alive));
+      const prefix = backend.partial ? '≥' : '';
+      cell(row, backend.running === null || backend.running === undefined ? '—' : prefix + count(backend.running));
+      cell(row, backend.waiting === null || backend.waiting === undefined ? '—' : prefix + count(backend.waiting));
+      cell(row, backend.workers_expected === undefined ? count(backend.workers_alive) : `${count(backend.workers_alive)}/${count(backend.workers_expected)}`);
       cell(row, backend.admission_ready === 1 ? '就绪' : '未就绪');
-      cell(row, count(backend.input_total));
-      cell(row, percent(backend.hit_rate));
+      cell(row, backend.input_total === null || backend.input_total === undefined ? '—' : prefix + count(backend.input_total));
+      cell(row, `${percent(backend.hit_rate)}${backend.partial && backend.hit_rate !== null && backend.hit_rate !== undefined ? ' · 部分' : ''}`);
     }
     body.appendChild(row);
   });
+  const deadlines = data.backends.filter((backend) => backend.available && typeof backend.valid_until === 'number' &&
+    Number.isFinite(backend.valid_until) && backend.valid_until > now).map((backend) => backend.valid_until);
+  if (deadlines.length) backendExpiry = setTimeout(() => renderBackends(data),
+    Math.min(2147483647, Math.max(1, (Math.min(...deadlines) - now) * 1000 + 20)));
 }
 
 function renderSessions(data) {
@@ -575,10 +615,10 @@ function renderSessions(data) {
   if (!data.sessions.length) empty(summary, 11, '当前页暂无可识别会话');
   data.sessions.forEach((item) => {
     const row = document.createElement('tr');
-    const view = {known: item.known, complete: data.snapshot_complete && item.known === item.requests};
+    const view = {known: item.known, partial: item.partial, complete: data.snapshot_complete && item.known === item.requests};
     cell(row, fingerprint(item.session));
     cell(row, item.ips.length ? item.ips.join(', ') : '未知来源');
-    cell(row, `${count(item.requests)} / ${count(item.known)}`);
+    cell(row, `${count(item.requests)} / ${count(item.known)} 完整 / ${count(item.partial || 0)} 部分`);
     cell(row, item.input === null ? '—' : display(item.input, view));
     cell(row, item.output === null ? '—' : display(item.output, view));
     cell(row, percent(item.hit_rate));
@@ -590,7 +630,7 @@ function renderSessions(data) {
   const body = $('sessions-body');
   body.replaceChildren();
   if (!data.requests.length) empty(body, 12, '当前页暂无请求记录');
-  const states = {known: '已计量', missing: '未计量', failed: '失败', interrupted: '中断'};
+  const states = {known: '已计量', partial: '部分用量', missing: '未计量', failed: '失败', interrupted: '中断'};
   data.requests.forEach((item) => {
     const row = document.createElement('tr');
     cell(row, dateTime.format(new Date(item.finished * 1000)));
@@ -614,7 +654,7 @@ function renderDays(data) {
     cell(row, day.date);
     cell(row, display(day.input, day));
     cell(row, display(day.output, day));
-    cell(row, display(day.cached, day));
+    cell(row, display(day.cached, day, false, false));
     body.appendChild(row);
   });
 }
@@ -703,8 +743,9 @@ const charts = [
 function combinedDeviceHistory(data, nodes) {
   if (!data || data.available !== true || data.history_available !== true || !nodes.length ||
       new Set(nodes.map((node) => node && node.backend_port)).size !== nodes.length) return null;
+  const method = data.kind === 'vllm-motor-telemetry' ? 'vllm-counter-rate-v1' : 'deepinfer-log-step-approx-v1';
   const usable = nodes.flatMap((node) => {
-    if (!node || node.source_ok !== true || !node.history || node.history.method !== 'deepinfer-log-step-approx-v1' ||
+    if (!node || node.source_ok !== true || !node.history || node.history.method !== method ||
         node.history.bucket_seconds !== 600 || !Array.isArray(node.history.points) || node.history.points.length !== 144) return [];
     const buckets = new Map();
     for (const point of node.history.points) {
@@ -727,19 +768,21 @@ function combinedDeviceHistory(data, nodes) {
       combined[`${phase}_tps`] = total !== null && Number.isFinite(total) ? total : null;
       combined[`${phase}_samples`] = combined[`${phase}_tps`] === null ? 0 : 1;
       combined[`${phase}_groups`] = combined[`${phase}_tps`] === null ? 0 : valid.length;
+      combined[`${phase}_partial`] = valid.some((item) => item[`${phase}_partial`] === true);
     });
     return combined;
   });
   if (points.some((point) => point === null)) return null;
-  return {history: {method: 'deepinfer-log-step-approx-v1', bucket_seconds: 600,
-    aggregate: true, group_count: nodes.length, points}};
+  return {history: {method, bucket_seconds: 600, aggregate: true, group_count: nodes.length,
+    prefill_group_count: nodes.filter((node) => data.kind !== 'vllm-motor-telemetry' || node.role === 'prefill').length,
+    decode_group_count: nodes.filter((node) => data.kind !== 'vllm-motor-telemetry' || node.role === 'decode').length, points}};
 }
 
 function renderDeviceHistory(data, selectedNode) {
   const dropped = data && Number.isSafeInteger(data.history_dropped) && data.history_dropped > 0 ? data.history_dropped : 0;
   setTextIfPresent('device-history-health', dropped ? ` 历史队列已跳过 ${count(dropped)} 次采集。` : '');
   const history = data && data.available === true && data.history_available === true && selectedNode && selectedNode.history;
-  const points = history && history.method === 'deepinfer-log-step-approx-v1' && history.bucket_seconds === 600 &&
+  const points = history && ['deepinfer-log-step-approx-v1', 'vllm-counter-rate-v1'].includes(history.method) && history.bucket_seconds === 600 &&
     Array.isArray(history.points) && history.points.length === 144 ? history.points : null;
   ['prefill', 'decode'].forEach((phase) => {
     const svg = $(`chart-device-${phase}-svg`);
@@ -762,14 +805,15 @@ function renderDeviceHistory(data, selectedNode) {
     };
     valid.forEach((value, i) => {
       if (value === null) { draw(); return; }
-      const partial = history.aggregate && points[i][`${phase}_groups`] < history.group_count;
+      const groups = history[`${phase}_group_count`] ?? history.group_count;
+      const partial = points[i][`${phase}_partial`] === true || history.aggregate && points[i][`${phase}_groups`] < groups;
       if (segment.length && partial !== segmentPartial) draw();
       segmentPartial = partial;
       const x = i * 800 / (points.length - 1), y = 59 - value / peak * 50;
       segment.push(`${x.toFixed(2)},${y.toFixed(2)}`);
       const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: `${phase}${partial ? ' partial' : ''}`});
       const title = svgElement('title', {});
-      const scope = history.aggregate ? `${points[i][`${phase}_groups`]}/${history.group_count} 组采样均值之和${partial ? ' · 部分数据' : ''}` : `${count(points[i][`${phase}_samples`])} 个采样`;
+      const scope = history.aggregate ? `${points[i][`${phase}_groups`]}/${groups} 组采样均值之和${partial ? ' · 部分数据' : ''}` : `${count(points[i][`${phase}_samples`])} 个采样${partial ? ' · 部分数据' : ''}`;
       const period = `${dateTime.format(new Date(points[i].start * 1000))}–${dateTime.format(new Date(points[i].end * 1000))}`;
       title.textContent = `${period}：${speed(value)} · ${scope}`;
       descriptions[i] = `${period}\n${phase === 'prefill' ? 'Prefill' : 'Decode'} 并发吞吐：${speed(value)}\n${scope}`;
@@ -797,7 +841,7 @@ function renderPlot(chart, points) {
     label.textContent = '当前数据版本不支持';
     return;
   }
-  const values = points.map((point) => point.end - point.start >= 599.99 && (point.known || point.complete) &&
+  const values = points.map((point) => point.end - point.start >= 599.99 && (point.known || point.partial || point.complete) &&
     typeof point[field] === 'number' && Number.isFinite(point[field]) ? point[field] : null);
   const peak = Math.max(1, ...values.filter((value) => value !== null));
   const descriptions = Array(points.length).fill(null);
@@ -826,7 +870,7 @@ function renderPlot(chart, points) {
   attachTrendTooltip(svg, descriptions);
   const sum = (key) => points.reduce((total, point) => total + (point[key] || 0), 0);
   if (kind === 'tokens') {
-    const any = points.some((point) => point.known || point.complete);
+    const any = points.some((point) => point.known || point.partial || point.complete);
     const complete = points.filter((point) => point.end > point.start).every((point) => point.complete);
     label.textContent = any ? `${complete ? '' : '≥'}${integer.format(sum(field))}` : '暂无数据';
   } else if (kind === 'hit') {
@@ -842,18 +886,18 @@ function renderPlot(chart, points) {
 function render(data) {
   const stats = data.totals;
   $('status-dot').classList.toggle('live', data.collector_live);
-  $('status-label').textContent = data.collector_live ? '入口采集运行中' : '入口采集未连接';
+  $('status-label').textContent = data.collector_live ? '采集器心跳正常' : '入口采集未连接';
   $('updated').textContent = `数据查询于 ${clock.format(new Date(data.as_of * 1000))}`;
   $('total-usage').textContent = display(stats.input + stats.output, stats);
   $('total-input').textContent = display(stats.input, stats);
   $('total-output').textContent = display(stats.output, stats);
-  $('total-cached').textContent = display(stats.cached, stats);
+  $('total-cached').textContent = display(stats.cached, stats, false, false);
   $('total-tps').textContent = stats.window_tps === null ? '—' : display(stats.window_tps, stats, true);
-  $('cache-detail').textContent = stats.hit_rate === null ? '按输入 Token 加权命中率 —' : `按输入 Token 加权命中率 ${number.format(stats.hit_rate * 100)}%`;
+  $('cache-detail').textContent = stats.hit_rate === null ? '有缓存明细的请求命中率 —' : `有缓存明细的请求按输入 Token 加权 ${number.format(stats.hit_rate * 100)}%`;
   setTextIfPresent('overview-prefill-wait', seconds(stats.first_mean));
   setTextIfPresent('overview-hit-rate', percent(stats.hit_rate));
   setTextIfPresent('overview-wait-samples', `${count(stats.first_samples)} 个可见增量样本`);
-  setTextIfPresent('overview-hit-samples', `按输入 Token 加权 · ${count(stats.known)} 个已计量请求`);
+  setTextIfPresent('overview-hit-samples', `按输入 Token 加权 · ${count(stats.known)} 个有缓存明细的请求`);
   $('success-rate').textContent = percent(stats.success_rate);
   $('success-detail').textContent = `${count(stats.successes)} / ${count(stats.classified)} 个可判定请求`;
   $('requests-rate').textContent = !stats.covered_seconds || stats.requests_per_second === null ? '—' :
@@ -877,7 +921,7 @@ function render(data) {
   } else if (stats.overload_tracked_runs) {
     overload = ` · 相关采集周期内代理超载降级已记录 ${integer.format(stats.overload_rejected)} 次`;
   }
-  notice.textContent = `${collectorNotice}已计量 ${integer.format(stats.known)} 个请求 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期未完整计入 ${integer.format(stats.dropped)} 个${overload} · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计采集器已写盘的请求记录；Token 用量取可识别的最终 usage。入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
+  notice.textContent = `${collectorNotice}完整用量 ${integer.format(stats.known)} 个请求 · 仅输入/输出 ${integer.format(stats.partial || 0)} 个 · 未计量 ${integer.format(unknown)} 个 · 未知来源 ${integer.format(stats.unknown_source)} 个 · 未正常结束或失联 ${integer.format(stats.unclean_runs)} 次 · 相关采集周期未完整计入 ${integer.format(stats.dropped)} 个${overload} · 采集进程运行覆盖 ${number.format(coverage)}%。仅统计采集器已写盘的请求记录；缓存命中率仅使用有缓存明细的请求。入口回退、网关内部重试及取消时的消耗可能无法观测，因此不是后端物理总消耗。${stats.complete ? '' : ' ≥ 表示已观测下限；无覆盖不视为零。'}`;
   charts.forEach((chart) => renderPlot(chart, data.series_24h));
   renderClients(data);
   renderDays(data);
@@ -903,7 +947,7 @@ async function refresh() {
       query.set('snapshot_at', String(lastSnapshot.at));
       query.set('snapshot_id', String(lastSnapshot.id));
     }
-    const response = await fetch(`/api/stats?${query}`, {cache: 'no-store', signal: controller.signal});
+    const response = await fetch(`/api/v5/stats?${query}`, {cache: 'no-store', signal: controller.signal});
     if (!response.ok) throw new Error('unavailable');
     const data = await response.json();
     if (current === revision) {
@@ -914,6 +958,8 @@ async function refresh() {
     if (current !== revision) return;
     if (activeExpiry) clearTimeout(activeExpiry);
     activeExpiry = null;
+    if (backendExpiry) clearTimeout(backendExpiry);
+    backendExpiry = null;
     $('status-dot').classList.remove('live');
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';

@@ -64,7 +64,8 @@ class _Observer:
                     self.recorder.first_output(self.request_id, self.first)
             self.capture = SafeCapture(self.protocol, content_type, content_encoding, first_output,
                                        max_frame=MAX_CAPTURE_FRAME, max_structure=MAX_CAPTURE_STRUCTURE,
-                                       max_delta=MAX_CAPTURE_DELTA)
+                                       max_delta=MAX_CAPTURE_DELTA,
+                                       allow_partial=getattr(self.recorder, 'source', None) == 'gateway-inprocess-v1')
 
     def chunk(self, data):
         if self.failed or self.capture is None:
@@ -94,7 +95,8 @@ class _Observer:
             elif self.completed:
                 if not self.failed and self.capture is not None:
                     values = self.capture.finish()
-                state = 'known' if values is not None else 'missing'
+                state = ('partial' if values is not None and values[2] is None else
+                         'known' if values is not None else 'missing')
         except Exception:
             self.fail()
             state, values = 'missing', None
@@ -103,7 +105,7 @@ class _Observer:
                 self.budget.release(self.reserved)
                 self.reserved = 0
             self.capture = None
-        prompt, output, cached = values if state == 'known' else (None, None, None)
+        prompt, output, cached = values if state in ('known', 'partial') else (None, None, None)
         try:
             try:
                 self.recorder.submit((time.time(), self.source, max(0, time.perf_counter() - self.started),
@@ -158,13 +160,13 @@ def make_handler(base_handler, recorder, *, budget=None):
     return InstrumentedHandler
 
 
-def install(module, database):
+def install(module, database, *, source=None):
     """Enable capture on this gateway module; unavailable storage fails open."""
     if (getattr(module.Handler, '_llm_stats_wrapped', False) or
             not callable(getattr(module.Handler, '_observe', None))):
         return None
     try:
-        recorder = Recorder(database)
+        recorder = Recorder(database, source=source)
     except Exception:
         return None
     try:

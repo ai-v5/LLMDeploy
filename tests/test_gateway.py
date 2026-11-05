@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import socket
 import socketserver
+import sys
 import tempfile
 import threading
 import unittest
@@ -12,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from deploy_gateway.routing import SessionRouter, Unavailable
-from deploy_gateway.server import Gateway
+from deploy_gateway.server import Gateway, main
 
 
 class Model(BaseHTTPRequestHandler):
@@ -54,6 +55,97 @@ class Model(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(value)))
         self.end_headers()
         self.wfile.write(value)
+
+
+class Readiness(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.server.paths.append(self.path)
+        self.send_response(self.server.status)
+        self.send_header('Content-Length', str(len(self.server.body)))
+        self.end_headers()
+        try:
+            self.wfile.write(self.server.body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class GatewayCliTests(unittest.TestCase):
+    def test_statistics_paths_cannot_overlap_gateway_state_or_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = ['gateway', '--key-store', str(root/'keys'), '--bindings-file', str(root/'bindings'),
+                    '--backend-state', str(root/'state.json'), '--control-file', str(root/'control')]
+            for database in (root/'state.json', root/'state.new', root/'bindings.new', root/'control.new', root/'keys'):
+                with self.subTest(database=database), patch.object(sys, 'argv', base + ['--statistics-database', str(database)]), \
+                        patch('deploy_stats.inprocess.install') as install, patch('sys.stderr'), self.assertRaises(SystemExit):
+                    main()
+                install.assert_not_called()
+                self.assertFalse(database.exists())
+            database = root/'metrics'
+            sidecar_state = root/'metrics-wal'
+            base = ['gateway', '--key-store', str(root/'keys'), '--bindings-file', str(root/'bindings'),
+                    '--backend-state', str(sidecar_state), '--statistics-database', str(database)]
+            with patch.object(sys, 'argv', base), patch('deploy_stats.inprocess.install') as install, \
+                    patch('sys.stderr'), self.assertRaises(SystemExit):
+                main()
+            install.assert_not_called()
+            self.assertFalse(database.exists())
+
+    def test_statistics_database_cannot_be_hardlink_to_runtime_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, database = root/'state.json', root/'usage.sqlite3'
+            state.write_text('synthetic state', encoding='utf-8')
+            try:
+                database.hardlink_to(state)
+            except OSError:
+                self.skipTest('Hard links are not supported by the test filesystem')
+            argv = ['gateway', '--key-store', str(root/'keys'), '--bindings-file', str(root/'bindings'),
+                    '--backend-state', str(state), '--statistics-database', str(database)]
+            with patch.object(sys, 'argv', argv), patch('deploy_stats.inprocess.install') as install, \
+                    patch('sys.stderr'), self.assertRaises(SystemExit):
+                main()
+            install.assert_not_called()
+            self.assertEqual(state.read_text(encoding='utf-8'), 'synthetic state')
+
+    def test_statistics_recorder_is_tagged_and_closed(self):
+        argv = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
+                '--backend-state', 'state.json', '--statistics-database', 'usage.sqlite3']
+        with patch.object(sys, 'argv', argv), patch('deploy_gateway.server.Gateway') as gateway, \
+                patch('deploy_stats.inprocess.install') as install, patch('builtins.print'):
+            main()
+        self.assertEqual(install.call_args.kwargs['source'], 'gateway-inprocess-v1')
+        install.return_value.close.assert_called_once()
+        gateway.return_value.server_close.assert_called_once()
+
+    def test_statistics_setup_failure_does_not_stop_gateway(self):
+        argv = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
+                '--backend-state', 'state.json', '--statistics-database', 'usage.sqlite3']
+        with patch.object(sys, 'argv', argv), patch('deploy_gateway.server.Gateway') as gateway, \
+                patch('deploy_stats.inprocess.install', side_effect=OSError), patch('builtins.print'):
+            main()
+        gateway.return_value.serve_forever.assert_called_once()
+
+    def test_repeated_management_mappings_reach_gateway(self):
+        argv = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
+                '--backend-state', 'state.json', '--backend-port', '19001', '--backend-port', '19002',
+                '--backend-readiness-port', '19001=19101', '--backend-readiness-port', '19002=19102']
+        with patch.object(sys, 'argv', argv), patch('deploy_gateway.server.Gateway') as gateway, patch('builtins.print'):
+            main()
+        self.assertEqual(gateway.call_args.kwargs['backend_readiness_ports'], {19001: 19101, 19002: 19102})
+        gateway.return_value.serve_forever.assert_called_once()
+
+    def test_duplicate_or_malformed_management_mapping_is_rejected(self):
+        base = ['gateway', '--key-store', 'keys.json', '--bindings-file', 'bindings.json',
+                '--backend-state', 'state.json']
+        for suffix in [['--backend-readiness-port', '19001'],
+                       ['--backend-readiness-port', '19001=19101', '--backend-readiness-port', '19001=19102']]:
+            with self.subTest(suffix=suffix), patch.object(sys, 'argv', base + suffix), \
+                    patch('sys.stderr'), self.assertRaises(SystemExit):
+                main()
 
 
 class GatewayTests(unittest.TestCase):
@@ -131,6 +223,53 @@ class GatewayTests(unittest.TestCase):
             self.assertNotIn(private, (self.root / 'state.json').read_text())
         self.assertEqual(self.request('bad', token='incorrect-placeholder')[0], 401)
         self.assertEqual(sum(len(m.calls) for m in self.models), 3)
+
+    def test_management_readiness_controls_routing_and_recovery(self):
+        management = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        management.daemon_threads = True
+        management.status, management.body, management.paths = 200, b'{"ready":false}', []
+        self.start(management)
+        gateway = Gateway(('127.0.0.1', 0), self.store, *self.ports,
+                          self.root / 'motor-state.json', self.root / 'motor-bindings.json', 3,
+                          backend_readiness_ports={self.ports[0]: management.server_port})
+        gateway.backends.stop.set()
+        gateway.backends.thread.join(3)
+        self.start(gateway)
+
+        self.assertFalse(gateway.backends.healthy[self.ports[0]])
+        self.assertTrue(gateway.backends.healthy[self.ports[1]])
+        self.assertEqual(self.request('management-unready', gateway=gateway)[1], str(self.ports[1]))
+        self.assertEqual(management.paths, ['/readiness'])
+
+        management.body = b'{"ready":true}'
+        gateway.backends.probe()
+        self.assertFalse(gateway.backends.healthy[self.ports[0]])
+        gateway.backends.probe()
+        self.assertTrue(gateway.backends.healthy[self.ports[0]])
+
+        for status, body in [(200, b'{"ready":false}'), (200, b'{"ready":1}'),
+                             (200, b'{"ready":"true"}'), (200, b'[]'),
+                             (200, b'invalid'), (200, b' ' * 65537),
+                             (503, b'{"ready":true}')]:
+            with self.subTest(status=status, body=body[:30]):
+                management.status, management.body = status, body
+                gateway.backends.probe()
+                self.assertFalse(gateway.backends.healthy[self.ports[0]])
+                self.assertTrue(gateway.backends.healthy[self.ports[1]])
+                management.status, management.body = 200, b'{"ready":true}'
+                gateway.backends.probe()
+                gateway.backends.probe()
+                self.assertTrue(gateway.backends.healthy[self.ports[0]])
+
+    def test_invalid_management_readiness_mapping_is_rejected(self):
+        bad_mappings = [{self.ports[0]: 0}, {self.ports[0]: 65536},
+                        {self.ports[0]: True}, {self.ports[0]: '1234'},
+                        {0: 1234}, {True: 1234}]
+        for mapping in bad_mappings:
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                Gateway(('127.0.0.1', 0), self.store, *self.ports,
+                        self.root / 'invalid-state.json', self.root / 'invalid-bindings.json',
+                        backend_readiness_ports=mapping)
 
     def test_transport_failover_persists_after_recovery_and_restart(self):
         first = self.request('sticky')

@@ -245,6 +245,87 @@ class InProcessCaptureTests(unittest.TestCase):
             self.assertEqual((value['totals']['known'], value['totals']['input'], value['totals']['output'],
                               value['totals']['cached']), (expected, 100*expected, 7*expected, 60*expected))
 
+    def test_motor_readiness_tagged_capture_and_dashboard_end_to_end(self):
+        class Readiness(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                body = b'{"ready":true}'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        readiness = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        self.start(readiness)
+        database = self.root/'motor-usage.sqlite3'
+        old_handler = gateway_module.Handler
+        recorder = install(gateway_module, database, source='gateway-inprocess-v1')
+        self.assertIsNotNone(recorder)
+        self.addCleanup(recorder.close)
+        try:
+            gateway = gateway_module.Gateway(('127.0.0.1', 0), self.keys,
+                state_path=self.root/'motor-state.json', bindings_file=self.root/'motor-bindings.json',
+                backend_ports=[self.model.server_port], backend_managed_affinity=True,
+                backend_readiness_ports={self.model.server_port: readiness.server_port})
+        finally:
+            gateway_module.Handler = old_handler
+        self.start(gateway)
+        with patch('deploy_stats.web.MotorCollector') as collector:
+            collector.return_value.snapshot.return_value = {'sampled_at': time.time(), 'nodes': []}
+            dashboard = Dashboard(0, database, motor_management_ports=[readiness.server_port])
+        self.start(dashboard)
+        headers = {'Authorization': 'Bearer '+self.key, 'Content-Type': 'application/json',
+                   'X-Forwarded-For': '192.0.2.4'}
+        self.assertEqual(self.request(gateway, b'{}', headers), (200, STREAM))
+        self.assertTrue(recorder.flush())
+        deadline = time.monotonic() + 4
+        value = report(database, 'total', source='gateway-inprocess-v1')
+        while value['totals']['known'] < 1 and time.monotonic() < deadline:
+            time.sleep(.02)
+            value = report(database, 'total', source='gateway-inprocess-v1')
+        self.assertTrue(value['collector_live'])
+        self.assertEqual((value['totals']['input'], value['totals']['output'], value['totals']['cached']), (100, 7, 60))
+        conn = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=5)
+        try:
+            conn.request('GET', '/api/v5/stats?window=total')
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload['collector_live'])
+            self.assertEqual(payload['requests'][0]['ip'], '192.0.2.4')
+            self.assertEqual(payload['totals']['known'], 1)
+        finally:
+            conn.close()
+
+    def test_vllm_stream_without_cache_details_records_partial_usage(self):
+        old_handler = gateway_module.Handler
+        recorder = install(gateway_module, self.root/'partial-usage.sqlite3', source='gateway-inprocess-v1')
+        self.assertIsNotNone(recorder)
+        self.addCleanup(recorder.close)
+        try:
+            gateway = gateway_module.Gateway(('127.0.0.1', 0), self.keys,
+                state_path=self.root/'partial-state.json', bindings_file=self.root/'partial-bindings.json',
+                backend_ports=[self.model.server_port], backend_managed_affinity=True)
+        finally:
+            gateway_module.Handler = old_handler
+        self.start(gateway)
+        partial_stream = (b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\n'
+                          b'data: {"usage":{"prompt_tokens":120,"completion_tokens":20,"total_tokens":140}}\n\n'
+                          b'data: [DONE]\n\n')
+        headers = {'Authorization': 'Bearer '+self.key, 'Content-Type': 'application/json',
+                   'X-Forwarded-For': '192.0.2.4'}
+        with patch(f'{__name__}.STREAM', partial_stream):
+            self.assertEqual(self.request(gateway, b'{}', headers), (200, partial_stream))
+        deadline = time.monotonic() + 4
+        value = report(recorder.path, 'total', source='gateway-inprocess-v1')
+        while value['totals']['partial'] < 1 and time.monotonic() < deadline:
+            time.sleep(.02)
+            value = report(recorder.path, 'total', source='gateway-inprocess-v1')
+        self.assertEqual((value['totals']['partial'], value['totals']['input'], value['totals']['output']), (1, 120, 20))
+        self.assertIsNone(value['totals']['hit_rate'])
+        self.assertIsNone(value['requests'][0]['cached'])
+
     @unittest.skipUnless(os.environ.get('LLMDEPLOY_CADDY'), 'Set LLMDEPLOY_CADDY for Caddy integration')
     def test_caddy_reload_keeps_one_active_stream(self):
         # This checks an active stream, not idle keep-alive connections.

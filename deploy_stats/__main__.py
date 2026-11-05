@@ -18,9 +18,13 @@ def main():
     dashboard.add_argument('--database', type=Path, required=True)
     dashboard.add_argument('--backend-port', type=int, action='append', default=[])
     dashboard.add_argument('--telemetry-port', type=int)
+    dashboard.add_argument('--motor-management-port', type=int, action='append', default=[])
+    dashboard.add_argument('--motor-history-database', type=Path)
     args = parser.parse_args()
     server = (Proxy(args.port, args.upstream_port, args.database) if args.command == 'proxy'
-              else Dashboard(args.port, args.database, args.backend_port, args.telemetry_port))
+              else Dashboard(args.port, args.database, args.backend_port, args.telemetry_port,
+                             motor_management_ports=args.motor_management_port,
+                             motor_history_path=args.motor_history_database))
     print(f'Listening on http://127.0.0.1:{server.server_port}', flush=True)
     try:
         server.serve_forever()

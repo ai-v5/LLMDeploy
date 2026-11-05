@@ -5,6 +5,82 @@ from pathlib import Path
 
 
 class DashboardEfficiencyTests(unittest.TestCase):
+    def test_motor_backend_row_expires_without_waiting_for_next_poll(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function renderBackends('), end = source.indexOf('\n}\n', start);
+assert(start >= 0 && end > start);
+let now = 100, timer;
+const body = {children: [], replaceChildren() {this.children=[];}, appendChild(row) {this.children.push(row);}};
+const context = {backendExpiry: null, Date: class extends Date {static now() {return now * 1000;}},
+  $: () => body, localPage: (_name, rows) => rows, document: {createElement: () => ({cells: []})},
+  cell: (row, value) => row.cells.push(value), count: String, percent: String, empty: () => {},
+  clearTimeout: () => {}, setTimeout: (fn) => {timer=fn; return 1;}};
+const render = vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
+const data = {backends: [{port: 1, label: 'fixture', available: true, valid_until: 105,
+  running: 4, waiting: 0, workers_alive: 1, workers_expected: 1, admission_ready: 1, input_total: 10, hit_rate: .5}]};
+render(data); assert.equal(body.children[0].cells[1], '4');
+now = 106; timer(); assert.equal(body.children[0].cells[1], '不可用');
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, encoding='utf-8', timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_partial_usage_displays_input_output_but_not_unknown_cache(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('function display('), end = source.indexOf('\n}\n', start);
+assert(start >= 0 && end > start);
+const display = vm.runInNewContext('(' + source.slice(start, end + 2) + ')',
+  {number: {format: String}, integer: {format: String}});
+const partial = {known: 0, partial: 1, complete: false};
+assert.equal(display(120, partial), '≥120');
+assert.equal(display(20, partial), '≥20');
+assert.equal(display(0, partial, false, false), '—');
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_motor_rates_count_only_relevant_phase_groups_and_label_partial_workers(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('Node.js is required to validate dashboard calculations')
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+function extract(name, context) {
+  const start = source.indexOf(`function ${name}(`), end = source.indexOf('\n}\n', start);
+  assert(start >= 0 && end > start); return vm.runInNewContext('(' + source.slice(start, end + 2) + ')', context);
+}
+const context = {};
+context.freshTelemetry = extract('freshTelemetry', context);
+const values = extract('telemetryValues', context);
+const base = {source_ok: true, backend_ready: true, clock_ok: true, clock_uncertainty_seconds: 0, expected_endpoints: 8};
+const part = (rate, valid, partial=false) => ({tokens_per_second: rate, valid_endpoints: valid,
+  expected_endpoints: 8, partial, log_at: 100, log_skew_seconds: 30, valid_until: 150});
+const data = {available: true, kind: 'vllm-motor-telemetry', nodes: [
+  {...base, backend_port: 1, role: 'prefill', prefill: part(20, 7, true)},
+  {...base, backend_port: 2, role: 'decode', decode: part(70, 8)}]};
+const result = values(data, 'all', 110);
+assert.equal(result.prefill, 20); assert.equal(result.decode, 70);
+assert.equal(result.coverage.prefill.total, 1); assert.equal(result.coverage.decode.total, 1);
+assert.equal(result.coverage.prefill.workers_valid, 7); assert.equal(result.coverage.prefill.workers_total, 8);
+assert.equal(result.coverage.prefill.partial, true); assert.equal(result.coverage.decode.partial, false);
+assert.equal(result.mfu, null); assert.equal(result.hbm, null);
+'''
+        source = Path(__file__).resolve().parents[1]/'deploy_stats/static/app.js'
+        result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_old_and_new_phase_cards_cannot_cross_write(self):
         from deploy_stats.web import ASSETS
         root = Path(__file__).resolve().parents[1]/'deploy_stats/static'
@@ -16,8 +92,9 @@ class DashboardEfficiencyTests(unittest.TestCase):
         for legacy in legacy_ids:
             self.assertNotIn(f'id="{legacy}"', html)
             self.assertNotIn(f"'{legacy}'", script)
-        self.assertIn('/app-telemetry-v4.js', html)
-        self.assertIn('/app-telemetry-v4.js', ASSETS)
+        self.assertIn('/app-telemetry-v5.js', html)
+        self.assertIn('/app-telemetry-v5.js', ASSETS)
+        self.assertNotIn('/app-telemetry-v4.js', ASSETS)
         self.assertNotIn('/app-telemetry-v3.js', ASSETS)
         self.assertNotIn('/app-telemetry-v2.js', ASSETS)
         self.assertIn('chart-device-prefill', html)

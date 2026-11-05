@@ -7,19 +7,21 @@ import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
 from .backends import read_backend, read_telemetry
+from .motor_metrics import MotorCollector, MotorHistory
 from .report import active_report, report
 
 STATIC = Path(__file__).resolve().parent / 'static'
 ASSETS = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.css': ('app.css', 'text/css; charset=utf-8'),
-          '/app-telemetry-v4.js': ('app.js', 'text/javascript; charset=utf-8')}
+          '/app-telemetry-v5.js': ('app.js', 'text/javascript; charset=utf-8')}
 
 
 class Dashboard(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, port, database, backend_ports=(), telemetry_port=None):
+    def __init__(self, port, database, backend_ports=(), telemetry_port=None, *,
+                 motor_management_ports=(), motor_history_path=None):
         if type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('INVALID_PORT')
         self.database = Path(database)
@@ -29,7 +31,21 @@ class Dashboard(ThreadingHTTPServer):
         if telemetry_port is not None and (type(telemetry_port) is not int or not 1 <= telemetry_port <= 65535):
             raise ValueError('INVALID_TELEMETRY_PORT')
         self.telemetry_port = telemetry_port
+        if motor_management_ports and (backend_ports or telemetry_port is not None):
+            raise ValueError('MIXED_BACKEND_SOURCES')
+        if motor_history_path is not None and not motor_management_ports:
+            raise ValueError('MOTOR_SOURCE_REQUIRED')
+        self.motor_collector = None
         super().__init__(('127.0.0.1', port), Handler)
+        try:
+            history = MotorHistory(motor_history_path) if motor_history_path is not None else None
+            self.motor_collector = (MotorCollector(motor_management_ports, history=history)
+                                    if motor_management_ports else None)
+            if self.motor_collector is not None:
+                self.motor_collector.start()
+        except Exception:
+            super().server_close()
+            raise
 
     def server_bind(self):
         if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
@@ -38,6 +54,16 @@ class Dashboard(ThreadingHTTPServer):
 
     def handle_error(self, request, client_address):
         pass
+
+    def server_close(self):
+        if self.motor_collector is not None:
+            self.motor_collector.close()
+        super().server_close()
+
+    def motor_snapshot(self):
+        value = self.motor_collector.snapshot()
+        value['available'] = value.get('sampled_at', 0) > 0
+        return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -69,6 +95,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send(403, b'Forbidden', 'text/plain; charset=utf-8')
             return
         url = urlsplit(self.path)
+        if (self.server.motor_collector is not None and
+                url.path in ('/api/telemetry', '/api/active', '/api/stats')):
+            self.send(409, b'{"error":"DASHBOARD_RELOAD_REQUIRED"}', 'application/json; charset=utf-8')
+            return
         if url.path in ASSETS:
             name, media = ASSETS[url.path]
             try:
@@ -76,25 +106,28 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self.send(503, b'Unavailable', 'text/plain; charset=utf-8')
             return
-        if url.path == '/api/telemetry':
+        if url.path in ('/api/telemetry', '/api/v5/telemetry'):
             if url.query:
                 self.send(400, b'{"error":"INVALID_TELEMETRY_QUERY"}', 'application/json; charset=utf-8')
                 return
-            body = json.dumps(read_telemetry(self.server.telemetry_port), allow_nan=False, separators=(',', ':')).encode()
+            value = (self.server.motor_snapshot() if self.server.motor_collector is not None
+                     else read_telemetry(self.server.telemetry_port))
+            body = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
             self.send(200, body, 'application/json; charset=utf-8')
             return
-        if url.path == '/api/active':
+        if url.path in ('/api/active', '/api/v5/active'):
             if url.query:
                 self.send(400, b'{"error":"INVALID_ACTIVE_QUERY"}', 'application/json; charset=utf-8')
                 return
             try:
-                value = active_report(self.server.database)
+                value = active_report(self.server.database, source='gateway-inprocess-v1'
+                                      if self.server.motor_collector is not None else None)
                 body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
                 self.send(200, body, 'application/json; charset=utf-8')
             except (ValueError, sqlite3.Error, OSError, OverflowError):
                 self.send(503, b'{"error":"STATS_UNAVAILABLE"}', 'application/json; charset=utf-8')
             return
-        if url.path == '/api/stats':
+        if url.path in ('/api/stats', '/api/v5/stats'):
             values = parse_qs(url.query, keep_blank_values=True)
             defaults = {'window': '24h', 'offset': '0', 'limit': '100', 'sort': 'finished', 'direction': 'desc',
                         'session_offset': '0', 'session_limit': None, 'session_sort': 'last_finished',
@@ -120,8 +153,25 @@ class Handler(BaseHTTPRequestHandler):
                                request_sort=params['sort'], request_dir=params['direction'],
                                session_sort=params['session_sort'], session_dir=params['session_direction'],
                                snapshot_at=float(params['snapshot_at']) if params['snapshot_at'] is not None else None,
-                               snapshot_id=int(params['snapshot_id']) if params['snapshot_id'] is not None else None)
-                value['backends'] = [read_backend(port) for port in self.server.backend_ports]
+                               snapshot_id=int(params['snapshot_id']) if params['snapshot_id'] is not None else None,
+                               source='gateway-inprocess-v1' if self.server.motor_collector is not None else None)
+                if self.server.motor_collector is not None:
+                    value['collector_source'] = 'gateway-inprocess-v1'
+                if self.server.motor_collector is None:
+                    value['backends'] = [read_backend(port) for port in self.server.backend_ports]
+                else:
+                    value['backends'] = []
+                    for node in self.server.motor_snapshot().get('nodes', []):
+                        metrics = node.get('engine_metrics') or {}
+                        value['backends'].append({
+                            'port': node['backend_port'], 'label': node['label'],
+                            'available': node['source_ok'] and bool(metrics), 'running': metrics.get('running'),
+                            'waiting': metrics.get('waiting'), 'workers_alive': metrics.get('observed_endpoints'),
+                            'workers_expected': metrics.get('expected_endpoints'),
+                            'admission_ready': int(node['backend_ready']), 'input_total': metrics.get('input_total'),
+                            'hit_rate': metrics.get('hit_rate'), 'partial': metrics.get('partial', True),
+                            'valid_until': metrics.get('valid_until'),
+                        })
                 body = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
                 self.send(200, body, 'application/json; charset=utf-8')
             except ValueError:

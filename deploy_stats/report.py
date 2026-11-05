@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-from .store import IDENTITY, SCHEMA
+from .store import IDENTITY, SCHEMA, partial_schema_available
 
 TZ = timezone(timedelta(hours=8))
 BUCKET_SECONDS = 600
@@ -42,20 +42,23 @@ def _coverage(runs, start, end, now):
 
 
 def _counts(rows):
-    out = {'requests': 0, 'known': 0, 'missing': 0, 'failed': 0, 'interrupted': 0,
+    out = {'requests': 0, 'known': 0, 'partial': 0, 'missing': 0, 'failed': 0, 'interrupted': 0,
            'input': 0, 'output': 0, 'cached': 0, 'elapsed': 0.0}
+    hit_input = 0
     for row in rows:
         state, prompt, output, cached, elapsed = row
         out['requests'] += 1
-        if state == 'known':
-            out['known'] += 1
+        if state in ('known', 'partial'):
+            out[state] += 1
             out['input'] += prompt
             out['output'] += output
-            out['cached'] += cached
+            if state == 'known':
+                out['cached'] += cached
+                hit_input += prompt
             out['elapsed'] += elapsed
         else:
             out[state if state in ('missing', 'failed', 'interrupted') else 'missing'] += 1
-    out['hit_rate'] = out['cached'] / out['input'] if out['input'] else None
+    out['hit_rate'] = out['cached'] / hit_input if hit_input else None
     out['request_tps'] = out['output'] / out['elapsed'] if out['elapsed'] else None
     return out
 
@@ -72,10 +75,11 @@ def _percentile(values, fraction):
 
 def _request_view(row):
     finished, ip, state, prompt, output, cached, elapsed, session, first, status, record_id = row
-    observed = (state == 'known' and first is not None and math.isfinite(first) and
+    observed = (state in ('known', 'partial') and first is not None and math.isfinite(first) and
                 0 <= first <= elapsed and elapsed > 0)
     tail = elapsed - first if observed else None
     known = state == 'known'
+    measured = state in ('known', 'partial')
     return {'id': record_id, 'finished': finished, 'ip': ip, 'session': session, 'state': state,
             'status': status, 'input': prompt, 'output': output, 'cached': cached,
             'hit_rate': cached / prompt if known and prompt else None, 'elapsed': elapsed,
@@ -84,7 +88,7 @@ def _request_view(row):
             'after_first_share': tail / elapsed if observed else None,
             # Estimates use gateway-observed intervals, not engine phase times.
             'input_per_wait': (prompt - cached) / first if known and observed and first > 0 else None,
-            'output_per_after_first': (output - 1) / tail if known and observed and output > 1 and tail > 0 else None}
+            'output_per_after_first': (output - 1) / tail if measured and observed and output > 1 and tail > 0 else None}
 
 
 def _session_views(details):
@@ -95,21 +99,24 @@ def _session_views(details):
     result = []
     for session, items in groups.items():
         known = [item for item in items if item['state'] == 'known']
-        timed = [item for item in known if item['first_visible'] is not None]
+        partial = [item for item in items if item['state'] == 'partial']
+        measured = known + partial
+        timed = [item for item in measured if item['first_visible'] is not None]
         rate_items = [item for item in known if item['first_visible'] is not None]
         wait = sum(item['first_visible'] for item in timed)
         after = sum(item['after_first'] for item in timed)
-        total_input = sum(item['input'] for item in known)
-        total_output = sum(item['output'] for item in known)
+        total_input = sum(item['input'] for item in measured)
+        total_output = sum(item['output'] for item in measured)
+        hit_input = sum(item['input'] for item in known)
         total_cached = sum(item['cached'] for item in known)
         in_wait = sum(item['first_visible'] for item in rate_items)
-        out_items = [item for item in rate_items if item['output'] > 1 and item['after_first'] > 0]
+        out_items = [item for item in timed if item['output'] > 1 and item['after_first'] > 0]
         out_time = sum(item['after_first'] for item in out_items)
         result.append({'session': session, 'ips': sorted({item['ip'] or '未知来源' for item in items}),
-            'requests': len(items), 'known': len(known), 'timed': len(timed),
-            'input': total_input if known else None, 'output': total_output if known else None,
+            'requests': len(items), 'known': len(known), 'partial': len(partial), 'timed': len(timed),
+            'input': total_input if measured else None, 'output': total_output if measured else None,
             'cached': total_cached if known else None,
-            'hit_rate': total_cached / total_input if total_input else None,
+            'hit_rate': total_cached / hit_input if hit_input else None,
             'first_visible': wait if timed else None, 'after_first': after if timed else None,
             'first_share': wait / (wait + after) if timed and wait + after > 0 else None,
             'input_per_wait': sum(item['input'] - item['cached'] for item in rate_items) / in_wait if in_wait else None,
@@ -131,7 +138,7 @@ def _ordered_page(items, field, direction, offset, limit, identity):
             except ValueError:
                 return None
         elif field == 'state':
-            labels = {'known': '已计量', 'missing': '未计量', 'failed': '失败', 'interrupted': '中断'}
+            labels = {'known': '已计量', 'partial': '部分用量', 'missing': '未计量', 'failed': '失败', 'interrupted': '中断'}
             return labels.get(result, '未知'), item.get('status') or 0
         if isinstance(result, str):
             result = result.casefold()
@@ -157,14 +164,17 @@ def _check_database(db):
         raise ValueError('STATS_DATABASE_SCHEMA_MISMATCH')
 
 
-def _active_snapshot(db, now):
+def _active_snapshot(db, now, source=None):
+    source_filter = (" AND EXISTS (SELECT 1 FROM stats_meta m WHERE m.key='source:' || r.id AND m.value=?)"
+                     if source is not None else '')
+    params = (now - 15, now, source) if source is not None else (now - 15, now)
     samples = list(db.execute('''SELECT r.last_seen,s.seen FROM runs r
-        LEFT JOIN active_samples s ON s.run_id=r.id WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=?''',
-        (now - 15, now)))
+        LEFT JOIN active_samples s ON s.run_id=r.id WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=?''' + source_filter,
+        params))
     ready = bool(samples) and all(seen is not None and 0 <= now - seen < 3 for _, seen in samples)
     rows = list(db.execute('''SELECT a.client_ip,a.session_id,a.started,a.first_visible
         FROM active_requests a JOIN runs r ON a.run_id=r.id
-        WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=? ORDER BY a.started''', (now - 15, now))) if ready else []
+        WHERE r.ended IS NULL AND r.last_seen>? AND r.last_seen<=?''' + source_filter + ' ORDER BY a.started', params)) if ready else []
     current = [{'ip': ip, 'session': session, 'started': started, 'elapsed': max(0, now - started),
                 'first_visible': first, 'input': None, 'output': None, 'cached': None}
                for ip, session, started, first in rows]
@@ -172,19 +182,19 @@ def _active_snapshot(db, now):
             'active_sampled_at': min((seen for _, seen in samples), default=None) if ready else None}
 
 
-def active_report(path, *, now=None):
+def active_report(path, *, now=None, source=None):
     now = time.time() if now is None else float(now)
     uri = Path(path).resolve().as_uri() + '?mode=ro'
     with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
         _check_database(db)
-        return _active_snapshot(db, now)
+        return _active_snapshot(db, now, source)
 
 
 def report(path, window='24h', *, now=None, request_offset=0, request_limit=100, session_offset=0,
            session_limit=None, request_sort='finished', request_dir='desc',
-           session_sort='last_finished', session_dir='desc', snapshot_at=None, snapshot_id=None):
+           session_sort='last_finished', session_dir='desc', snapshot_at=None, snapshot_id=None, source=None):
     if window not in ('today', '24h', '7d', 'total'):
         raise ValueError('INVALID_STATS_WINDOW')
     if session_limit is None:
@@ -207,10 +217,13 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
         _check_database(db)
-        runs = list(db.execute('SELECT started,last_seen,ended,dropped FROM runs'))
+        all_runs = list(db.execute('SELECT started,last_seen,ended,dropped FROM runs'))
+        runs = (all_runs if source is None else list(db.execute('''
+            SELECT started,last_seen,ended,dropped FROM runs r
+            WHERE EXISTS (SELECT 1 FROM stats_meta m WHERE m.key='source:' || r.id AND m.value=?)''', (source,))))
         overload_runs = list(db.execute('''SELECT runs.started,runs.last_seen,runs.ended,stats_meta.value
             FROM runs LEFT JOIN stats_meta ON stats_meta.key='overload:' || runs.id'''))
-        since = min((r[0] for r in runs), default=now)
+        since = min((r[0] for r in all_runs), default=now)
         if snapshot_at is None:
             snapshot_at = now
             snapshot_id = db.execute('SELECT COALESCE(MAX(id),0) FROM requests').fetchone()[0]
@@ -221,11 +234,16 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
         snapshot_midnight = datetime.fromtimestamp(snapshot_at, TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         snapshot_start = min(snapshot_at, {'today': snapshot_midnight, '24h': snapshot_at - 86400,
                              '7d': snapshot_at - 7 * 86400, 'total': since}[window])
-        rows = list(db.execute('''SELECT finished,client_ip,state,input_tokens,output_tokens,cached_tokens,elapsed,
-                session_id,first_visible,http_status,id
-            FROM requests WHERE finished>=? AND finished<? ORDER BY finished''',
-            (min(start, snapshot_start, now - 14 * 86400), now)))
-        live_active = _active_snapshot(db, now)
+        if partial_schema_available(db):
+            query = '''SELECT r.finished,r.client_ip,CASE WHEN p.request_id IS NULL THEN r.state ELSE 'partial' END,
+                COALESCE(p.input_tokens,r.input_tokens),COALESCE(p.output_tokens,r.output_tokens),r.cached_tokens,r.elapsed,
+                r.session_id,r.first_visible,r.http_status,r.id FROM requests r
+                LEFT JOIN stats_partial_usage p ON p.request_id=r.id WHERE r.finished>=? AND r.finished<? ORDER BY r.finished'''
+        else:
+            query = '''SELECT finished,client_ip,state,input_tokens,output_tokens,cached_tokens,elapsed,
+                session_id,first_visible,http_status,id FROM requests WHERE finished>=? AND finished<? ORDER BY finished'''
+        rows = list(db.execute(query, (min(start, snapshot_start, now - 14 * 86400), now)))
+        live_active = _active_snapshot(db, now, source)
     selected, grouped, series_rows, day_rows = [], {}, {}, {}
     details, snapshot_details = [], []
     for row in rows:
@@ -268,12 +286,12 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
     totals['overload_rejected'] = overload_count
     totals['overload_tracked_runs'] = overload_tracked
     totals['overload_untracked_runs'] = overload_untracked
-    classified = [item for item in details if item['state'] in ('known', 'failed', 'interrupted')]
-    successes = [item for item in classified if item['state'] == 'known' and item['status'] is not None
+    classified = [item for item in details if item['state'] in ('known', 'partial', 'failed', 'interrupted')]
+    successes = [item for item in classified if item['state'] in ('known', 'partial') and item['status'] is not None
                  and 200 <= item['status'] < 300]
     timed = [item for item in successes if item['first_visible'] is not None]
     first_values = [item['first_visible'] for item in timed]
-    prefill_items = [item for item in timed if item['first_visible'] > 0]
+    prefill_items = [item for item in timed if item['state'] == 'known' and item['first_visible'] > 0]
     decode_items = [item for item in timed if item['output'] > 1 and item['after_first'] > 0]
     prefill_time = sum(item['first_visible'] for item in prefill_items)
     decode_time = sum(item['after_first'] for item in decode_items)
@@ -292,7 +310,10 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
                   identified_sessions=len({item['session'] for item in details if item['session']}),
                   unknown_session=sum(1 for item in details if not item['session']))
     totals['complete'] = (bool(runs) and seconds > 0 and covered >= seconds - COVERAGE_EPSILON and dropped == 0 and unclean == 0 and
-                          totals['missing'] == 0 and totals['interrupted'] == 0 and totals['failed'] == 0)
+                          totals['partial'] == 0 and totals['missing'] == 0 and totals['interrupted'] == 0 and totals['failed'] == 0)
+    if source is not None:
+        # A recorder heartbeat does not establish that every public entry routes through it.
+        totals['complete'] = False
     clients = []
     for ip, items in grouped.items():
         item = _counts(items)
@@ -309,10 +330,10 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
         counts = _counts([row[2:7] for row in bucket_rows])
         bucket_requests = [_request_view(row) for row in bucket_rows]
         hits = [item['hit_rate'] for item in bucket_requests if item['hit_rate'] is not None]
-        timed = [item for item in bucket_requests if item['state'] == 'known' and
+        timed = [item for item in bucket_requests if item['state'] in ('known', 'partial') and
                  item['status'] is not None and 200 <= item['status'] < 300 and
                  item['first_visible'] is not None]
-        prefill = [item for item in timed if item['first_visible'] > 0]
+        prefill = [item for item in timed if item['state'] == 'known' and item['first_visible'] > 0]
         decode = [item for item in timed if item['output'] > 1 and item['after_first'] > 0]
         prefill_tokens = sum(item['input'] - item['cached'] for item in prefill)
         prefill_seconds = sum(item['first_visible'] for item in prefill)
@@ -327,7 +348,9 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
                       decode_estimate_tps=decode_tokens / decode_seconds if decode_seconds else None,
                       decode_tokens=decode_tokens, decode_seconds=decode_seconds, decode_samples=len(decode),
                       complete=bool(runs) and b > a and coverage >= b - a - COVERAGE_EPSILON and lost == 0 and unclean == 0 and
-                      counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
+                      counts['partial'] == 0 and counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
+        if source is not None:
+            counts['complete'] = False
         series.append(counts)
     days = []
     for day in range(13, -1, -1):
@@ -337,17 +360,21 @@ def report(path, window='24h', *, now=None, request_offset=0, request_limit=100,
         counts.update(date=datetime.fromtimestamp(a, TZ).strftime('%Y-%m-%d'), start=a, end=b,
                       covered_seconds=coverage, dropped=lost, unclean_runs=unclean,
                       complete=bool(runs) and b > a and coverage >= b - a - COVERAGE_EPSILON and lost == 0 and unclean == 0 and
-                      counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
+                      counts['partial'] == 0 and counts['missing'] == 0 and counts['interrupted'] == 0 and counts['failed'] == 0)
+        if source is not None:
+            counts['complete'] = False
         days.append(counts)
     snapshot_covered, snapshot_dropped, snapshot_unclean = _coverage(runs, snapshot_start, snapshot_at, now)
     snapshot_complete = (bool(runs) and snapshot_at > snapshot_start and
                          snapshot_covered >= snapshot_at - snapshot_start - COVERAGE_EPSILON and
                          snapshot_dropped == 0 and snapshot_unclean == 0 and
                          all(item['state'] == 'known' for item in snapshot_details))
+    if source is not None:
+        snapshot_complete = False
     sessions = _session_views(snapshot_details)
     recent, request_offset = _ordered_page(snapshot_details, request_sort, request_dir, request_offset, request_limit, 'id')
     session_page, session_offset = _ordered_page(sessions, session_sort, session_dir, session_offset, session_limit, 'session')
-    return {'schema': SCHEMA, 'as_of': now, 'since': since if runs else None,
+    return {'schema': SCHEMA, 'as_of': now, 'since': since if all_runs else None,
             'window': window, 'collector_live': live_active['collector_live'], 'totals': totals,
             'clients': clients, 'series_24h': series, 'days': days, 'active': live_active['active'],
             'active_ready': live_active['active_ready'], 'active_sampled_at': live_active['active_sampled_at'],

@@ -91,7 +91,7 @@ def _unique_pairs(pairs):
     return result
 
 
-def extract_usage(protocol, value):
+def extract_usage(protocol, value, *, allow_partial=False):
     """Return inclusive input, output and cached counts, or None if unknown."""
     if not isinstance(value, dict):
         return None
@@ -112,7 +112,11 @@ def extract_usage(protocol, value):
         prompt = _count(usage.get('input_tokens'))
         output = _count(usage.get('output_tokens'))
         details = usage.get('input_tokens_details')
+        if details is not None and not isinstance(details, dict):
+            return None
         cached = _count(details.get('cached_tokens')) if isinstance(details, dict) else None
+        if isinstance(details, dict) and details.get('cached_tokens') is not None and cached is None:
+            return None
     else:
         prompt = _count(usage.get('prompt_tokens'))
         output = _count(usage.get('completion_tokens'))
@@ -131,7 +135,11 @@ def extract_usage(protocol, value):
         miss = usage.get('prompt_cache_miss_tokens')
         if miss is not None and (_count(miss) is None or prompt is None or cached is None or miss != prompt - cached):
             return None
-    if None in (prompt, output, cached) or prompt > MAX_COUNT or cached > prompt:
+    if prompt is None or output is None or prompt > MAX_COUNT:
+        return None
+    if cached is None and (not allow_partial or protocol not in ('chat', 'responses')):
+        return None
+    if cached is not None and cached > prompt:
         return None
     total = usage.get('total_tokens')
     if total is not None and _count(total) != prompt + output:
@@ -171,8 +179,9 @@ class UsageCapture:
     """Bound memory and retain only numerical usage after each response frame."""
 
     def __init__(self, protocol, content_type, content_encoding='', on_first_output=None, *,
-                 max_frame=MAX_FRAME, max_structure=None, max_delta=None):
+                 max_frame=MAX_FRAME, max_structure=None, max_delta=None, allow_partial=False):
         self.protocol = protocol
+        self.allow_partial = allow_partial
         self.max_frame = max_frame
         self.max_structure = max_structure
         self.max_delta = max_delta
@@ -308,7 +317,7 @@ class UsageCapture:
                              self.protocol == 'responses' and event_type in
                              ('response.completed', 'response.incomplete'))
                     if final:
-                        usage = extract_usage(self.protocol, value)
+                        usage = extract_usage(self.protocol, value, allow_partial=self.allow_partial)
                         if usage is not None and (not self.skipped or self.protocol != 'chat' or self.chat_finished):
                             self.usage = usage
                             self.skipped = False
@@ -337,7 +346,7 @@ class UsageCapture:
 
     def finish(self):
         if self.kind == 'json' and not self.too_large:
-            return extract_usage(self.protocol, self._decode(self.buffer))
+            return extract_usage(self.protocol, self._decode(self.buffer), allow_partial=self.allow_partial)
         if (self.kind == 'sse' and self.terminal and not self.incomplete and not self.buffer and
                 not self.event_lines and not self.discard_line and not self.discard_event):
             return self.usage
@@ -348,9 +357,10 @@ class SafeCapture:
     """A statistics parser error must never interrupt the user's response."""
 
     def __init__(self, protocol, content_type, content_encoding='', on_first_output=None, *,
-                 max_frame=MAX_FRAME, max_structure=None, max_delta=None):
+                 max_frame=MAX_FRAME, max_structure=None, max_delta=None, allow_partial=False):
         self.reader = UsageCapture(protocol, content_type, content_encoding, on_first_output,
-                                   max_frame=max_frame, max_structure=max_structure, max_delta=max_delta)
+                                   max_frame=max_frame, max_structure=max_structure, max_delta=max_delta,
+                                   allow_partial=allow_partial)
         self.failed = False
 
     def feed(self, data):

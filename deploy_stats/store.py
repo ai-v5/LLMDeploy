@@ -9,6 +9,30 @@ import uuid
 
 SCHEMA = 2
 IDENTITY = 'llmdeploy-gateway-stats'
+PARTIAL_MARKER = 'partial_usage_schema'
+
+
+def partial_schema_available(db):
+    marker = db.execute('SELECT value FROM stats_meta WHERE key=?', (PARTIAL_MARKER,)).fetchone()
+    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_partial_usage'").fetchone()
+    if marker is None and exists is None:
+        return False
+    if marker != ('1',) or exists is None:
+        raise ValueError('PARTIAL_USAGE_SCHEMA_MISMATCH')
+    columns = [(row[1], row[2].upper(), row[5]) for row in db.execute('PRAGMA table_info(stats_partial_usage)')]
+    if columns != [('request_id', 'INTEGER', 1), ('input_tokens', 'INTEGER', 0), ('output_tokens', 'INTEGER', 0)]:
+        raise ValueError('PARTIAL_USAGE_SCHEMA_MISMATCH')
+    return True
+
+
+def _enable_partial_schema(db):
+    if partial_schema_available(db):
+        return
+    db.execute('''CREATE TABLE stats_partial_usage (
+        request_id INTEGER PRIMARY KEY REFERENCES requests(id),
+        input_tokens INTEGER NOT NULL CHECK(input_tokens >= 0),
+        output_tokens INTEGER NOT NULL CHECK(output_tokens >= 0))''')
+    db.execute('INSERT INTO stats_meta(key,value) VALUES (?,?)', (PARTIAL_MARKER, '1'))
 
 
 def _open(path):
@@ -76,8 +100,11 @@ def _open(path):
 
 
 class Recorder:
-    def __init__(self, path, *, queue_size=4096, heartbeat=5):
+    def __init__(self, path, *, queue_size=4096, heartbeat=5, source=None):
+        if source is not None and source != 'gateway-inprocess-v1':
+            raise ValueError('INVALID_STATS_SOURCE')
         self.path = Path(path)
+        self.source = source
         self.run = uuid.uuid4().hex
         self.started = time.time()
         self.heartbeat = heartbeat
@@ -152,6 +179,9 @@ class Recorder:
             db.execute('INSERT INTO runs(id,started,last_seen) VALUES (?,?,?)',
                        (self.run, self.started, self.started))
             db.execute('INSERT INTO active_samples(run_id,seen) VALUES (?,?)', (self.run, self.started))
+            if self.source is not None:
+                _enable_partial_schema(db)
+                db.execute('INSERT INTO stats_meta(key,value) VALUES (?,?)', ('source:' + self.run, self.source))
             db.commit()
             self.ready.set()
             last_tick = time.monotonic()
@@ -164,10 +194,20 @@ class Recorder:
                 if kind == 'event':
                     request_id, event = item
                     event = tuple(event) + (None,) * (10 - len(event))
-                    db.execute('''INSERT INTO requests
+                    partial = event[4] == 'partial'
+                    if partial:
+                        if (self.source != 'gateway-inprocess-v1' or type(event[5]) is not int or
+                                type(event[6]) is not int or event[5] < 0 or event[6] < 0 or event[7] is not None):
+                            raise ValueError('INVALID_PARTIAL_USAGE')
+                        input_tokens, output_tokens = event[5:7]
+                        event = (*event[:4], 'missing', None, None, None, *event[8:])
+                    cursor = db.execute('''INSERT INTO requests
                         (run_id,finished,client_ip,elapsed,http_status,state,
                          input_tokens,output_tokens,cached_tokens,session_id,first_visible)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?)''', (self.run, *event))
+                    if partial:
+                        db.execute('INSERT INTO stats_partial_usage VALUES (?,?,?)',
+                                   (cursor.lastrowid, input_tokens, output_tokens))
                     db.commit()
                 elif kind == 'barrier':
                     item.set()
