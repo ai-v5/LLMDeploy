@@ -250,13 +250,18 @@ class InProcessCaptureTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
             def do_GET(self):
-                body = b'{"ready":true}'
+                body = self.server.instance_body if self.path == '/instances' else b'{"ready":true}'
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
         readiness = ThreadingHTTPServer(('127.0.0.1', 0), Readiness)
+        endpoint = {'ip': '127.0.0.1', 'business_port': str(self.model.server_port), 'headless': False}
+        readiness.instance_body = json.dumps({'instances': [
+            {'role': role, 'pool': 'available', 'status': 'active', 'healthy': True,
+             'model_name': 'example', 'endpoints': [endpoint]}
+            for role in ('prefill', 'decode')]}).encode()
         self.start(readiness)
         database = self.root/'motor-usage.sqlite3'
         old_handler = gateway_module.Handler
@@ -267,10 +272,12 @@ class InProcessCaptureTests(unittest.TestCase):
             gateway = gateway_module.Gateway(('127.0.0.1', 0), self.keys,
                 state_path=self.root/'motor-state.json', bindings_file=self.root/'motor-bindings.json',
                 backend_ports=[self.model.server_port], backend_managed_affinity=True,
-                backend_readiness_ports={self.model.server_port: readiness.server_port})
+                backend_readiness_ports={self.model.server_port: readiness.server_port},
+                pd_model='example', pd_probe_endpoints=True)
         finally:
             gateway_module.Handler = old_handler
         self.start(gateway)
+        self.assertTrue(gateway.backends.healthy[self.model.server_port])
         with patch('deploy_stats.web.MotorCollector') as collector:
             collector.return_value.snapshot.return_value = {'sampled_at': time.time(), 'nodes': []}
             dashboard = Dashboard(0, database, motor_management_ports=[readiness.server_port])

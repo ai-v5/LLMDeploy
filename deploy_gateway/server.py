@@ -4,10 +4,12 @@ No API key, request body, Authorization header or response body is logged.
 Client Authorization is consumed here and never forwarded to the model.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 from http.client import HTTPConnection, HTTPException, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import math
 from pathlib import Path
@@ -46,10 +48,54 @@ def _check_statistics_paths(database, key_store, bindings_file, state_path, cont
                 pass
 
 
+def pd_instance_healthy(row, cache):
+    """Probe every reported rank; cache observations within one gateway cycle."""
+    endpoints = row.get('endpoints')
+    if not isinstance(endpoints, list) or not 0 < len(endpoints) <= 1024:
+        return False
+    targets = []
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict) or endpoint.get('headless') is True:
+            return False
+        try:
+            host_value = endpoint.get('ip')
+            if not isinstance(host_value, str):
+                return False
+            host = str(ipaddress.ip_address(host_value))
+            port = endpoint.get('business_port')
+            if isinstance(port, str) and port.isdecimal():
+                port = int(port)
+            if type(port) is not int or not 1 <= port <= 65535:
+                return False
+        except (ValueError, TypeError):
+            return False
+        targets.append((host, port))
+    if len(set(targets)) != len(targets):
+        return False
+
+    def probe(target):
+        connection = HTTPConnection(target[0], target[1], timeout=2)
+        try:
+            connection.request('GET', '/health', headers={'Connection': 'close'})
+            return connection.getresponse().status == 200
+        except (OSError, HTTPException, ValueError):
+            return False
+        finally:
+            connection.close()
+
+    missing = [target for target in targets if target not in cache]
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(16, len(missing))) as pool:
+            cache.update(zip(missing, pool.map(probe, missing)))
+    return all(cache[target] for target in targets)
+
+
 class Backends(SessionRouter):
-    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, readiness_ports=None):
+    def __init__(self, ports, state_path, bindings_file, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, readiness_ports=None, pd_model=None, pd_probe_endpoints=False):
         super().__init__(ports, bindings_file, max_active=max_active, max_waiting=max_waiting, queue_timeout=queue_timeout)
         self.readiness_ports = dict(readiness_ports or {})
+        self.pd_model = pd_model
+        self.pd_probe_endpoints = pd_probe_endpoints
         self.control_file = Path(control_file) if control_file else None
         self.stop = threading.Event()
         self.state_path = Path(state_path) if state_path else None
@@ -79,7 +125,7 @@ class Backends(SessionRouter):
         with self.lock:
             self.enabled_ports = enabled
             versions = dict(self.versions)
-        observed = {}
+        observed, endpoint_cache = {}, {}
         for port in self.ports:
             readiness_port = self.readiness_ports.get(port)
             connection = HTTPConnection('127.0.0.1', readiness_port or port, timeout=1)
@@ -90,9 +136,29 @@ class Backends(SessionRouter):
                     body = response.read(65537)
                     data = json.loads(body) if len(body) <= 65536 else None
                     observed[port] = isinstance(data, dict) and data.get('ready') is True
+                    if observed[port] and self.pd_model is not None:
+                        connection.close()
+                        connection.request('GET', '/instances', headers={'Connection': 'close'})
+                        response = connection.getresponse()
+                        body = response.read(1048577)
+                        data = json.loads(body) if response.status == 200 and len(body) <= 1048576 else None
+                        instances = data.get('instances') if isinstance(data, dict) else None
+                        candidates = [row for row in instances if isinstance(row, dict)
+                                      and row.get('role') in ('prefill', 'decode')
+                                      and row.get('model_name') == self.pd_model
+                                      and row.get('healthy') is True and row.get('pool') == 'available'
+                                      and row.get('status') == 'active'] if isinstance(instances, list) else []
+                        roles = set()
+                        for row in candidates:
+                            if row['role'] not in roles and (not self.pd_probe_endpoints
+                                                            or pd_instance_healthy(row, endpoint_cache)):
+                                roles.add(row['role'])
+                            if roles == {'prefill', 'decode'}:
+                                break
+                        observed[port] = {'prefill', 'decode'} <= roles
                 else:
                     observed[port] = response.status == 200 and not readiness_port
-            except (OSError, HTTPException, ValueError, RecursionError):
+            except (OSError, HTTPException, ValueError, RuntimeError, RecursionError):
                 observed[port] = False
             finally:
                 connection.close()
@@ -127,7 +193,7 @@ class Gateway(ThreadingHTTPServer):
             self.allow_reuse_address = False
         super().server_bind()
 
-    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False, backend_readiness_ports=None):
+    def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False, backend_readiness_ports=None, pd_model=None, pd_probe_endpoints=False):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
         if state_path and Path(state_path).resolve() in (Path(key_store).resolve(), Path(bindings_file).resolve()):
@@ -152,6 +218,11 @@ class Gateway(ThreadingHTTPServer):
         if any(type(p) is not int or p not in ports or type(target) is not int or not 1 <= target <= 65535
                for p, target in readiness_ports.items()):
             raise ValueError('Invalid backend readiness mapping')
+        if pd_model is not None and (not isinstance(pd_model, str) or not pd_model.strip()
+                                     or set(readiness_ports) != set(ports)):
+            raise ValueError('PD model requires a management readiness port for each backend')
+        if type(pd_probe_endpoints) is not bool or (pd_probe_endpoints and pd_model is None):
+            raise ValueError('PD endpoint probing requires a PD model')
         self.backend_context_limits = dict(backend_context_limits or {})
         if self.backend_context_limits and (set(self.backend_context_limits) != set(ports)
                 or any(type(p) is not int or type(limit) is not int or not 0 < limit <= 10**9 for p, limit in self.backend_context_limits.items())):
@@ -170,7 +241,7 @@ class Gateway(ThreadingHTTPServer):
             raise ValueError('No active gateway keys')
         super().__init__(address, Handler)
         try:
-            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file, readiness_ports)
+            self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file, readiness_ports, pd_model, pd_probe_endpoints)
             try:
                 self.rejection_drainer = RejectionDrainer()
             except Exception:
@@ -489,6 +560,8 @@ def main():
     parser.add_argument('--backend-context-limit', action='append', default=[], metavar='PORT=TOKENS')
     parser.add_argument('--backend-readiness-port', action='append', default=[], metavar='PORT=MANAGEMENT_PORT')
     parser.add_argument('--statistics-database', type=Path)
+    parser.add_argument('--backend-pd-model', help='Require healthy Motor prefill and decode instances for this model')
+    parser.add_argument('--backend-pd-probe-endpoints', action='store_true', help='Probe every rank of each candidate PD instance')
     args = parser.parse_args()
     limits = {}
     for item in args.backend_context_limit:
@@ -526,7 +599,8 @@ def main():
         server = Gateway((args.listen, args.port), args.key_store, args.upstream_port, args.backup_port, args.backend_state, args.bindings_file, args.upstream_timeout, args.model_context_limit, limits,
                          backend_ports=args.backend_port, max_active=args.max_active_per_backend, max_waiting=args.max_waiting,
                          queue_timeout=args.queue_timeout, control_file=args.control_file, backend_managed_affinity=args.backend_managed_affinity,
-                         backend_readiness_ports=readiness_ports)
+                         backend_readiness_ports=readiness_ports, pd_model=args.backend_pd_model,
+                         pd_probe_endpoints=args.backend_pd_probe_endpoints)
         print(json.dumps({'state': 'LISTENING', 'listen': args.listen, 'port': args.port,
                           'statistics': 'enabled' if recorder else ('unavailable' if args.statistics_database else 'disabled')}), flush=True)
         server.serve_forever()
