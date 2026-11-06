@@ -92,8 +92,10 @@ assert.equal(result.mfu, null); assert.equal(result.hbm, null);
         for legacy in legacy_ids:
             self.assertNotIn(f'id="{legacy}"', html)
             self.assertNotIn(f"'{legacy}'", script)
-        self.assertIn('/app-telemetry-v5.js', html)
-        self.assertIn('/app-telemetry-v5.js', ASSETS)
+        self.assertIn('/app-telemetry-v7.js', html)
+        self.assertIn('/app-telemetry-v7.js', ASSETS)
+        self.assertNotIn('/app-telemetry-v6.js', ASSETS)
+        self.assertNotIn('/app-telemetry-v5.js', ASSETS)
         self.assertNotIn('/app-telemetry-v4.js', ASSETS)
         self.assertNotIn('/app-telemetry-v3.js', ASSETS)
         self.assertNotIn('/app-telemetry-v2.js', ASSETS)
@@ -172,7 +174,7 @@ const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePo
   cell: (row, value) => row.cells.push(value), setTextIfPresent: () => {},
   number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
   clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {},
-  latestGroupHistory: () => null, historicalPrefillMfu: () => null};
+  latestGroupHistory: () => null, historicalPrefillMfu: () => null, renderMtp: () => {}, validMtp: () => null};
 context.freshTelemetry = extract('freshTelemetry', context); context.telemetryValues = extract('telemetryValues', context);
 const render = extract('renderTelemetry', context);
 const n = {backend_port: 1, source_ok: true, backend_ready: true, clock_ok: true, clock_uncertainty_seconds: .1,
@@ -305,7 +307,7 @@ const context = {telemetrySnapshot: null, telemetryExpiry: null, telemetryNodePo
   $: (id) => elements[id] || null, setTextIfPresent: (id, value) => {if (elements[id]) elements[id].textContent = value;},
   number: {format: String}, speed: (v) => `${v} tok/s`, percent: (v) => `${v * 100}%`,
   clock: {format: () => 'time'}, combinedDeviceHistory: () => null, renderDeviceHistory: () => {},
-  latestGroupHistory: () => null, historicalPrefillMfu: () => null};
+  latestGroupHistory: () => null, historicalPrefillMfu: () => null, renderMtp: () => {}, validMtp: () => null};
 context.freshTelemetry = extract('freshTelemetry', context);
 context.telemetryValues = extract('telemetryValues', context);
 const render = extract('renderTelemetry', context);
@@ -351,7 +353,7 @@ const context = {telemetrySnapshot:null,telemetryExpiry:null,telemetryNodePort:'
   $:(id)=>elements[id]||null,setTextIfPresent:(id,value)=>{if(elements[id])elements[id].textContent=value;},
   number:{format:String},speed:(v)=>`${v} tok/s`,percent:(v)=>v===null||v===undefined?'—':`${v*100}%`,
   clock:{format:(v)=>`clock-${v.getTime()/1000}`},dateTime:{format:(v)=>`date-${v.getTime()/1000}`},
-  renderDeviceHistory:()=>{}};
+  renderDeviceHistory:()=>{},renderMtp:()=>{},validMtp:()=>null};
 for (const name of ['freshTelemetry','telemetryValues','combinedDeviceHistory','latestHistoricalSample','latestGroupHistory','historicalPrefillMfu'])
   context[name]=extract(name,context);
 const render=extract('renderTelemetry',context);

@@ -24,6 +24,8 @@ BUCKET_COUNT = 144
 HISTORY_METHOD = 'vllm-counter-rate-v1'
 APPLICATION_ID = 0x4C444D48
 SCHEMA_VERSION = 1
+MTP_COUNTERS = ('vllm:spec_decode_num_drafts_total', 'vllm:spec_decode_num_draft_tokens_total',
+                'vllm:spec_decode_num_accepted_tokens_total')
 METRICS = frozenset({
     'process_start_time_seconds', 'vllm:prompt_tokens_by_source_total',
     'vllm:generation_tokens_total', 'vllm:request_prefill_time_seconds_sum',
@@ -31,7 +33,7 @@ METRICS = frozenset({
     'vllm:request_decode_time_seconds_count', 'vllm:num_requests_running',
     'vllm:num_requests_waiting', 'vllm:prompt_tokens_total',
     'vllm:prefix_cache_hits_total', 'vllm:prefix_cache_queries_total',
-})
+}) | frozenset(MTP_COUNTERS)
 SAMPLE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+\d+)?\s*$')
 LABEL = re.compile(r'\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*("(?:[^"\\]|\\["\\n])*")\s*(,|$)')
 
@@ -41,6 +43,7 @@ def parse_metrics(payload):
     if not isinstance(payload, str) or len(payload.encode('utf-8')) > MAX_PAYLOAD:
         raise ValueError('INVALID_METRICS')
     result = {}
+    invalid_mtp = False
     for line in payload.splitlines():
         line = line.strip()
         if not line or line.startswith('#'):
@@ -48,33 +51,43 @@ def parse_metrics(payload):
         name = line.split('{', 1)[0].split(None, 1)[0]
         if name not in METRICS:
             continue
-        sample = SAMPLE.fullmatch(line)
-        if not sample:
-            raise ValueError('INVALID_SAMPLE')
-        labels = {}
-        raw = sample.group(2)
-        if raw is not None:
-            offset = 0
-            while offset < len(raw):
-                match = LABEL.match(raw, offset)
-                if not match or match.group(1) in labels:
-                    raise ValueError('INVALID_LABELS')
-                labels[match.group(1)] = json.loads(match.group(2))
-                offset = match.end()
-                if match.group(3) == '' and offset != len(raw):
-                    raise ValueError('INVALID_LABELS')
-                if match.group(3) == ',' and offset == len(raw):
-                    raise ValueError('INVALID_LABELS')
-        value = float(sample.group(3))
-        if not math.isfinite(value) or value < 0:
-            raise ValueError('INVALID_VALUE')
-        if name.endswith('_count') and not value.is_integer():
-            raise ValueError('INVALID_COUNT')
-        key = tuple(sorted(labels.items()))
-        samples = result.setdefault(name, {})
-        if key in samples:
-            raise ValueError('DUPLICATE_SAMPLE')
-        samples[key] = value
+        try:
+            sample = SAMPLE.fullmatch(line)
+            if not sample:
+                raise ValueError('INVALID_SAMPLE')
+            labels = {}
+            raw = sample.group(2)
+            if raw is not None:
+                offset = 0
+                while offset < len(raw):
+                    match = LABEL.match(raw, offset)
+                    if not match or match.group(1) in labels:
+                        raise ValueError('INVALID_LABELS')
+                    labels[match.group(1)] = json.loads(match.group(2))
+                    offset = match.end()
+                    if match.group(3) == '' and offset != len(raw):
+                        raise ValueError('INVALID_LABELS')
+                    if match.group(3) == ',' and offset == len(raw):
+                        raise ValueError('INVALID_LABELS')
+            value = float(sample.group(3))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError('INVALID_VALUE')
+            if name.endswith('_count') and not value.is_integer():
+                raise ValueError('INVALID_COUNT')
+            if name in MTP_COUNTERS and (not value.is_integer() or value > 2**53 - 1):
+                raise ValueError('INVALID_MTP_COUNTER')
+            key = tuple(sorted(labels.items()))
+            samples = result.setdefault(name, {})
+            if key in samples:
+                raise ValueError('DUPLICATE_SAMPLE')
+            samples[key] = value
+        except ValueError:
+            if name not in MTP_COUNTERS:
+                raise
+            invalid_mtp = True
+    if invalid_mtp:
+        for name in MTP_COUNTERS:
+            result.pop(name, None)
     starts = result.get('process_start_time_seconds', {})
     if set(starts) != {()} or starts[()] <= 0:
         raise ValueError('MISSING_PROCESS_IDENTITY')
@@ -138,7 +151,10 @@ def _topology(payload):
         count += len(targets)
         if count > MAX_ENDPOINTS:
             raise ValueError('TOO_MANY_ENDPOINTS')
-        result[identity] = {'role': role, 'targets': tuple(sorted(targets)),
+        model = entry.get('model_name')
+        if model is not None and (not isinstance(model, str) or not model or len(model) > 512):
+            raise ValueError('INVALID_MODEL')
+        result[identity] = {'role': role, 'targets': tuple(sorted(targets)), 'model_name': model,
                             'ready': entry.get('status') == 'active' and entry.get('healthy') is True}
     return result
 
@@ -176,6 +192,50 @@ def _sum_values(values):
     return result if math.isfinite(result) else None
 
 
+def _mtp_counts(values, model):
+    """Use only consistent engine/model series; return counts in counter order."""
+    if not isinstance(model, str) or not model:
+        return None
+    series = [values.get(name, {}) for name in MTP_COUNTERS]
+    if not series[0] or any(set(item) != set(series[0]) for item in series[1:]):
+        return None
+    if any(dict(labels).get('model_name') != model for labels in series[0]):
+        return None
+    if any(series[2][labels] > series[1][labels] for labels in series[0]):
+        return None
+    result = tuple(sum(int(value) for value in item.values()) for item in series)
+    return result if all(value <= 2**53 - 1 for value in result) else None
+
+
+def _mtp_change(current, previous, model):
+    if _mtp_counts(current, model) is None or _mtp_counts(previous, model) is None:
+        return None
+    series = [current[name] for name in MTP_COUNTERS]
+    old = [previous[name] for name in MTP_COUNTERS]
+    if any(set(new) != set(before) for new, before in zip(series, old)):
+        return None
+    changes = [{key: new[key] - before[key] for key in new} for new, before in zip(series, old)]
+    if any(value < 0 or not math.isfinite(value) for item in changes for value in item.values()):
+        return None
+    if any(changes[2][labels] > changes[1][labels] for labels in changes[0]):
+        return None
+    result = tuple(sum(int(value) for value in item.values()) for item in changes)
+    return result if all(value <= 2**53 - 1 for value in result) else None
+
+
+def _mtp_summary(items, expected, *, partial=False):
+    if not items:
+        return None
+    steps, drafted, accepted = (sum(row[index] for row in items) for index in range(3))
+    if any(value > 2**53 - 1 for value in (steps, drafted, accepted)) or accepted > drafted:
+        return None
+    return {'steps': steps, 'drafted': drafted, 'accepted': accepted,
+            'acceptance_rate': accepted / drafted if drafted else None,
+            'mean_acceptance_length': 1 + accepted / steps if steps else None,
+            'valid_endpoints': len(items), 'expected_endpoints': expected,
+            'partial': partial or len(items) < expected}
+
+
 def _agreed(topologies):
     available = [top for top in topologies if top is not None]
     groups, ambiguous = {}, False
@@ -186,7 +246,7 @@ def _agreed(topologies):
             if any(entry is None for entry in entries):
                 ambiguous = True
                 continue
-            shape = {(entry['role'], entry['targets']) for entry in entries}
+            shape = {(entry['role'], entry['targets'], entry['model_name']) for entry in entries}
             if len(shape) != 1:
                 ambiguous = True
                 continue
@@ -216,6 +276,17 @@ class MotorHistory:
             elif (connection.execute('PRAGMA application_id').fetchone()[0] != APPLICATION_ID or
                   connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION):
                 raise ValueError('INVALID_MOTOR_HISTORY')
+            # Additive table: older readers continue to use rate_buckets unchanged.
+            connection.execute('''CREATE TABLE IF NOT EXISTS mtp_buckets (
+                group_key TEXT NOT NULL, bucket INTEGER NOT NULL,
+                steps INTEGER NOT NULL, drafted INTEGER NOT NULL, accepted INTEGER NOT NULL,
+                samples INTEGER NOT NULL, partial_samples INTEGER NOT NULL,
+                PRIMARY KEY (group_key, bucket)) WITHOUT ROWID''')
+            columns = [(row[1], row[2].upper(), row[5]) for row in connection.execute('PRAGMA table_info(mtp_buckets)')]
+            if columns != [('group_key', 'TEXT', 1), ('bucket', 'INTEGER', 2), ('steps', 'INTEGER', 0),
+                           ('drafted', 'INTEGER', 0), ('accepted', 'INTEGER', 0), ('samples', 'INTEGER', 0),
+                           ('partial_samples', 'INTEGER', 0)]:
+                raise ValueError('INVALID_MTP_HISTORY')
             connection.execute('PRAGMA journal_mode = WAL')
 
     def _connect(self):
@@ -254,6 +325,44 @@ class MotorHistory:
                 point[phase + '_partial'] = partial > 0
             points.append(point)
         return {'method': HISTORY_METHOD, 'bucket_seconds': BUCKET_SECONDS, 'points': points}
+
+    def record_mtp(self, group_key, at, steps, drafted, accepted, *, partial=False):
+        if (not isinstance(group_key, str) or not group_key or type(at) not in (int, float) or
+                not math.isfinite(at) or at < 0 or any(type(v) is not int or not 0 <= v <= 2**53 - 1
+                                                       for v in (steps, drafted, accepted)) or
+                accepted > drafted or type(partial) is not bool):
+            raise ValueError('INVALID_MTP_SAMPLE')
+        bucket = int(at // BUCKET_SECONDS) * BUCKET_SECONDS
+        with closing(self._connect()) as connection, connection:
+            connection.execute('''INSERT INTO mtp_buckets VALUES (?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(group_key, bucket) DO UPDATE SET
+                steps=steps+excluded.steps, drafted=drafted+excluded.drafted,
+                accepted=accepted+excluded.accepted, samples=samples+1,
+                partial_samples=partial_samples+excluded.partial_samples''',
+                               (group_key, bucket, steps, drafted, accepted, int(partial)))
+
+    def mtp_series(self, group_key, now):
+        end = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
+        start = end - BUCKET_COUNT * BUCKET_SECONDS
+        if start < 0:
+            return None
+        with closing(self._connect()) as connection:
+            rows = connection.execute('''SELECT bucket, steps, drafted, accepted, samples, partial_samples
+                FROM mtp_buckets WHERE group_key=? AND bucket>=? AND bucket<?''',
+                                      (group_key, start, end)).fetchall()
+        grouped = {bucket: (steps, drafted, accepted, samples, partial)
+                   for bucket, steps, drafted, accepted, samples, partial in rows}
+        points = []
+        for bucket in range(start, end, BUCKET_SECONDS):
+            steps, drafted, accepted, samples, partial = grouped.get(bucket, (0, 0, 0, 0, 0))
+            points.append({'start': bucket, 'end': bucket + BUCKET_SECONDS, 'steps': steps if samples else None,
+                           'drafted': drafted if samples else None, 'accepted': accepted if samples else None,
+                           'acceptance_rate': accepted / drafted if samples and drafted > 0 else None,
+                           # A sampled delta cannot establish coverage of the whole bucket.
+                           'samples': samples, 'partial': samples > 0,
+                           'time_coverage': 'unverified' if samples else None,
+                           'partial_workers': partial > 0})
+        return {'method': 'vllm-mtp-counter-delta-v1', 'bucket_seconds': BUCKET_SECONDS, 'points': points}
 
 
 class MotorCollector:
@@ -336,7 +445,9 @@ class MotorCollector:
         history_ok = self.history is not None
         for identity, group in sorted(groups.items()):
             role = group['role']
-            group_key = _fingerprint(json.dumps(['motor', identity, role, group['targets']], separators=(',', ':')))
+            # Previous histories did not identify a model and cannot safely be attributed.
+            group_key = _fingerprint(json.dumps(['motor-v2', identity, role, group['targets'], group['model_name']],
+                                                separators=(',', ':')))
             # 48 bits stay exactly representable as an integer in the browser.
             public_id = int(group_key[:12], 16)
             node = {'label': ('Prefill ' if role == 'prefill' else 'Decode ') + group_key[:8],
@@ -344,8 +455,12 @@ class MotorCollector:
                     'source_ok': False, 'backend_ready': group['ready'], 'clock_ok': True,
                     'clock_uncertainty_seconds': 0, 'driver_ok': False,
                     'expected_endpoints': len(group['targets']),
-                    'prefill': None, 'decode': None, 'hbm': None, 'phase_timers': None, 'history': None}
+                    'prefill': None, 'decode': None, 'hbm': None, 'phase_timers': None, 'history': None,
+                    'mtp': None, 'mtp_history': None}
             rates, window_starts, window_ends, deadlines, observed_times, count_delta, seconds_delta = [], [], [], [], [], 0, 0.0
+            mtp_lifetime, mtp_interval, mtp_times, mtp_window = [], [], [], []
+            mtp_key = _fingerprint(json.dumps(['mtp-v1', identity, role, group['targets'], group['model_name']],
+                                              separators=(',', ':')))
             metrics = {'running': [], 'waiting': [], 'input_total': [], 'hit_pairs': []}
             observed_endpoints = 0
             valid_timer_workers = 0
@@ -356,6 +471,12 @@ class MotorCollector:
                 if reading is None:
                     continue
                 values, stamp, sampled_at, uncertainty = reading
+                # Motor's registered model must match every series used in the display.
+                model = group['model_name']
+                values = {name: ({labels: value for labels, value in series.items()
+                                  if model is not None and dict(labels).get('model_name') == model}
+                                 if name.startswith('vllm:') else series)
+                          for name, series in values.items()}
                 age = now_monotonic - stamp
                 earliest = sampled_at - uncertainty
                 if (not 0 <= age + uncertainty < self.interval * 2 + 5 or
@@ -365,6 +486,10 @@ class MotorCollector:
                 observed_times.append(earliest)
                 node['source_ok'] = True
                 node['clock_uncertainty_seconds'] = max(node['clock_uncertainty_seconds'], uncertainty)
+                mtp = _mtp_counts(values, group['model_name']) if role == 'decode' else None
+                if mtp is not None:
+                    mtp_lifetime.append(mtp)
+                    mtp_times.append(earliest)
                 for key, name in (('running', 'vllm:num_requests_running'),
                                   ('waiting', 'vllm:num_requests_waiting')):
                     value = _sum_metric(values, name)
@@ -390,6 +515,10 @@ class MotorCollector:
                         abs((sampled_at - old_sampled_at) - duration) > 5 + uncertainty + old_uncertainty or
                         values['process_start_time_seconds'] != old['process_start_time_seconds']):
                     continue
+                mtp_change = _mtp_change(values, old, group['model_name']) if role == 'decode' else None
+                if mtp_change is not None:
+                    mtp_interval.append(mtp_change)
+                    mtp_window.append((old_sampled_at - old_uncertainty, sampled_at, earliest))
                 name = 'vllm:prompt_tokens_by_source_total' if role == 'prefill' else 'vllm:generation_tokens_total'
                 change = _delta(values, old, name, 'local_compute' if role == 'prefill' else None)
                 if change is None:
@@ -428,6 +557,33 @@ class MotorCollector:
                             self.history.record(group_key, role, part['log_at'], rate, partial=part['partial'])
                         except (OSError, sqlite3.Error, ValueError, OverflowError):
                             history_ok = False
+            mtp_partial = common_sources < len(self.ports) or ambiguous
+            lifetime = _mtp_summary(mtp_lifetime, len(group['targets']), partial=mtp_partial)
+            interval = _mtp_summary(mtp_interval, len(group['targets']), partial=mtp_partial)
+            if lifetime is not None:
+                lifetime.update(sampled_at=min(mtp_times), valid_until=min(mtp_times) + self.interval * 2 + 5)
+            if interval is not None:
+                span = max(end for _, end, _ in mtp_window) - min(start for start, _, _ in mtp_window)
+                if span > 60:
+                    interval = None
+                else:
+                    interval.update(sampled_at=max(end for _, end, _ in mtp_window),
+                                    valid_until=min(earliest for _, _, earliest in mtp_window) + self.interval * 2 + 5,
+                                    span_seconds=span)
+                    if self.history is not None:
+                        try:
+                            self.history.record_mtp(mtp_key, interval['sampled_at'], interval['steps'],
+                                                    interval['drafted'], interval['accepted'],
+                                                    partial=interval['partial'])
+                        except (OSError, sqlite3.Error, ValueError, OverflowError):
+                            history_ok = False
+            if lifetime is not None or interval is not None:
+                node['mtp'] = {'lifetime': lifetime, 'interval': interval}
+            if self.history is not None and role == 'decode' and group['model_name']:
+                try:
+                    node['mtp_history'] = self.history.mtp_series(mtp_key, now)
+                except (OSError, sqlite3.Error, ValueError, OverflowError):
+                    history_ok = False
             pairs = metrics['hit_pairs']
             hit_total = _sum_values([hit for hit, _ in pairs])
             query_total = _sum_values([query for _, query in pairs])
@@ -483,6 +639,14 @@ class MotorCollector:
             metrics = node.get('engine_metrics')
             if metrics is not None and (not 0 <= now - metrics['sampled_at'] or now >= metrics['valid_until']):
                 node['engine_metrics'] = None
+            mtp = node.get('mtp')
+            if mtp is not None:
+                for key in ('lifetime', 'interval'):
+                    part = mtp.get(key)
+                    if part is not None and (not 0 <= now - part['sampled_at'] or now >= part['valid_until']):
+                        mtp[key] = None
+                if not any(mtp.values()):
+                    node['mtp'] = None
         return value
 
     def start(self):

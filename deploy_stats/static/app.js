@@ -23,8 +23,8 @@ let currentView = 'overview';
 const tables = {
   active: {selector: '#active', sort: 'elapsed', direction: 'desc', columns: ['ip', 'session', 'elapsed', 'phase', 'input', 'output', 'hit_rate', 'tps']},
   backends: {selector: '#backends', sort: 'port', direction: 'asc', columns: ['port', 'running', 'waiting', 'workers_alive', 'admission_ready', 'input_total', 'hit_rate'], noPager: true},
-  sessions: {selector: '#sessions', sort: 'last_finished', direction: 'desc', columns: ['session', 'ips', 'requests', 'input', 'output', 'hit_rate', 'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share']},
-  requests: {selector: '[aria-labelledby="sessions-heading"]', sort: 'finished', direction: 'desc', columns: ['finished', 'ip', 'session', 'state', 'input', 'output', 'hit_rate', 'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share']},
+  sessions: {selector: '#sessions', sort: 'last_finished', direction: 'desc', columns: ['session', 'ips', 'requests', 'input', 'output', 'cached', 'uncached_input', 'hit_rate', 'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share']},
+  requests: {selector: '[aria-labelledby="sessions-heading"]', sort: 'finished', direction: 'desc', columns: ['finished', 'ip', 'session', 'state', 'input', 'output', 'cached', 'uncached_input', 'hit_rate', 'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share']},
   clients: {selector: '#clients', sort: 'output', direction: 'desc', columns: ['ip', 'requests', 'total', 'input', 'output', 'cached', 'request_tps', 'window_tps']},
   days: {selector: '#daily', sort: 'date', direction: 'desc', columns: ['date', 'input', 'output', 'cached']},
 };
@@ -45,6 +45,44 @@ const setTextIfPresent = (id, value) => { const element = $(id); if (element) el
 
 function freshTelemetry(part, now) {
   return part && typeof part.valid_until === 'number' && Number.isFinite(part.valid_until) && now < part.valid_until ? part : null;
+}
+
+function validMtp(part, now) {
+  if (!freshTelemetry(part, now) || typeof part.sampled_at !== 'number' || !Number.isFinite(part.sampled_at) ||
+      part.sampled_at > now || !['steps', 'drafted', 'accepted', 'valid_endpoints', 'expected_endpoints'].every(
+        (key) => Number.isSafeInteger(part[key]) && part[key] >= 0) ||
+      part.accepted > part.drafted || part.valid_endpoints < 1 || part.valid_endpoints > part.expected_endpoints) return null;
+  return part;
+}
+
+function mtpSummary(data, nodes, port, now, kind) {
+  if (!data || data.available !== true || data.kind !== 'vllm-motor-telemetry') return null;
+  const groups = nodes.filter((node) => node && node.role === 'decode' && (port === 'all' || node.backend_port === port));
+  if (!groups.length || new Set(groups.map((node) => node.backend_port)).size !== groups.length) return null;
+  const parts = groups.flatMap((node) => {
+    const part = node.source_ok === true && node.backend_ready === true && node.mtp && validMtp(node.mtp[kind], now);
+    return part ? [part] : [];
+  });
+  if (!parts.length) return null;
+  const steps = parts.reduce((sum, part) => sum + part.steps, 0);
+  const drafted = parts.reduce((sum, part) => sum + part.drafted, 0);
+  const accepted = parts.reduce((sum, part) => sum + part.accepted, 0);
+  if (![steps, drafted, accepted].every(Number.isSafeInteger) || accepted > drafted) return null;
+  return {steps, drafted, accepted, rate: drafted ? accepted / drafted : null,
+    groups: parts.length, group_total: groups.length,
+    workers: parts.reduce((sum, part) => sum + part.valid_endpoints, 0),
+    workers_total: groups.reduce((sum, node) => sum + (node.expected_endpoints || 0), 0),
+    partial: parts.length < groups.length || parts.some((part) => part.partial === true)};
+}
+
+function renderMtp(data, nodes, port, now) {
+  const lifetime = mtpSummary(data, nodes, port, now, 'lifetime');
+  const interval = mtpSummary(data, nodes, port, now, 'interval');
+  setTextIfPresent('mtp-acceptance', lifetime ? percent(lifetime.rate) : '—');
+  const coverage = lifetime ? `${lifetime.groups}/${lifetime.group_total} 注册组 · ${lifetime.workers}/${lifetime.workers_total} 端点${lifetime.partial ? ' · 部分数据' : ''}` : '所选范围暂无推测解码指标';
+  const recent = interval && interval.drafted ? ` · 最近采样 ${percent(interval.rate)}（${interval.groups}/${interval.group_total} 组，${interval.workers}/${interval.workers_total} 端点${interval.partial ? '，部分数据' : ''}）` : ' · 最近采样无有效草稿';
+  setTextIfPresent('mtp-detail', `${coverage}${lifetime ? recent : ''}`);
+  renderMtpHistory(data, nodes, port);
 }
 
 function telemetryValues(data, port, now) {
@@ -196,6 +234,7 @@ function renderTelemetry(data) {
     select.value = String(telemetryNodePort);
   }
   const values = telemetryValues(data, telemetryNodePort, now);
+  renderMtp(data, nodes, telemetryNodePort, now);
   const selectedNode = telemetryNodePort === 'all' ? combinedDeviceHistory(data, nodes) : nodes.find((item) => item.backend_port === telemetryNodePort);
   renderDeviceHistory(data, selectedNode);
   const prefillSample = selectedNode && freshTelemetry(selectedNode.prefill, now);
@@ -275,6 +314,8 @@ function renderTelemetry(data) {
     cell(row, hbm ? `${number.format(hbm.mean_percent)}% · ${hbm.device_count} 卡` : '—');
     cell(row, timer('prefill'));
     cell(row, timer('decode'));
+    const mtp = usable && item.backend_ready === true && item.mtp && validMtp(item.mtp.lifetime, now);
+    cell(row, mtp ? `${percent(mtp.drafted ? mtp.accepted / mtp.drafted : null)} · ${mtp.valid_endpoints}/${mtp.expected_endpoints} 端点${mtp.partial ? ' · 部分数据' : ''}` : '—');
     const engine = Boolean(prefill || decode);
     const device = Boolean(hbm);
     cell(row, item.duplicate_source ? '设备组重复，待核验' : !item.clock_ok ? '时钟不可用' :
@@ -285,7 +326,7 @@ function renderTelemetry(data) {
   });
   if (!nodes.length) {
     const row = document.createElement('tr');
-    const value = document.createElement('td'); value.colSpan = 8; value.className = 'empty';
+    const value = document.createElement('td'); value.colSpan = 9; value.className = 'empty';
     value.textContent = '真实采样尚未连接'; row.appendChild(value); tbody.appendChild(row);
   }
   const profile = selectedNode && selectedNode.assumptions;
@@ -301,7 +342,7 @@ function renderTelemetry(data) {
   setTextIfPresent('device-history-note', motor ?
     '速度为每个 10 分钟区间内的 vLLM 计数差速率采样均值；跨组对当前设备组的有效采样求和。空心点表示部分采集；采集前或不可用期间留空。' :
     '速度是各组日志步骤速率的区间采样均值之和；空心点表示部分设备组有样本。采集前或不可用期间留空。');
-  const deadlines = nodes.flatMap((item) => [item.prefill, item.decode, item.hbm])
+  const deadlines = nodes.flatMap((item) => [item.prefill, item.decode, item.hbm, item.mtp && item.mtp.lifetime, item.mtp && item.mtp.interval])
     .map((part) => part && part.valid_until).filter((value) => typeof value === 'number' && Number.isFinite(value) && value > now);
   if (deadlines.length) telemetryExpiry = setTimeout(() => renderTelemetry(telemetrySnapshot),
     Math.min(2147483647, Math.max(1, (Math.min(...deadlines) - now) * 1000 + 20)));
@@ -612,7 +653,7 @@ function renderSessions(data) {
   updatePager(tables.sessions, data.session_count);
   updatePager(tables.requests, data.request_count);
   $('session-count').textContent = `${count(data.session_count)} 个可识别会话 · ${count(data.session_unknown_count)} 个请求未知`;
-  if (!data.sessions.length) empty(summary, 11, '当前页暂无可识别会话');
+  if (!data.sessions.length) empty(summary, 13, '当前页暂无可识别会话');
   data.sessions.forEach((item) => {
     const row = document.createElement('tr');
     const view = {known: item.known, partial: item.partial, complete: data.snapshot_complete && item.known === item.requests};
@@ -621,6 +662,8 @@ function renderSessions(data) {
     cell(row, `${count(item.requests)} / ${count(item.known)} 完整 / ${count(item.partial || 0)} 部分`);
     cell(row, item.input === null ? '—' : display(item.input, view));
     cell(row, item.output === null ? '—' : display(item.output, view));
+    cell(row, item.cached === null || item.cached === undefined ? '—' : display(item.cached, view, false, false));
+    cell(row, item.uncached_input === null || item.uncached_input === undefined ? '—' : display(item.uncached_input, view, false, false));
     cell(row, percent(item.hit_rate));
     cell(row, seconds(item.first_visible)); cell(row, seconds(item.after_first));
     cell(row, rate(item.input_per_wait)); cell(row, rate(item.output_per_after_first));
@@ -629,7 +672,7 @@ function renderSessions(data) {
   });
   const body = $('sessions-body');
   body.replaceChildren();
-  if (!data.requests.length) empty(body, 12, '当前页暂无请求记录');
+  if (!data.requests.length) empty(body, 14, '当前页暂无请求记录');
   const states = {known: '已计量', partial: '部分用量', missing: '未计量', failed: '失败', interrupted: '中断'};
   data.requests.forEach((item) => {
     const row = document.createElement('tr');
@@ -637,7 +680,8 @@ function renderSessions(data) {
     cell(row, item.ip || '未知来源');
     cell(row, fingerprint(item.session));
     cell(row, `${states[item.state] || '未知'}${item.status ? ` ${item.status}` : ''}`);
-    cell(row, count(item.input)); cell(row, count(item.output)); cell(row, percent(item.hit_rate));
+    cell(row, count(item.input)); cell(row, count(item.output)); cell(row, count(item.cached));
+    cell(row, count(item.uncached_input)); cell(row, percent(item.hit_rate));
     cell(row, seconds(item.first_visible)); cell(row, seconds(item.after_first));
     cell(row, rate(item.input_per_wait)); cell(row, rate(item.output_per_after_first));
     cell(row, item.first_share === null ? '—' : `${percent(item.first_share)} / ${percent(item.after_first_share)}`);
@@ -778,6 +822,60 @@ function combinedDeviceHistory(data, nodes) {
     decode_group_count: nodes.filter((node) => data.kind !== 'vllm-motor-telemetry' || node.role === 'decode').length, points}};
 }
 
+function renderMtpHistory(data, nodes, port) {
+  const svg = $('chart-mtp-svg'), label = $('chart-mtp');
+  if (!svg || !label) return;
+  svg.replaceChildren();
+  [16, 34, 52].forEach((y) => svg.appendChild(svgElement('line', {x1: 0, y1: y, x2: 800, y2: y, class: 'grid'})));
+  const groups = data && data.available === true && data.history_available === true && data.kind === 'vllm-motor-telemetry' ?
+    nodes.filter((node) => node && node.role === 'decode' && (port === 'all' || node.backend_port === port)) : [];
+  const histories = groups.flatMap((node) => {
+    const history = node.mtp_history;
+    if (!history || history.method !== 'vllm-mtp-counter-delta-v1' || history.bucket_seconds !== 600 ||
+        !Array.isArray(history.points) || history.points.length !== 144 ||
+        history.points.some((point, i) => !point || !Number.isSafeInteger(point.start) || point.start < 0 ||
+          point.end !== point.start + 600 || (i && point.start !== history.points[i - 1].start + 600))) return [];
+    return [new Map(history.points.map((point) => [point.start, point]))];
+  });
+  if (!groups.length || new Set(groups.map((node) => node.backend_port)).size !== groups.length || !histories.length) {
+    attachTrendTooltip(svg, []); label.textContent = '等待 MTP 历史采样'; return;
+  }
+  const starts = Array.from(histories[0].keys());
+  const points = starts.map((start) => {
+    const valid = histories.map((history) => history.get(start)).filter((point) => point &&
+      Number.isSafeInteger(point.samples) && point.samples > 0 && Number.isSafeInteger(point.drafted) && point.drafted >= 0 &&
+      Number.isSafeInteger(point.accepted) && point.accepted >= 0 && point.accepted <= point.drafted);
+    const drafted = valid.reduce((sum, point) => sum + point.drafted, 0);
+    const accepted = valid.reduce((sum, point) => sum + point.accepted, 0);
+    if (!Number.isSafeInteger(drafted) || !Number.isSafeInteger(accepted) || !drafted) return null;
+    return {start, drafted, accepted, rate: accepted / drafted, groups: valid.length,
+            timeUnverified: valid.some((point) => point.time_coverage !== 'complete'),
+            partial: valid.length < groups.length || valid.some((point) => point.partial === true || point.time_coverage !== 'complete')};
+  });
+  const descriptions = Array(points.length).fill(null);
+  let segment = [], segmentPartial = false, drafted = 0, accepted = 0, buckets = 0, partialBuckets = 0;
+  const draw = () => {
+    if (segment.length > 1) svg.appendChild(svgElement('polyline', {points: segment.join(' '), class: `mtp${segmentPartial ? ' partial' : ''}`}));
+    segment = [];
+  };
+  points.forEach((point, index) => {
+    if (!point) { draw(); return; }
+    if (segment.length && point.partial !== segmentPartial) draw();
+    segmentPartial = point.partial;
+    const x = index * 800 / (points.length - 1), y = 59 - point.rate * 50;
+    segment.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+    const marker = svgElement('circle', {cx: x, cy: y, r: 2.5, class: `mtp${point.partial ? ' partial' : ''}`});
+    const period = `${dateTime.format(new Date(point.start * 1000))}–${dateTime.format(new Date((point.start + 600) * 1000))}`;
+    const description = `${period}\n推测解码草稿接受率：${percent(point.rate)}\n接受 ${count(point.accepted)} / 草稿 ${count(point.drafted)} · ${point.groups}/${groups.length} 注册组${point.partial ? ' · 部分数据' : ''}${point.timeUnverified ? ' · 时间覆盖未核验' : ''}`;
+    const title = svgElement('title', {}); title.textContent = description;
+    marker.appendChild(title); svg.appendChild(marker); descriptions[index] = description;
+    drafted += point.drafted; accepted += point.accepted; buckets++; if (point.partial) partialBuckets++;
+  });
+  draw(); attachTrendTooltip(svg, descriptions);
+  label.textContent = drafted && Number.isSafeInteger(drafted) && Number.isSafeInteger(accepted) ?
+    `${percent(accepted / drafted)} · ${count(buckets)} 个有草稿区间${partialBuckets ? ` · ${count(partialBuckets)} 个部分区间` : ''}` : '暂无有草稿的区间';
+}
+
 function renderDeviceHistory(data, selectedNode) {
   const dropped = data && Number.isSafeInteger(data.history_dropped) && data.history_dropped > 0 ? data.history_dropped : 0;
   setTextIfPresent('device-history-health', dropped ? ` 历史队列已跳过 ${count(dropped)} 次采集。` : '');
@@ -892,6 +990,8 @@ function render(data) {
   $('total-input').textContent = display(stats.input, stats);
   $('total-output').textContent = display(stats.output, stats);
   $('total-cached').textContent = display(stats.cached, stats, false, false);
+  setTextIfPresent('total-uncached', stats.uncached_input === null || stats.uncached_input === undefined ? '—' :
+    display(stats.uncached_input, stats, false, false));
   $('total-tps').textContent = stats.window_tps === null ? '—' : display(stats.window_tps, stats, true);
   $('cache-detail').textContent = stats.hit_rate === null ? '有缓存明细的请求命中率 —' : `有缓存明细的请求按输入 Token 加权 ${number.format(stats.hit_rate * 100)}%`;
   setTextIfPresent('overview-prefill-wait', seconds(stats.first_mean));
@@ -963,7 +1063,7 @@ async function refresh() {
     $('status-dot').classList.remove('live');
     $('status-label').textContent = '统计不可用';
     $('updated').textContent = '请检查本机采集和账本';
-    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-tps',
+    ['total-usage', 'total-input', 'total-output', 'total-cached', 'total-uncached', 'total-tps',
       'overview-prefill-wait', 'overview-hit-rate'].forEach((id) => setTextIfPresent(id, '—'));
     ['overview-wait-samples', 'overview-hit-samples'].forEach((id) => setTextIfPresent(id, '统计不可用'));
     charts.forEach(({id}) => {
@@ -976,7 +1076,7 @@ async function refresh() {
     empty($('clients-body'), 8, '统计不可用');
     empty($('days-body'), 4, '统计不可用');
     ['active-count', 'success-rate', 'requests-rate', 'first-p95', 'elapsed-p95'].forEach((id) => { $(id).textContent = '—'; });
-    [['active-body', 8], ['backends-body', 7], ['session-summary-body', 11], ['sessions-body', 12]].forEach(([id, columns]) => {
+    [['active-body', 8], ['backends-body', 7], ['session-summary-body', 13], ['sessions-body', 14]].forEach(([id, columns]) => {
       $(id).replaceChildren(); empty($(id), columns, '统计不可用');
     });
     $('notice').classList.add('warning');

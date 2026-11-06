@@ -18,6 +18,7 @@ from deploy_stats.web import Dashboard
 
 def instance(name, role, ports):
     return {'id': name, 'role': role, 'status': 'active', 'healthy': True,
+            'model_name': 'synthetic',
             'endpoints': [{'id': str(port), 'ip': '127.0.0.1', 'business_port': str(port)}
                           for port in ports]}
 
@@ -311,7 +312,7 @@ class MotorMetricsTests(unittest.TestCase):
                         self.assertEqual(response.status, 200)
                         self.assertFalse(value['collector_live'])
                         self.assertEqual(len(value['backends']), 2)
-                        for path in ('/api/v5/active', '/app-telemetry-v5.js'):
+                        for path in ('/api/v5/active', '/app-telemetry-v7.js'):
                             conn = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=3)
                             conn.request('GET', path)
                             response = conn.getresponse()
@@ -326,7 +327,7 @@ class MotorMetricsTests(unittest.TestCase):
                             conn.close()
                             self.assertEqual(response.status, 409, path)
                         conn = HTTPConnection('127.0.0.1', dashboard.server_port, timeout=3)
-                        conn.request('GET', '/app-telemetry-v4.js')
+                        conn.request('GET', '/app-telemetry-v6.js')
                         response = conn.getresponse()
                         response.read()
                         conn.close()

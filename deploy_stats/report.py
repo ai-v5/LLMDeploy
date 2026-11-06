@@ -12,9 +12,9 @@ from .store import IDENTITY, SCHEMA, partial_schema_available
 TZ = timezone(timedelta(hours=8))
 BUCKET_SECONDS = 600
 COVERAGE_EPSILON = 1e-6
-REQUEST_SORTS = frozenset(('finished', 'ip', 'session', 'state', 'input', 'output', 'hit_rate',
+REQUEST_SORTS = frozenset(('finished', 'ip', 'session', 'state', 'input', 'output', 'cached', 'uncached_input', 'hit_rate',
                            'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share'))
-SESSION_SORTS = frozenset(('last_finished', 'session', 'ips', 'requests', 'input', 'output', 'hit_rate',
+SESSION_SORTS = frozenset(('last_finished', 'session', 'ips', 'requests', 'input', 'output', 'cached', 'uncached_input', 'hit_rate',
                            'first_visible', 'after_first', 'input_per_wait', 'output_per_after_first', 'first_share'))
 
 
@@ -43,7 +43,7 @@ def _coverage(runs, start, end, now):
 
 def _counts(rows):
     out = {'requests': 0, 'known': 0, 'partial': 0, 'missing': 0, 'failed': 0, 'interrupted': 0,
-           'input': 0, 'output': 0, 'cached': 0, 'elapsed': 0.0}
+           'input': 0, 'output': 0, 'cached': 0, 'uncached_input': 0, 'elapsed': 0.0}
     hit_input = 0
     for row in rows:
         state, prompt, output, cached, elapsed = row
@@ -54,10 +54,12 @@ def _counts(rows):
             out['output'] += output
             if state == 'known':
                 out['cached'] += cached
+                out['uncached_input'] += prompt - cached
                 hit_input += prompt
             out['elapsed'] += elapsed
         else:
             out[state if state in ('missing', 'failed', 'interrupted') else 'missing'] += 1
+    out['uncached_input'] = out['uncached_input'] if out['known'] else None
     out['hit_rate'] = out['cached'] / hit_input if hit_input else None
     out['request_tps'] = out['output'] / out['elapsed'] if out['elapsed'] else None
     return out
@@ -82,6 +84,7 @@ def _request_view(row):
     measured = state in ('known', 'partial')
     return {'id': record_id, 'finished': finished, 'ip': ip, 'session': session, 'state': state,
             'status': status, 'input': prompt, 'output': output, 'cached': cached,
+            'uncached_input': prompt - cached if known else None,
             'hit_rate': cached / prompt if known and prompt else None, 'elapsed': elapsed,
             'first_visible': first if observed else None, 'after_first': tail,
             'first_share': first / elapsed if observed else None,
@@ -102,7 +105,7 @@ def _session_views(details):
         partial = [item for item in items if item['state'] == 'partial']
         measured = known + partial
         timed = [item for item in measured if item['first_visible'] is not None]
-        rate_items = [item for item in known if item['first_visible'] is not None]
+        rate_items = [item for item in known if item['first_visible'] is not None and item['first_visible'] > 0]
         wait = sum(item['first_visible'] for item in timed)
         after = sum(item['after_first'] for item in timed)
         total_input = sum(item['input'] for item in measured)
@@ -116,6 +119,7 @@ def _session_views(details):
             'requests': len(items), 'known': len(known), 'partial': len(partial), 'timed': len(timed),
             'input': total_input if measured else None, 'output': total_output if measured else None,
             'cached': total_cached if known else None,
+            'uncached_input': sum(item['uncached_input'] for item in known) if known else None,
             'hit_rate': total_cached / hit_input if hit_input else None,
             'first_visible': wait if timed else None, 'after_first': after if timed else None,
             'first_share': wait / (wait + after) if timed and wait + after > 0 else None,
