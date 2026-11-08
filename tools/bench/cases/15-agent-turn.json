@@ -1,0 +1,19 @@
+{
+  "schema": 2,
+  "id": "agent-turn",
+  "title": "Agent 单轮（长输入 + 中等输出）",
+  "kind": "agent",
+  "max_tokens": 700,
+  "temperature": 0,
+  "note": "长度刻意贴合真实 agent 请求的中间态：输入数万 token、输出数百 token。短 prompt 用例会低估实际负载下的每 token 时间，本用例用于补齐这一段。",
+  "haystack": {
+    "tokens": 67000,
+    "needle": "维护窗口记录：本次变更只允许在 02:00 至 04:00 之间执行，回滚命令为 deploy rollback --to rev-1183。"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "{haystack}\n\n以上是一份运维资料。请基于它回答三点，每点两三句话：\n1) 允许的维护窗口是什么；\n2) 出问题时的回滚动作是什么；\n3) 如果要提前完成，还需要确认哪些信息。\n\n不要复述资料原文，不要罗列无关内容。"
+    }
+  ]
+}

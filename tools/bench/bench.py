@@ -64,8 +64,13 @@ def read_snippet(name):
 
 
 def build_haystack(spec):
-    """Place a needle in the middle of generated filler of roughly the asked size."""
-    haystack_chars = max(1, int(spec['tokens'] * 1.6))
+    """Place a needle in the middle of generated filler of roughly the asked size.
+
+    FILLER is mixed Chinese/English and measures about 2.9 characters per token
+    on this tokenizer family. The factor is a calibration, not a guarantee:
+    always report the server's own prompt_tokens, which every receipt keeps.
+    """
+    haystack_chars = max(1, int(spec['tokens'] * 2.92))
     repeats = max(1, haystack_chars // len(FILLER))
     body = FILLER * repeats
     needle = spec['needle']
