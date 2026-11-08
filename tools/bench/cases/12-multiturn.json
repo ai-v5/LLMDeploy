@@ -1,0 +1,59 @@
+{
+  "schema": 2,
+  "id": "multiturn",
+  "title": "多轮对话（前缀缓存复用）",
+  "kind": "multiturn",
+  "max_tokens": 512,
+  "temperature": 0,
+  "note": "三轮共享同一前缀，第 2、3 轮应命中前缀缓存；比较逐轮 TTFT 可观察缓存收益。",
+  "turns": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "下面是一段服务配置说明。\n\nmax_model_len 设为 1048576，max_num_batched_tokens 设为 2048，max_num_seqs 设为 4，block_size 设为 128，并开启前缀缓存与分块预填充。\n\n请先确认你读到了这些参数，只用一句话复述。"
+        }
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "下面是一段服务配置说明。\n\nmax_model_len 设为 1048576，max_num_batched_tokens 设为 2048，max_num_seqs 设为 4，block_size 设为 128，并开启前缀缓存与分块预填充。\n\n请先确认你读到了这些参数，只用一句话复述。"
+        },
+        {
+          "role": "assistant",
+          "content": "已读到：窗口 1048576，单批 2048 token，最大并发序列 4，块大小 128，前缀缓存与分块预填充均开启。"
+        },
+        {
+          "role": "user",
+          "content": "如果保持 block_size 不变而把 max_num_batched_tokens 降到 1024，最直接的影响是什么？一句话回答。"
+        }
+      ]
+    },
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "下面是一段服务配置说明。\n\nmax_model_len 设为 1048576，max_num_batched_tokens 设为 2048，max_num_seqs 设为 4，block_size 设为 128，并开启前缀缓存与分块预填充。\n\n请先确认你读到了这些参数，只用一句话复述。"
+        },
+        {
+          "role": "assistant",
+          "content": "已读到：窗口 1048576，单批 2048 token，最大并发序列 4，块大小 128，前缀缓存与分块预填充均开启。"
+        },
+        {
+          "role": "user",
+          "content": "如果保持 block_size 不变而把 max_num_batched_tokens 降到 1024，最直接的影响是什么？一句话回答。"
+        },
+        {
+          "role": "assistant",
+          "content": "单次 prefill 能处理的 token 变少，长输入需要更多分块轮次，首 token 延迟上升。"
+        },
+        {
+          "role": "user",
+          "content": "那反过来把它提高到 8192 呢？一句话回答。"
+        }
+      ]
+    }
+  ]
+}

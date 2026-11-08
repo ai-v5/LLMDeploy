@@ -1,0 +1,21 @@
+{
+  "schema": 2,
+  "id": "slide",
+  "title": "幻灯片解读（单图 + 文本）",
+  "kind": "vision",
+  "max_tokens": 2048,
+  "temperature": 0,
+  "note": "图像由 tools/bench/make_slide.py --variant main 绘制，不含真实业务数据。",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "asset": "slide-1280x720.png"},
+        {
+          "type": "text",
+          "text": "这是一张 PPT 页面截图。请解读：1) 页面主题是什么；2) 四个要点分别讲了什么；3) 底部三个指标代表什么。用中文分条回答。"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema": 2,
+  "id": "longform",
+  "title": "长文生成（持续 decode 稳定性）",
+  "kind": "text",
+  "max_tokens": 3000,
+  "temperature": 0,
+  "note": "要求输出结构化长文，用于观察 TPOT 在长时间生成中的漂移。",
+  "messages": [
+    {
+      "role": "user",
+      "content": "写一份约 1500 字的技术说明，主题是「为什么推理服务要区分首 token 延迟与每 token 延迟」。分五节：概念、测量方法、相互影响、常见误区、工程建议。直接输出正文，不要前言和总结套话。"
+    }
+  ]
+}
