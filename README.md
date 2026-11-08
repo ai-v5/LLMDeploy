@@ -44,7 +44,7 @@ A2、A3 后续沿同一格式增加实际型号与引擎，不继承 A5 的设�
 - [多后端网关](docs/gateway.md)：认证、会话保持、共享准入、取消连接与滚动排空。
 - [DeepInfer 服务池](docs/deployments/a5/950dt/deepinfer-pool.md)：多个独立 8 卡后端、SSH、Caddy 和双入口共享路由。
 - [通知](docs/notifications.md) / [用量统计](docs/usage.md) / [空闲恢复](docs/recovery.md)。
-- [推理性能基准](docs/benchmarks.md)：13 个合成用例与 TTFT/TPOT 口径，用于同机对比不同引擎或配置。
+- [推理性能基准](docs/benchmarks.md)：14 个合成用例与 TTFT/TPOT 口径，用于同机对比不同引擎或配置。
 - [vLLM 镜像与编译](docs/image-build.md) / [换机与客户端](docs/migration.md) / [历史部署记录](docs/deployment-record.md)。
 
 文档和测试不会执行部署。生成器只生成新文件，不停止或替换容器；构建、启动、切换入口和安装服务均需操作者明确执行。
@@ -57,3 +57,4 @@ git diff --check
 ```
 
 单测、协议 fixture、历史真机使用与当前硬件验收分别说明，不相互替代。
+
