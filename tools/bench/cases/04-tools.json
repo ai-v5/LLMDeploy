@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "tools",
+  "title": "工具调用（检索类 agent 首步决策）",
+  "kind": "tools",
+  "max_tokens": 512,
+  "temperature": 0,
+  "note": "工具 schema 自写、不联网执行；用于观察 agent 首个动作（tool_call）的到达时间。",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "web_search",
+        "description": "Search the public web and return ranked result titles, URLs and snippets.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "limit": {"type": "integer", "description": "Maximum number of results, 1-10.", "minimum": 1, "maximum": 10}
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fetch_page",
+        "description": "Fetch one URL and return its readable text content.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string", "description": "Absolute HTTP(S) URL."},
+            "max_chars": {"type": "integer", "description": "Truncate the extracted text to this many characters."}
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你可以使用工具检索资料。需要外部或最新信息时必须先调用工具，不要凭记忆回答，也不要在同一轮里臆造结果。"
+    },
+    {
+      "role": "user",
+      "content": "帮我查一下 CANN 9.2 里 HCCL 的 HCCL_ALGO 环境变量支持哪些算法名，并给出官方文档链接。"
+    }
+  ]
+}

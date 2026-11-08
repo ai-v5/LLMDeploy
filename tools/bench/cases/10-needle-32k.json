@@ -1,0 +1,19 @@
+{
+  "schema": 2,
+  "id": "needle-32k",
+  "title": "长上下文检索（约 32K 输入）",
+  "kind": "longcontext",
+  "max_tokens": 256,
+  "temperature": 0,
+  "note": "填充文本由 bench.py 内的中性段落生成，校准码为虚构值；用于观察 prefill 规模对首 token 的影响。",
+  "haystack": {
+    "tokens": 32000,
+    "needle": "运维记录：本次变更的校准码是 KX-7391-QL，登记人代号 A-17。"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "{haystack}\n\n以上资料中间的运维记录里，校准码是什么？只回答校准码本身。"
+    }
+  ]
+}

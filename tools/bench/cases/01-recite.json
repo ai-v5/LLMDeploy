@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "recite",
+  "title": "长文背诵（decode 密集）",
+  "kind": "text",
+  "max_tokens": 4096,
+  "temperature": 0,
+  "note": "公有领域古文，输出稳定可复现；用于观察纯 decode 阶段的每 token 时间。",
+  "messages": [
+    {
+      "role": "user",
+      "content": "请完整背诵范仲淹《岳阳楼记》全文，从「庆历四年春」开始逐字准确背诵，不要翻译、不要解释、不要加标题。"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "schema": 2,
+  "id": "tools-multi",
+  "title": "多工具选择（检索 + 抓取 + 计算）",
+  "kind": "tools",
+  "max_tokens": 512,
+  "temperature": 0,
+  "note": "三个工具同时给出，观察模型是否直接产出一个 tool_call 而不是先长篇思考。",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "web_search",
+        "description": "Search the public web and return ranked results.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fetch_page",
+        "description": "Fetch one URL and return readable text.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string"},
+            "max_chars": {"type": "integer"}
+          },
+          "required": ["url"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_python",
+        "description": "Execute a short Python snippet in a sandbox and return stdout.",
+        "parameters": {
+          "type": "object",
+          "properties": {"code": {"type": "string"}},
+          "required": ["code"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你可以调用工具。拿到外部信息前不要凭记忆作答。"
+    },
+    {
+      "role": "user",
+      "content": "帮我查一下 vLLM 最新版本的发布说明页，然后告诉我里面有没有提到 Ascend 相关变更。"
+    }
+  ]
+}

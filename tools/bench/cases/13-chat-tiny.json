@@ -1,0 +1,15 @@
+{
+  "schema": 2,
+  "id": "chat-tiny",
+  "title": "极短请求（首 token 下限）",
+  "kind": "text",
+  "max_tokens": 64,
+  "temperature": 0,
+  "note": "最小负载，用于观察引擎调度与网络外的最小首 token 时间。",
+  "messages": [
+    {
+      "role": "user",
+      "content": "把 1 到 10 用逗号连起来，只输出数字。"
+    }
+  ]
+}

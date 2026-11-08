@@ -1,0 +1,19 @@
+{
+  "schema": 2,
+  "id": "needle-128k",
+  "title": "长上下文检索（约 128K 输入）",
+  "kind": "longcontext",
+  "max_tokens": 256,
+  "temperature": 0,
+  "note": "与 32K 版本同构造，仅输入规模不同；该 case 会占用较多 KV，共享生产服务上应慎跑。",
+  "haystack": {
+    "tokens": 128000,
+    "needle": "运维记录：本次变更的校准码是 QP-5528-KM，登记人代号 B-42。"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "{haystack}\n\n以上资料中间的运维记录里，校准码是什么？只回答校准码本身。"
+    }
+  ]
+}

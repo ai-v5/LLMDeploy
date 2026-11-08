@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "code",
+  "title": "代码开发（带并发约束的实现任务）",
+  "kind": "text",
+  "max_tokens": 2048,
+  "temperature": 0,
+  "note": "只要求实现与自测，不要求长链路审查，避免输出预算被思考吃满；用于观察代码类任务的产出速度。",
+  "messages": [
+    {
+      "role": "user",
+      "content": "用 Python 实现一个线程安全的 LRU 缓存类 `ThreadSafeLRU`：\n- `__init__(self, capacity: int)`\n- `get(self, key: str) -> Optional[str]`：命中返回值并刷新为最近使用，未命中返回 None\n- `put(self, key: str, value: str) -> None`：容量满时淘汰最久未使用项\n- 只允许一把锁，不能出现持有锁时调用用户回调\n\n要求：只输出实现代码和 3 条自测用例，不要写分析过程。"
+    }
+  ]
+}

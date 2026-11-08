@@ -1,0 +1,22 @@
+{
+  "schema": 2,
+  "id": "slide-multi",
+  "title": "多图对比解读（两张幻灯片）",
+  "kind": "vision",
+  "max_tokens": 2048,
+  "temperature": 0,
+  "note": "同一套脚本绘制的两页，用于观察视觉 token 增加对首 token 的影响。",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "asset": "slide-1280x720.png"},
+        {"type": "image", "asset": "slide-alt-1280x720.png"},
+        {
+          "type": "text",
+          "text": "这是同一个评审材料的两页幻灯片。请分别用一句话概括每页主题，然后指出两页各自关注的维度差异。"
+        }
+      ]
+    }
+  ]
+}

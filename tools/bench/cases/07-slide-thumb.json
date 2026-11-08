@@ -1,0 +1,21 @@
+{
+  "schema": 2,
+  "id": "slide-thumb",
+  "title": "缩略图解读（低分辨率视觉输入）",
+  "kind": "vision",
+  "max_tokens": 1024,
+  "temperature": 0,
+  "note": "512x288 版本，与单图 case 对比可看出视觉分辨率对首 token 的影响。",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "asset": "slide-512x288.png"},
+        {
+          "type": "text",
+          "text": "这是一张幻灯片缩略图。请说明页面标题和三个指标的数值，看不清的部分直接说看不清。"
+        }
+      ]
+    }
+  ]
+}
