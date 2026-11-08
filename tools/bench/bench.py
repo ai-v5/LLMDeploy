@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -91,8 +92,13 @@ def render_content(content, haystack):
     return parts
 
 
-def build_payload(case, model):
-    """Turn one request round of a case into an API payload."""
+def build_payload(case, model, nonce=None):
+    """Turn one request round of a case into an API payload.
+
+    `nonce` prefixes a one-line system message so that each repetition misses
+    any prefix cache. Without it a repeated prompt measures a cached prefill,
+    which is a different quantity from the first, cold one.
+    """
     haystack = {}
     if case.get('haystack'):
         haystack['body'] = build_haystack(case['haystack'])
@@ -101,6 +107,8 @@ def build_payload(case, model):
     messages = [{'role': message['role'],
                  'content': render_content(message['content'], haystack)}
                 for message in case['messages']]
+    if nonce:
+        messages.insert(0, {'role': 'system', 'content': f'request-id {nonce}'})
     payload = {'model': model, 'messages': messages, 'stream': True,
                'stream_options': {'include_usage': True},
                'max_tokens': case.get('max_tokens', 1024),
@@ -242,6 +250,10 @@ def main():
     parser.add_argument('--only', nargs='*', help='Restrict to these case ids')
     parser.add_argument('--out', required=True)
     parser.add_argument('--api-key-env', help='Environment variable holding the bearer token')
+    parser.add_argument('--warmup', type=int, default=0,
+                        help='Discarded runs per case before sampling')
+    parser.add_argument('--cache-bust', action='store_true',
+                        help='Give every sample a unique prefix so each measures a cold prefill')
     args = parser.parse_args()
 
     base = args.base_url
@@ -255,12 +267,19 @@ def main():
     api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
     probe_headers = {'Authorization': 'Bearer ' + api_key} if api_key else {}
 
-    with OPENER.open(urllib.request.Request(base.rstrip('/') + '/models',
-                                           headers=probe_headers), timeout=60) as response:
-        served = json.loads(response.read())
+    # Network floor: repeated metadata reads tell us how much of any TTFT is
+    # transport rather than prefill. Reported alongside the samples.
+    rtts = []
+    for _ in range(5):
+        began = time.monotonic()
+        with OPENER.open(urllib.request.Request(base.rstrip('/') + '/models',
+                                               headers=probe_headers), timeout=60) as response:
+            served = json.loads(response.read())
+        rtts.append(round(1000 * (time.monotonic() - began), 2))
+    baseline = median_or_none(rtts)
 
     receipt = {
-        'schema': 2,
+        'schema': 3,
         'endpoint': {'scheme': parsed.scheme,
                      'host_scope': 'loopback' if parsed.hostname in
                      ('127.0.0.1', 'localhost', '::1') else 'private-network',
@@ -269,19 +288,32 @@ def main():
         'served_models': served,
         'started_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         'repeats': args.repeats,
+        'warmup': args.warmup,
+        'cache_bust': bool(args.cache_bust),
+        'network_floor_ms': baseline,
         'cases': {},
         'bursts': {},
     }
 
     for case in cases:
         rounds = case.get('turns') or [case]
+        # A multi-turn case exists to observe prefix reuse, so busting its
+        # prefix would delete the thing being measured.
+        bust = args.cache_bust and not case.get('turns')
         per_turn = []
         for index in range(len(rounds)):
             turn_case = dict(case, **rounds[index])
+            for _ in range(args.warmup):
+                try:
+                    stream_once(base, build_payload(turn_case, args.model, 'warmup'),
+                                api_key=api_key)
+                except Exception:  # noqa: BLE001 - a failed warmup is not a sample
+                    pass
             runs = []
             for _ in range(args.repeats):
+                nonce = uuid.uuid4().hex if bust else None
                 try:
-                    runs.append(stream_once(base, build_payload(turn_case, args.model),
+                    runs.append(stream_once(base, build_payload(turn_case, args.model, nonce),
                                             api_key=api_key))
                 except urllib.error.HTTPError as exc:
                     body = exc.read().decode('utf-8', 'replace')[:300]
@@ -315,4 +347,5 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
 
