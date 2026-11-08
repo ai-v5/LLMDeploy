@@ -77,7 +77,15 @@ python3 tools/bench/bench.py \
 
 ## 记录什么配置
 
-同一份权重在不同配置下结果差异很大，所以每次测量都要求附一份引擎配置。建议至少包含：
+同一份权重在不同配置下结果差异很大，所以每次测量都要求附一份引擎配置。字段模板见
+[tools/bench/config.example.json](../tools/bench/config.example.json)，运行方式：
+
+```sh
+python3 tools/bench/bench.py --base-url ... --model ... \
+  --engine-label my-engine --config my-engine-config.json --out record/my-engine.json
+```
+
+配置会原样写进收据的 `engine.config`，和数字一一对应。建议至少包含：
 
 | 分组 | 字段 |
 | --- | --- |

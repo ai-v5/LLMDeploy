@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "engine": "replace with the serving stack name",
+  "image_id": "sha256:...",
+  "image_created": "YYYY-MM-DDTHH:MM:SSZ",
+  "vllm_version": "x.y.z",
+  "hardware": "N x <accelerator>, single node or multi node",
+  "driver_version": "x.y.z",
+  "cann": "x.y.z",
+  "parallel": {
+    "tensor_parallel": 1,
+    "data_parallel": 8,
+    "data_parallel_local": 8,
+    "expert_parallel": true,
+    "pipeline_parallel": 1,
+    "decode_context_parallel": 1
+  },
+  "quantization": "<quant method>",
+  "serving": {
+    "max_model_len": 1048576,
+    "max_num_batched_tokens": 2048,
+    "max_num_seqs": 4,
+    "block_size": 128,
+    "enable_prefix_caching": true,
+    "enable_chunked_prefill": true,
+    "swa_bounded_replay": true,
+    "served_model_name": "<served-model-name>"
+  },
+  "acceleration": {
+    "speculative_method": "<method or none>",
+    "num_speculative_tokens": 0,
+    "cudagraph_mode": "<mode or none>",
+    "cudagraph_capture_sizes": [],
+    "compilation_mode": 3
+  },
+  "memory": {
+    "kv_cache_tokens_per_rank": 0,
+    "kv_cache_available_gib": 0,
+    "max_concurrency_at_max_context": 0
+  },
+  "topology_note": "Describe P/D split or collocated deployment. This decides what the numbers can be compared against.",
+  "notes": [
+    "Every value here must be read from the running instance, not from an older recipe.",
+    "Keep the bearer token out of this file; pass it through the environment instead."
+  ]
+}

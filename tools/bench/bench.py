@@ -154,8 +154,10 @@ def stream_once(base, payload, timeout=900, api_key=None):
                     content_parts.append(text)
                 tool_calls += len(delta.get('tool_calls') or [])
     total = time.monotonic() - started
-    return {'first_any_s': round(first_any, 4) if first_any else None,
-            'first_content_s': round(first_content, 4) if first_content else None,
+    # `is not None`, not truthiness: a sub-0.05 ms first token rounds to 0.0 and
+    # would otherwise be reported as "never arrived".
+    return {'first_any_s': round(first_any, 4) if first_any is not None else None,
+            'first_content_s': round(first_content, 4) if first_content is not None else None,
             'total_s': round(total, 3), 'usage': usage,
             'chars': len(''.join(content_parts)), 'tool_call_deltas': tool_calls}
 
@@ -174,7 +176,9 @@ def summarize_runs(runs_all):
     for run in runs:
         usage = run.get('usage') or {}
         completion = usage.get('completion_tokens') or 0
-        decode_window = (run['total_s'] - run['first_any_s']) if run['first_any_s'] else 0
+        # `is not None`: a first token that rounds to 0.0 is still a measurement.
+        decode_window = ((run['total_s'] - run['first_any_s'])
+                         if run.get('first_any_s') is not None else 0)
         rows.append({'prompt_tokens': usage.get('prompt_tokens'),
                      'completion_tokens': completion,
                      'reasoning_tokens': (usage.get('completion_tokens_details') or {})
