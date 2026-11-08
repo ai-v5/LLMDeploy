@@ -34,6 +34,7 @@
 | decode 密集 | `recite` | 66 token，输出约 2K | 持续解码速率 |
 | 长文生成 | `longform` | 88 token，输出约 2.4K | 长输出下 TPOT 是否漂移 |
 | 代码开发 | `code` | 152 token，输出约 1.8K | 代码类产出速度 |
+| 代码理解与修改 | `code-review` | 575 token（含片段） | 缺陷定位与修复，思考占比较大 |
 | 工具调用 | `tools` | 单工具 schema，488 token | agent 首个 tool_call 到达时间 |
 | 多工具选择 | `tools-multi` | 三工具 schema，460 token | 工具增多后是否仍直接出动作 |
 | 单图解读 | `slide` | 1280×720 渲染图，650 token | 视觉编码开销 |
