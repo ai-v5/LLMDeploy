@@ -41,6 +41,10 @@ dsh 中只需保留这些模型能力字段；提供方类型为 `openai-complet
 
 用 `cargo build --release --locked --manifest-path client-patches/deepinfer-budget/counter/Cargo.toml` 构建计数器；二进制、tokenizer、生成模块、manifest、真实请求收据和本机配置只放在忽略的 `local/`。在支持读取打包 runtime 的 Electron Node 环境调用 `prepare.cjs RUNTIME_NODE_MODULES OUTPUT_DIR COUNTER_EXE TOKENIZER_JSON`，生成目录必须是新的。生成器核验原始 SHA，生成模块在加载时再次核验；保留上游 MIT 许可，禁止直接改写签名的 `app.asar`。
 
+DSH Desktop `0.2.1-rc.5` 的本机长请求使用 `prepare-stream.cjs`，参数与上面相同，输出目录的父目录须已存在；可在末尾传入已有的 guard 文件，以保留本机已配置的 provider 别名。该生成器另外固定 Undici 版本及入口 SHA，只为预算补丁选中的 loopback HTTP provider 创建独立 transport，不改变全局 dispatcher 或其他 provider。它让 HTTP 响应头和响应体空闲超时与该 provider 的 `streamIdleTimeoutMs` 对齐；在本机 profile 的目标 provider 上同时设置 `streamIdleTimeoutMs` 和 `timeoutMs`，例如均为 `900000` 毫秒。更长的有限超时允许较慢的首个有效输出完成，也会延后对真正卡死请求的判断；是否调整自动重试策略应结合业务选择。
+
+本补丁不删除或外置历史图片，也不改变模型、上下文窗口或输出预算。带图片的请求是否能够命中前缀缓存由实际后端实现决定；延长超时不能加速 prefill。更新前先核对 profile 的现有值及在途请求，保留原有配置差异和会话；生成新目录后验证目标及非目标 provider、图片和取消，再按实际 loader 的行为决定生效时机。上游提供并验收等效的按 provider 传输超时后，删除此 sidecar 扩展；维护责任归本配方维护者。
+
 生成的 adapter 对 `deepinfer` 和 `local950dt` 两个 provider 都执行相同的预算检查，其他 provider 的请求行为不改变。激活时禁用原 `llm-pi-ai`，将其完整 config（包括其他 provider 的原配置及凭据引用）交给唯一一个生成的 adapter 实例。不得让原版与 sidecar 并存：每个实例都会声明完整 provider catalog，目录重名会让后加载的实例在注册 adapter 前失败。禁用原 `compaction-basic`，插入生成的 compaction 模块，并分别为 `deepinfer/deepseek-v4.1-flash-1017`、`local950dt/ds-v4.1-flash-1017` 配置 `headroomTokens: 16384`、`maxTokens: 32768`、`maxOverflowRetries: 1`。普通请求和摘要请求均保留 1M 总窗口、32K 输出，不能只为其中一个别名设置策略，让另一别名回退到 64K 摘要输出。DSH patch 的 `name` 是身份断言，不能直接用它替换已有模块，必须使用 disable/insert。配置备份保留在原 profile 旁，先核对并发改动再写入，禁止复制或覆盖 session 文件。
 
 明确的上下文 400 和发送前预算不足均使用既有的 `CONTEXT_WINDOW_EXCEEDED` 压缩路径；两个 provider 均最多恢复一次，只在持久 surface 有替换后重建请求。摘要选择历史的前半段，并沿既有工具调用/结果配对边界调整，避免摘要调用重复整份超限输入。摘要或重建请求仍超限则明确失败，原始 append-only 历史保留；没有可压缩完整区间时也不静默删消息。
