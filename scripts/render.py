@@ -42,7 +42,9 @@ def command(host,recipe,repo_path=None,optional_devices=None,optional_mounts=Non
     mounts=[(root,'/deployment','ro'),(host['model_dir'],'/model','ro'),(host['runtime_dir'],'/runtime',None),(host['artifacts_dir'],'/artifacts',None),(host['cann_root'],host['cann_root'],'ro')]
     for path in ['/usr/local/dcmi','/usr/local/Ascend/driver/lib64','/usr/local/Ascend/driver/topo','/usr/local/Ascend/driver/version.info','/etc/ascend_install.info','/usr/local/Ascend/driver/tools/hccn_tool','/usr/local/bin/npu-smi']:
         mounts.append((path,path,'ro'))
-    if optional_mounts is None:optional_mounts=[p for p in ['/etc/hixlep','/lib/route.conf','/etc/hccl_rootinfo.json'] if Path(p).exists()]
+    if optional_mounts is None:
+        optional_mounts=[p for p in ['/etc/hixlep','/lib/route.conf','/etc/hccl_rootinfo.json']
+                         if (Path(p).is_file() if p=='/etc/hccl_rootinfo.json' else Path(p).exists())]
     for p in optional_mounts:mounts.append((p,p,'ro'))
     for source,target,mode in mounts:args+=['-v',source+':'+target+(':'+mode if mode else '')]
     for k,v in env.items():args+=['-e',k+'='+v]
