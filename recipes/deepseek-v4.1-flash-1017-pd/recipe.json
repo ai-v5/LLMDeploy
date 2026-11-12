@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "id": "deepseek-v4.1-flash-1017-950dt-1p1d",
+  "evidence_state": "CANDIDATE",
+  "model": {
+    "repo": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "served_name": "ds-v4.1-flash-1017"
+  },
+  "image": {
+    "tag": "quay.io/ascend/vllm-ascend:v0.30.0rc2-a5",
+    "index_digest": "sha256:10f4e41479604545b74f3684e1a98e9e7116eff6adc72ecaec765d2dbecc7e81",
+    "image_id": "sha256:c3d00a196905159dbf0b97588d34f085086c2708712fa0d1c8fedd807f0e48a4",
+    "platform": "linux/arm64",
+    "runtime_image_ids": {
+      "prefill": "sha256:e9c1ac52adbfc67293fcfa354f49407adc2055bebc7cd42d5ecaf5f4989f3ba7",
+      "decode": "sha256:850b0b5e6faee5e73b152e7682aaa2f836b310dcac5e93720b4ddd8d0c7103cb"
+    }
+  },
+  "source": {
+    "vllm_ascend_tag": "v0.30.0rc2",
+    "vllm_ascend_commit": "8fde6d4e335fe300e2b949aab0e31659cce0811d",
+    "vllm_main_verified_commit": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+    "dockerfile_vllm_tag": "v0.30.0",
+    "image_vllm_commit": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+    "runtime_versions": "CPU_IMPORT_VERIFIED_NOT_NPU_VALIDATED"
+  },
+  "base_versions": {
+    "evidence": "CPU_INSPECTED_WITHOUT_NPU_DEVICES",
+    "vllm": "0.30.0+empty",
+    "vllm_ascend": "0.30.0rc2",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post7",
+    "triton_ascend": "3.6.0+dev20260923230212",
+    "cann": "9.2.0",
+    "cann_inner_version": "V100R001C25B114",
+    "mooncake_transfer_engine_npu": "0.3.11.post1",
+    "memfabric_hybrid": "1.3.0",
+    "memcache_hybrid": "1.3.0",
+    "transformers": "5.14.1"
+  },
+  "operator_dependencies": "build/dependencies.json",
+  "runtime_operator_build": {
+    "target": "dav-3510",
+    "source_revision": "4025ade4a1000053fe38bba192d70ce5fdba835b",
+    "source_git_archive_sha256": "2300b3ac045695d4f4c62323eb0148b39c53f4c77689214ecf628b3b07934dba",
+    "wheel": "cannbot_arena_net-0.3.0-cp312-cp312-linux_aarch64.whl",
+    "wheel_sha256": "9911bfadf5853cbf8b439cb7d31f0e9d7fe7848d6723d83ef2eadd26419d45b5",
+    "native_profiles": {"mqsmla": 36, "qli": 18, "qsli": 18},
+    "aicpu_metadata_libraries": 3,
+    "installed_files_evidence": "IDENTICAL_BOTH_ROLES_EXCLUDING_BYTECODE",
+    "installed_distributions": {
+      "cannbot-dsl": {"version": "0.7.1", "files": 196, "sha256": "a60566b8a3ba2d51b8e32418b3e93fb19aaccddd8bd6d1cd85ab59cd97e3f291"},
+      "cannbot-arena-net": {"version": "0.3.0", "files": 238, "sha256": "c6195cfcfa05468451bbc56dedd0b52adae6b70e21a5da900be8ae4d31b0abcc"}
+    }
+  },
+  "client_limits": {"contextWindow": 1048576, "maxTokens": 32768},
+  "topology": {
+    "prefill": {"cards": 8, "TP": 1, "DP": 8, "EP": 8, "PP": 1, "CP": 1},
+    "decode": {"cards": 8, "TP": 1, "DP": 8, "EP": 8, "PP": 1, "CP": 1}
+  },
+  "env": {
+    "VLLM_USE_V2_MODEL_RUNNER": "1",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "VLLM_ENGINE_READY_TIMEOUT_S": "36000",
+    "VLLM_NO_USAGE_STATS": "1",
+    "DO_NOT_TRACK": "1"
+  },
+  "common_args": [
+    "serve", "/model", "--host", "127.0.0.1",
+    "--served-model-name", "ds-v4.1-flash-1017",
+    "--tokenizer-mode", "deepseek_v41", "--reasoning-parser", "deepseek_v41",
+    "--tool-call-parser", "deepseek_v41", "--enable-auto-tool-choice",
+    "--enable-expert-parallel",
+    "--quantization", "deepseek_v4_fp8", "--max-model-len", "1048576",
+    "--max-num-batched-tokens", "2048", "--max-num-seqs", "4",
+    "--block-size", "128", "--gpu-memory-utilization", "0.90",
+    "--enable-prefix-caching",
+    "--limit-mm-per-prompt", "{\"image\":640}",
+    "--engram-config", "{\"cpu_offload\":true,\"dp_shared_memory\":true}",
+    "--model-loader-extra-config", "{\"enable_multithread_load\":true,\"num_threads\":16}",
+    "--safetensors-load-strategy", "lazy",
+    "--additional-config", "{\"enable_cpu_binding\":false}",
+    "--enable-prompt-tokens-details"
+  ],
+  "prefill_args": ["--enforce-eager"],
+  "decode_args": ["--enforce-eager"],
+  "connector": "MooncakeHybridConnector",
+  "speculative_decoding": "DISABLED_BASELINE",
+  "validation": {
+    "npu_execution": "NOT_RUN",
+    "pd_target_kv_state_transfer": "NOT_RUN",
+    "dspark_draft_kv_transfer": "NOT_RUN",
+    "full_context": "NOT_RUN",
+    "performance": "NOT_RUN"
+  }
+}
