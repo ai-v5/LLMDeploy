@@ -60,8 +60,10 @@ class SiteTests(unittest.TestCase):
             self.assertIn('class="landing"', text)
             for unwanted in ['aria-label="文档目录"', '目录与导航', '本地检查', '共用服务与运维', 'document-source']:
                 self.assertNotIn(unwanted, text)
-            for topology in ['单机 8 卡', '8P＋8D 分离', '16 卡 EP16 混部']:
+            for topology in ['单机 8 卡', '单机 5 卡', 'TP1 / DP5 / EP5', '8P＋8D 分离', '16 卡 EP16 混部']:
                 self.assertIn(topology, text)
+            self.assertIn('https://ai-v5.github.io/LLMDeploy/a5/950dt/vllm-five-card.html', Document(text).links)
+            self.assertIn('五卡专家映射补丁', (output / 'a5/950dt/vllm-five-card.html').read_text(encoding='utf-8'))
             self.assertIn('双机在线 API 尚未验收', text)
             self.assertEqual(text.count('<table '), 1)
             self.assertIn('<th scope="col">DeepInfer</th>', text)

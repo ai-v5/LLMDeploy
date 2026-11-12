@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "patches": [
+    {
+      "id": "five-card-expert-map",
+      "tree": "vllm",
+      "path": "vllm/model_executor/layers/fused_moe/expert_map_manager.py",
+      "before_sha256": "e39f2fde2a2e23699d09259912fac1c5f37252fd1a9f7ba87aaf599b59ffc2e9",
+      "after_sha256": "851c8f69096ffeb9346588a632e696a4767c1027e015404e9fc5c8bcfc75b8bb",
+      "patch": "vllm-ep5-expert-map.patch",
+      "patch_sha256": "98663a1eb61b32b0d3f4805c8d26607f5b4087dd6edc79be622aba16a80584fe"
+    }
+  ],
+  "license": "Original LLMDeploy contributions: AGPL-3.0-only. Upstream code portions retained in patches: Apache-2.0. See THIRD_PARTY_NOTICES.md and licenses/Apache-2.0.txt."
+}

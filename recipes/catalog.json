@@ -11,6 +11,8 @@
           "engine": "vllm-ascend",
           "recipe": "recipes/deepseek-v4.1-flash-1017/recipe.json",
           "guide": "docs/deployments/a5/950dt/vllm.md",
+          "five_card_guide": "docs/deployments/a5/950dt/vllm-five-card.md",
+          "five_card_patch_manifest": "patches/manifest-ep5.json",
           "path_note": "Existing canonical path retained for current tools and pending P/D work."
         },
         {
