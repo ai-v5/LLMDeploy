@@ -480,7 +480,7 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(state['state'], 'START_REQUESTED')
 
     def test_stop_and_kill_recover_after_a_fresh_two_hour_idle_window(self):
-        for action, exit_code in [('stop', 0), ('kill', 137)]:
+        for action, exit_code in [('stop', 0), ('kill', 137), ('die', 137)]:
             with self.subTest(action=action):
                 self.setUp()
                 state = self.check({})

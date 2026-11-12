@@ -13,9 +13,19 @@ import tempfile
 from .deepinfer import docker_command
 
 
-NOTICE = '当前deepinfer服务为卡空闲时使用，如果你需要使用NPU可直接杀死。'
+NOTICE = '当前 DeepInfer 服务在 NPU 空闲时使用；如需让卡，可执行下方命令。'
 DESTINATION = Path('/etc/profile.d/llmdeploy-deepinfer-notice.sh')
 CGROUP_ROOT = '/sys/fs/cgroup/pids/docker'
+
+# Recheck the pinned container and its init process after sudo authentication.
+# The displayed PID is not a durable identity: a stale command must fail closed.
+KILL_SCRIPT = (
+    '[ "$1" -gt 1 ] 2>/dev/null && '
+    'grep -Fxq -- "$1" "$2" && '
+    'grep -Eq "^NSpid:.*[[:space:]]1[[:space:]]*$" "$3/$1/status" && '
+    'grep -Eq "^State:[[:space:]]+[^ZXx[:space:]]" "$3/$1/status" && '
+    'kill -9 -- "$1"'
+)
 
 
 def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc_root='/proc'):
@@ -28,7 +38,10 @@ def render_notice(container_id, container_name, *, cgroup_root=CGROUP_ROOT, proc
                 or '..' in PurePosixPath(root).parts or any(c in root for c in '\x00\r\n')):
             raise ValueError('INVALID_ROOT')
     cgroup_file = str(PurePosixPath(cgroup_root) / container_id / 'cgroup.procs')
-    target = '对应容器：' + container_name + '；请只结束此服务，避免误杀其他任务。'
+    target = '对应容器：' + container_name + '；执行命令需要 sudo 权限。'
+    command_prefix = 'sudo sh -c ' + shlex.quote(KILL_SCRIPT) + ' llmdeploy '
+    command_suffix = ' ' + shlex.quote(cgroup_file) + ' ' + shlex.quote(proc_root)
+    recovery = '看护正常运行时，机器连续空闲至少两小时后会尝试恢复；容器重启后请重新登录获取命令。'
     return f'''# Read-only notice for an interactive SSH login. Installed from the pinned recovery config.
 case $- in
     *i*)
@@ -38,13 +51,15 @@ case $- in
                 _llmdeploy_proc={shlex.quote(proc_root)}
                 if [ -r "$_llmdeploy_cgroup" ]; then
                     while IFS= read -r _llmdeploy_pid; do
-                        case $_llmdeploy_pid in ''|*[!0-9]*) continue ;; esac
+                        case $_llmdeploy_pid in ''|0|1|*[!0-9]*) continue ;; esac
                         if awk '
                             /^State:/ {{ alive = ($2 !~ /^[ZXx]$/) }}
                             /^NSpid:/ {{ init = ($NF == 1) }}
                             END {{ exit !(alive && init) }}
                         ' "$_llmdeploy_proc/$_llmdeploy_pid/status" 2>/dev/null; then
                             printf '%s\\n' {shlex.quote(NOTICE)} {shlex.quote(target)}
+                            printf '%s%s%s\\n' {shlex.quote(command_prefix)} "$_llmdeploy_pid" {shlex.quote(command_suffix)}
+                            printf '%s\\n' {shlex.quote(recovery)}
                             break
                         fi
                     done 2>/dev/null < "$_llmdeploy_cgroup"
@@ -76,7 +91,8 @@ def verify_target(config):
     for directory in (Path(CGROUP_ROOT), *Path(CGROUP_ROOT).parents, Path('/proc')):
         if not directory.stat().st_mode & stat.S_IXOTH:
             raise PermissionError('CGROUP_NOT_ACCESSIBLE_TO_USERS')
-    if not shutil.which('awk') or '/etc/profile.d' not in Path('/etc/profile').read_text():
+    if (any(not shutil.which(tool) for tool in ('awk', 'grep', 'sh', 'sudo'))
+            or '/etc/profile.d' not in Path('/etc/profile').read_text()):
         raise ValueError('UNSUPPORTED_LOGIN_PROFILE')
     if row['State']['Running']:
         pids = Path(CGROUP_ROOT, container_id, 'cgroup.procs')
