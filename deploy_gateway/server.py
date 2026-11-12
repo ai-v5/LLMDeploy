@@ -19,6 +19,7 @@ import time
 from urllib.parse import urlsplit
 
 from .routing import Busy, SessionRouter, Unavailable, affinity_key, prefix_rank
+from deploy_common.reject_drain import RejectionDrainer
 
 HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
                'te', 'trailer', 'transfer-encoding', 'upgrade'}
@@ -92,6 +93,12 @@ class Gateway(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 256
 
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            self.allow_reuse_address = False
+        super().server_bind()
+
     def __init__(self, address, key_store, upstream_port=19001, backup_port=19002, state_path=None, bindings_file=None, upstream_timeout=10800, model_context_limit=None, backend_context_limits=None, *, backend_ports=None, max_active=32, max_waiting=32, queue_timeout=5, control_file=None, backend_managed_affinity=False):
         if bindings_file is None or Path(bindings_file).resolve() == Path(key_store).resolve():
             raise ValueError('A separate private bindings file is required')
@@ -132,11 +139,20 @@ class Gateway(ThreadingHTTPServer):
         super().__init__(address, Handler)
         try:
             self.backends = Backends(ports, state_path, bindings_file, max_active, max_waiting, queue_timeout, control_file)
+            try:
+                self.rejection_drainer = RejectionDrainer()
+            except Exception:
+                self.backends.stop.set()
+                raise
         except Exception:
             super().server_close()
             raise
 
     def server_close(self):
+        if not hasattr(self, 'backends'):
+            return super().server_close()
+        if hasattr(self, 'rejection_drainer'):
+            self.rejection_drainer.close()
         self.backends.stop.set()
         super().server_close()
 
@@ -181,7 +197,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _observe(self, event, *args):
+        observer = getattr(self, '_stats_observer', None)
+        if observer is not None:
+            try:
+                getattr(observer, event)(*args)
+            except Exception:
+                try:
+                    observer.fail()
+                except Exception:
+                    pass
+
     def error(self, status, message):
+        lengths = self.headers.get_all('Content-Length', [])
+        has_unread_body = bool(self.headers.get('Transfer-Encoding'))
+        if lengths:
+            try:
+                has_unread_body |= len(lengths) != 1 or int(lengths[0]) != 0
+            except ValueError:
+                has_unread_body = True
+        self._drain_rejection = has_unread_body and not getattr(self, '_request_body_read', False)
         body = json.dumps({'error': {'message': message, 'type': 'gateway_error'}}).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
@@ -193,6 +228,13 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         if self.command != 'HEAD':
             self.wfile.write(body)
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            if getattr(self, '_drain_rejection', False):
+                self.server.rejection_drainer.submit(self.connection)
 
     def do_GET(self):
         self.proxy()
@@ -253,6 +295,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(body) != length:
             self.error(400, 'Incomplete request body')
             return
+        self._request_body_read = True
         headers = {'Accept-Encoding': 'identity', 'Connection': 'close'}
         for name in ['Content-Type', 'Accept', 'User-Agent']:
             value = self.headers.get(name)
@@ -262,6 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             eligible, context_limit = self.server.context_route(self.headers)
             key = affinity_key(self.headers, body, hashlib.sha256(fields[1].encode()).hexdigest()) if balanced else None
+            self._observe('session', key)
         except ValueError:
             self.error(400, 'Invalid session identifier or context window')
             return
@@ -346,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     return
                 sent_headers = True
+                self._observe('response', response.status, response.getheader('Content-Type'),
+                              response.getheader('Content-Encoding'))
                 self.close_connection = True
                 if model_body is not None:
                     try:
@@ -359,10 +405,12 @@ class Handler(BaseHTTPRequestHandler):
                         if not chunk:
                             if response.length:
                                 raise IncompleteRead(b'', response.length)
+                            self._observe('complete', not disconnected.is_set())
                             break
                         try:
                             self.wfile.write(chunk)
                             self.wfile.flush()
+                            self._observe('chunk', chunk)
                         except OSError:
                             self.close_connection = True
                             return
