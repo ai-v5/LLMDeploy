@@ -23,7 +23,7 @@ def load_config(path):
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding='utf-8-sig'))
     allowed = {'backend', 'backend_state', 'nodes', 'down_seconds', 'node_down_seconds', 'recovery_seconds',
-               'freshness_seconds', 'poll_seconds', 'incoming', 'usage', 'engine_name'}
+               'freshness_seconds', 'poll_seconds', 'incoming', 'usage', 'engine_name', 'monitor_kind'}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError('INVALID_CONFIG_FIELDS')
     if config.get('backend') is None:
@@ -42,6 +42,8 @@ def load_config(path):
         raise ValueError('MULTIPLE_BACKENDS_REQUIRED')
     if config.get('engine_name', 'vLLM') not in ('vLLM', 'DeepInfer'):
         raise ValueError('INVALID_ENGINE_NAME')
+    if config.get('monitor_kind', 'nodes') not in ('nodes', 'pd_paths'):
+        raise ValueError('INVALID_MONITOR_KIND')
     if any(not p.isdecimal() or not 1 <= int(p) <= 65535 or not isinstance(label, str)
            or not label for p, label in nodes.items()):
         raise ValueError('INVALID_NODES')
