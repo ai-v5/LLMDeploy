@@ -1,0 +1,832 @@
+{
+  "native_python_version": "3.12.13",
+  "native_packages": {
+    "torch": "2.10.0+cpu",
+    "torch-npu": "2.10.0.post4",
+    "numpy": "1.26.4",
+    "z3-solver": "4.15.4.0",
+    "transformers": "4.50.0",
+    "tokenizers": "0.21.4",
+    "huggingface-hub": "0.36.2",
+    "safetensors": "0.8.0",
+    "psutil": "6.0.0",
+    "einops": "0.8.2",
+    "msgpack": "1.2.2",
+    "pybind11": "3.1.0",
+    "packaging": "26.3",
+    "typing-extensions": "4.16.0"
+  },
+  "api_packages": {
+    "annotated-doc": "0.0.5",
+    "annotated-types": "0.8.0",
+    "anyio": "4.15.1",
+    "certifi": "2026.10.19",
+    "click": "8.5.0",
+    "deepseek-recipe": "0.2.0",
+    "fastapi": "0.151.0",
+    "h11": "0.16.0",
+    "httpcore": "1.0.9",
+    "httpx": "0.28.1",
+    "idna": "3.20",
+    "opentelemetry-api": "1.45.1",
+    "pydantic": "2.14.1",
+    "pydantic_core": "2.50.1",
+    "starlette": "1.9.0",
+    "typing_extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "uvicorn": "0.54.0"
+  },
+  "native_extension": {
+    "path": "deepinfer/_so/ascend-aarch64/_C.cpython-312-aarch64-linux-gnu.so",
+    "size": 14070728,
+    "sha256": "2ff316543934dd21398b353feefe03cd4c11f478de11e240eecf0626d9993ff0"
+  },
+  "workspace_artifacts": {
+    "build/vllm-bindings-lib/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so": {
+      "size": 959096,
+      "sha256": "c7e5fa7d064cea7b3560c5fd8f260680de75662ea3b01caccf24e60aac61afc1"
+    },
+    "envs/gcc13/lib/libstdc++.so.6": {
+      "size": 23589672,
+      "sha256": "666dc1e83034d949084f603e04de5934b806c3e0b7b0a105fd5c624aa1d156c6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/version.info": {
+      "size": 34,
+      "sha256": "fdd4d0d83c19ab6cd3f874c61c773a54a29e64ac85cd7783f409c4fc4d06c311"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/config/ascend910b/aic-ascend910b-ops-info.json": {
+      "size": 20826,
+      "sha256": "afad1bf4f9d3298e12dc7744ec5e74e1667770b8760e3d07a39bef7a24dacf30"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/op_tiling/liboptiling.so": {
+      "size": 1965856,
+      "sha256": "20536137c9bd661acee5016a9276c0386233469f169b45fd97b9a9b174d76a67"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64/libcust_opmaster_rt2.0.so": {
+      "size": 1965856,
+      "sha256": "20536137c9bd661acee5016a9276c0386233469f169b45fd97b9a9b174d76a67"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/dynamic/sparse_flash_mla.py": {
+      "size": 18955,
+      "sha256": "7f47c3efd0344928e7072999f070444d022d642ddd081b258577f90825415ac0"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/dynamic/hc_pre.py": {
+      "size": 12358,
+      "sha256": "00ceac1eca7c764e241473d2d69e24b346c56cde942b0187af2171c8c5accf20"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/dynamic/hc_post.py": {
+      "size": 11530,
+      "sha256": "8218d92342ddf5525309d3455ebaf8fa4e69525d8bee5c992dc117bbe348defe"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/dynamic/scatter_nd_update_sk.py": {
+      "size": 12118,
+      "sha256": "cfd5891436be20e3b27b6d2f7f18b1ccd952af6894f1e4c5d7df78c69486f8a2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/dynamic/scatter_nd_update_sk_apt.py": {
+      "size": 11364,
+      "sha256": "cb7cecdf06ed87cedfe2d6a37300ce0f1e4a055fa208837f73d8d018fb495f5f"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/scatter_nd_update_sk_apt.cpp": {
+      "size": 6822,
+      "sha256": "f3199044d0968b857a1a06268747b036d189f3efc815e1649d191fa0af487c0a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/scatter_nd_update_sk.cpp": {
+      "size": 3536,
+      "sha256": "6213016c4d3bf4f787c9703c1bc70b0dff632b70d053dd2e995ac700be7374d6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update.h": {
+      "size": 10984,
+      "sha256": "443502b8f46a41099839abf5e738fed905fce2c4e6015d9156a9c6b311384c82"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update_large_index.h": {
+      "size": 7591,
+      "sha256": "b42f783d0b816aa18bdf17e415e800ddb5c180957d0343924bf65b96887631df"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update_linear_index.h": {
+      "size": 12226,
+      "sha256": "297340e0e99a902969e38fd58a593592f8dcc2dd95f58c934000dcaa179a699e"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update_common.h": {
+      "size": 6245,
+      "sha256": "b39ecb44f992aae2fd3163b69428350cdd3447c7a84885a4cc962ef66ea3fa34"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update_hp.h": {
+      "size": 13565,
+      "sha256": "417578ab1162b2d3c2f842ebecacdebb1e1c74cd6aac763e78e0b86be7d5bee0"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/scatter_nd_update_sk/arch22/scatter_nd_update_no_sort.h": {
+      "size": 6667,
+      "sha256": "25cd1941cc587b5df18f6909b201810b5ef739bb65cb70a4ba832661517757dc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/sparse_flash_mla_template_tiling_key.h": {
+      "size": 7518,
+      "sha256": "a9ef9a772a45d873e139651b04a0786b86e669d4808b0df70195f184b1dcab9b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/sparse_flash_mla.cpp": {
+      "size": 7968,
+      "sha256": "77709334e88ea69757fde0d2ac285ab5ed138f55fe5704b6dfc80fb98fd81f4c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/sparse_flash_mla_kernel_metadata.h": {
+      "size": 2816,
+      "sha256": "30e8c7aed5c0966da9dc9d54429b48d9bcab23bac45fde48f3e6589d856ec848"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/sparse_flash_mla_common.h": {
+      "size": 12603,
+      "sha256": "43c66891043bd38f697fb9e4720cd331fa66a756d7b8e34cc470f39d1c10a88c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_common_arch22.h": {
+      "size": 14654,
+      "sha256": "96105c38ea9b21da0fef66d5e52514bf9725f00238a0442f28253598d2dc2135"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_csa_kernel.h": {
+      "size": 45552,
+      "sha256": "088a63c92f044a8ece4b4d9b4cc820c356bbc93111466173d7fd5015e4dc391b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_csa_block_cube.h": {
+      "size": 45413,
+      "sha256": "8abbf64fe191e9e532cbf409a59dc25c9f59acd2d338b4a72109b333ce4a6496"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_swa_block_vector.h": {
+      "size": 66399,
+      "sha256": "5fe5d0d460b744e3ddd4f0c4985bd6e5ba82b851046eb1064e50a55b04a6e07a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_csa_block_vector.h": {
+      "size": 59979,
+      "sha256": "41b50f1a3e0a07a0307b9564cfbd2981efc3311517e103fa0bdaf6267b6f699b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_arch22_metadata.h": {
+      "size": 2780,
+      "sha256": "02ae09e9a351103e4d1c89939855338ad16bc8e17b776b9881c81c12f221f578"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_swa_kernel.h": {
+      "size": 49055,
+      "sha256": "b74bfa917bc9e814123d655b51213d73ea97f1c16b08f2c7cab328dc85be4b96"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/sparse_flash_mla/arch22/sparse_flash_mla_swa_block_cube.h": {
+      "size": 74980,
+      "sha256": "3c75e9fb36569ad329be76883378a50e634f0911ba003f2c844246757d388c51"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_m_k_split_core_premix_arch35.h": {
+      "size": 25130,
+      "sha256": "98dabfdc85de9a4ea19f9422cf75f80d03cdf39e9fc9a92ce6ed1bac39390819"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_m_split_core_premix_arch35.h": {
+      "size": 30161,
+      "sha256": "328b68fd692b7bf5b9e6d6914fd540e851029fc16a5d20f506bc290598cea0f4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_m_k_split_core.h": {
+      "size": 30855,
+      "sha256": "e6f867dfe29d9cb80859b3abdfda84afeae1e0391b70afecdde7a6dfdad1be1d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_cube_compute_arch35.h": {
+      "size": 11569,
+      "sha256": "bb9a2d08ea75a09d278594c222e384cea4b5db474e49258288c72b3329ebdb13"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_m_k_split_core_arch35.h": {
+      "size": 25733,
+      "sha256": "97fe6d50b1b8f62fe222852c6d012087debbdc036f56e8a46e7d939dc3472845"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_base.h": {
+      "size": 32472,
+      "sha256": "92c8de42fdb21e8c1ba2f9f56962f8cb308a9608175504fcca143228cdccc31a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_m_split_core_arch35.h": {
+      "size": 25996,
+      "sha256": "cccbb3f824e651686f1069ab53351beda290a2715fbff139398967d72b1e6224"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_cube_compute.h": {
+      "size": 20655,
+      "sha256": "d2ffa10151493f1859265bc316fef4a0c16171cd6b047e57fddf98323399b716"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre_base_arch35.h": {
+      "size": 68422,
+      "sha256": "b56ddc843866d990a20563b1e40ee7e916c479a60ed5c345821027fe862c5a66"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_pre/hc_pre.cpp": {
+      "size": 4551,
+      "sha256": "861448ce1b699db49c21fe983e3c073ca17fcfb22df03ee30b21df152f879a7c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/quant_lightning_indexer_v2.cpp": {
+      "size": 4950,
+      "sha256": "388960ce114c0f80134a2f74a735a03f4320ec7ce75e4a03f9ba1a67bca05e54"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/vllm_ascend_quant_lightning_indexer_v2.cpp": {
+      "size": 971,
+      "sha256": "90fa1edbdfd986fc41e97772477bda9c171e849c210e8f970cff999d79e3a472"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/quant_lightning_indexer_v2_template_tiling_key.h": {
+      "size": 9991,
+      "sha256": "5b3e1f9307edcc76902110eaf1953fb6dd8539e832385c3de4d6981d48bd5ce2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/quant_lightning_indexer_v2_metadata.h": {
+      "size": 3030,
+      "sha256": "dbdcb1ce544a96f62dfd8e72cadfcee560dbc26fd662f065fd3ef05a10509e50"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/arch22/quant_lightning_indexer_v2_common_arch22.h": {
+      "size": 6536,
+      "sha256": "fe1cd3bff2e7ca515576f8630abf0f7bb81d874fa30252f902ab2961ca5dd04d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/arch22/quant_lightning_indexer_v2_vector.h": {
+      "size": 9781,
+      "sha256": "9a718ea44524028c50d171bc5a8e5bf2176899fdf519c967d359cdc3f2101ebc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/arch22/quant_lightning_indexer_v2_service_cube_arch22.h": {
+      "size": 29060,
+      "sha256": "c40aa44f2bf72c6c68b80ea1aa5c3b2bb342e106417f4ab08d77088aca7e741a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/arch22/quant_lightning_indexer_v2_service_vector_arch22.h": {
+      "size": 61309,
+      "sha256": "a1f3cad21da0f0d8aa99493b4332b06b5e7c676494947aed4f87452ea70c1baa"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/quant_lightning_indexer_v2/arch22/quant_lightning_indexer_v2_kernel_arch22.h": {
+      "size": 40232,
+      "sha256": "f10ab8b8d1b9bd0581932059f0951d360d49ec4ec063500f84551cf7ea927a77"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_post/hc_post.cpp": {
+      "size": 2247,
+      "sha256": "b2152b9f4ef6f9f24ec2407359dbe3592d67d8d0f5a2092afe832a9335561400"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_post/hc_post_bfloat16.h": {
+      "size": 19272,
+      "sha256": "a8a3128cd87f45a9c74a1c52462d739ae4e9630e9ccd31e52cabd2329db6eb33"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_post/hc_post_d_split.h": {
+      "size": 16884,
+      "sha256": "90bace8b69021c2edf4f79ddd5e7604aa18eed0af3dfcaa6d1e347b87f9888f3"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/hc_post/hc_post_float32.h": {
+      "size": 15990,
+      "sha256": "aa72069d2d06aa10431636f394b2ee455711f939c3999b8c1ddcaa3a7f0af9cc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/matmul.h": {
+      "size": 72744,
+      "sha256": "32f1f4b732e21a79ff2fce42a4fbad32b5545bb02b6cc1bf1e6bea5cbfa8af73"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/offset_calculator.h": {
+      "size": 1099,
+      "sha256": "5fe1fb9986fc42d51b63d5a253bc586c93df58f8b3a54c68d1afe9ed77d69297"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/mma.h": {
+      "size": 3327,
+      "sha256": "c074c2e120b1b25a3adf4157e44934c8ba1eace70998397869799a8a6bfb38f2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/aicpu_common.h": {
+      "size": 4863,
+      "sha256": "9a873baecdfd682f9c5b935ed57d06733a32ea3486d6a95407339eed75ac28ff"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l1_to_l0_iterator.h": {
+      "size": 14401,
+      "sha256": "55b524984bf7c411aeb06e1e911757ce84d79aafa34b457b4bc6b2dde2834423"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/common_func.h": {
+      "size": 3852,
+      "sha256": "cab49f9de95156c63dd388f434efb84bbf32ee49462cb49c00fbf38d2aecad5a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/buffer_mix_core.h": {
+      "size": 8061,
+      "sha256": "3a65a88b68e4bff245c05452a6565bb3880d1e4ef18968126a4db4a846b66c6a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/buffer_manager.h": {
+      "size": 2210,
+      "sha256": "a56577c7b80c936ea2b2e438f04b28961317784c586ea9480cc3794aab27aa45"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/mem.h": {
+      "size": 4257,
+      "sha256": "e33b35cfa11c08ae0abff5a5dd51e7ca692f572dd0a8faf282e6f752405dca2d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/init_output.h": {
+      "size": 3836,
+      "sha256": "f3bb827c5139f47fe7214631be3accf96234d786758ac16f55dcb7e1e695db3d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l1_to_ub_iterator.h": {
+      "size": 2096,
+      "sha256": "099f60536e9978430cc787e45957414aef46b327b26668e5a06219f3fbc5ac57"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/hardware.h": {
+      "size": 1593,
+      "sha256": "1c553d4ae43c64ff5ea42e75ebb020f595db153184675ecbf46f04737a640434"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/simd.h": {
+      "size": 17448,
+      "sha256": "4a8d07859252db454807d5ec1bc0171da8ff43147d83a24d1cdafeafe69b142f"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/iterator.h": {
+      "size": 5301,
+      "sha256": "1dd10e1c423f1a5bf7413b41adb44cf724e9c11f920d4eaba90056dd6567f3ad"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/buffers_policy.h": {
+      "size": 12777,
+      "sha256": "824eba6c456e916881282153688f9a26c7e40cd7cc73cb10baecaaa8bdfecd88"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/common.h": {
+      "size": 1151,
+      "sha256": "1c4fb41b829fec79df9a7f4214fccf61d196a718feb06bd34f4660e1270a9b62"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/layout.h": {
+      "size": 884,
+      "sha256": "24c36412a953af51a4d0853b84466029006b8eaae7abcf7649f30958caf5a6db"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l0c_to_l1_iterator.h": {
+      "size": 2282,
+      "sha256": "e867f78141de3a7d1379152e48173ad7713d2e96f17531854fcfc175ee2bc0ea"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/pse.h": {
+      "size": 22040,
+      "sha256": "00582b2c62e8a058b2a6682fdfa81d83fd99524936c2edb290acfb7af174efbb"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l0c_to_ub_iterator.h": {
+      "size": 4353,
+      "sha256": "ba17b23c4b8541279ca8e3742b37db05eac78cbc1048bbe4f19966c2bc6c758f"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l1_to_fb_iterator.h": {
+      "size": 1656,
+      "sha256": "a3f6028182aa0b19291d36c52712bd2d1b7889dd871850059d10ccf55c5aa5ba"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/attn_buffer_manager.h": {
+      "size": 2654,
+      "sha256": "66bee01f89b76247a0d2b9cf2a2bb76361713e499ca5adb9e4834d6c144a1bba"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l0c_to_gm_iterator.h": {
+      "size": 10039,
+      "sha256": "99b48a3a55d4df6707bfdc6ba553e4a28c68f8ebe77b46378e6a667cfdb73d9d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/buffer.h": {
+      "size": 12550,
+      "sha256": "b6a98b3bacb2f59ae0d76290559c1fc4f07a10ac447e3e247ee07e3a5ab832fc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/dropmask.h": {
+      "size": 5315,
+      "sha256": "99d7ef1a71afc5689fab66c617b64a778feb8fcc4039695228a454624fc7ed8f"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/util.h": {
+      "size": 6318,
+      "sha256": "73d396121298e3adeb36aeaaa1a9a9bc3cfc8fbb108af4f9ddcb1c7479e0230b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/l1_to_bt_iterator.h": {
+      "size": 1557,
+      "sha256": "d8044570f3c6d1720552c768e8a190902c312b03ca197b4246df4cd173606b08"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/FixpipeOut.h": {
+      "size": 4296,
+      "sha256": "779ab8805af8940eb223ab67a829912b5d6cb9c07de0597e2117fba6c8222753"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/attn_buffer.h": {
+      "size": 18303,
+      "sha256": "8d0e3426eef0a0f08333b947682e4af04b499ce2a562460f4923578a30b1ab5c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/gm_to_ub_iterator.h": {
+      "size": 5189,
+      "sha256": "16f2223716681a5af319ee624f3f99b053f2de9dc4476a2dadf85f632cbaa7f0"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/CopyInL1.h": {
+      "size": 30673,
+      "sha256": "5d68e3350acea50f478c07424dd0951dbae0431e67b1aa503e385761e6885ef8"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/gm_to_l1_iterator.h": {
+      "size": 8827,
+      "sha256": "a2d37deed85ebdc04ff2fb1d2effbaa4b19a22408eea24cef85194ead71d53a6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/offset_calculator_v2.h": {
+      "size": 35012,
+      "sha256": "912fc90ca06dcbc4c6156cbda007933a614e16db89e5fcc57510b3c39977c50d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/fa_l1_tensor.h": {
+      "size": 1180,
+      "sha256": "8329abd208b924199df9792e5349503d24df55f405af04a08b25d98e37d19fd4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/gm_coord.h": {
+      "size": 914,
+      "sha256": "078a9bd9d24211c1656de9d061ca90c50d159d25a2aaad1c9b8777d376281b88"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/parser.h": {
+      "size": 4349,
+      "sha256": "6227023d06fe456cb9a48ab86f5e03579b4fbb4786951aa7e594c8a1b3911eb1"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/gm_layout.h": {
+      "size": 15435,
+      "sha256": "b2852611e0340268140522ed28aa44b3125f13b02985255af838dcac392dbe76"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/custom_transformer_impl/ascendc/common/memcopy/fa_gm_tensor.h": {
+      "size": 1185,
+      "sha256": "a75bb22ad795e0951f0575c10f7c52c18b7652bd1ae08ff8daec295d1b7c04bb"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/sparse_flash_mla.json": {
+      "size": 7171,
+      "sha256": "507227387f4065da6b195c9fe2c866d1df2e5a27975ed9ecffb6b12fe5f820f4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/binary_info_config.json": {
+      "size": 25536,
+      "sha256": "c0404928640f903d7eb2ac3d80d3473f922977b4c765c9bc9a2424402526a7cb"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/relocatable_kernel_info_config.json": {
+      "size": 7603,
+      "sha256": "8531f1e8c94eb8ec34f73f48fa998a2feae1fa840ca337481e62c08fa4d910a6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/vllm_ascend_quant_lightning_indexer_v2.json": {
+      "size": 6844,
+      "sha256": "218906e263c1940440f1b7f9e88b70bc2a87437e86d4079e95e7a2d7ee614e86"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/hc_post.json": {
+      "size": 18834,
+      "sha256": "daeb4a19833c574321f2c4c615588232888ce402b5b4b434ded10ad5bc57f6ca"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/hc_pre.json": {
+      "size": 3609,
+      "sha256": "028fdebf85e7d5f663b97573a4c9e1a459a5794e2d4ff152b0675f5220d00510"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/config/ascend910b/scatter_nd_update_sk.json": {
+      "size": 33843,
+      "sha256": "7471bd3433825945bc9487b7137999f04a88a1c2d11be026b4d8f85c42920f47"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_38f6c0f42e6dd25f1ba132d7ecf7990f.json": {
+      "size": 2792,
+      "sha256": "0eff3f5deb7dc2006daac2306f886953c1bda1d5604db956f0bc831abbfb7125"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_0b353e2a7a77673d01a76aaedc99244b.json": {
+      "size": 2792,
+      "sha256": "0e01189e79f70d51aa5c893966895593e7b6f867ab8f2341dd3ed51061b2c234"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_a26c1a31bc6e830d0cebd713347b08b4.o": {
+      "size": 49320,
+      "sha256": "787aee6819dc41bb7bcd3fd7e75a2ce5c0ca5977733040e0d4b47fe862ecef00"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_3b70bd1dfff14ea76aa6465d526da019.o": {
+      "size": 49320,
+      "sha256": "4b79e5eb3cbbcf20191c366f2aeeead7b13f636f4c35546c6f64dac2d077740c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_bb9bb5294a78b012e651bca22d8adc9b.json": {
+      "size": 2801,
+      "sha256": "eae443d7e6104df9d40932327e862c800db83accd04a72248b3697ab4f706699"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_5eb3b1047a65f27b6755cf7c3b39618a.json": {
+      "size": 2795,
+      "sha256": "d6a21c658d39eaf7fd439954c6a3eaba94e1f6ef6a262557593dfff9b8f336ba"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_88c022917a975ea96376419907f42954.o": {
+      "size": 49320,
+      "sha256": "2952bc4f76ebe39709d36df80fa1e7ff9f32996e135a54adc3ce7dfea604fcac"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_aae10e4ab9a16dc4ad137da13094931d.json": {
+      "size": 2801,
+      "sha256": "5ff89fcabdfcb82d7d754a5426733932de7bdcf911dbbb3b4858a2d97db77eda"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_bb9bb5294a78b012e651bca22d8adc9b.o": {
+      "size": 49320,
+      "sha256": "5f8205618bbe49a847ef7c25dcc22c0a49d8d63c33af6f562ef60d40cf3b0cde"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_38f6c0f42e6dd25f1ba132d7ecf7990f.o": {
+      "size": 49320,
+      "sha256": "db5fed875268d7c9cf6aecd0f8785c4b009245ef361b9e37a3992fc7b269c47b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_0be86e3b56504af1b118b0d1a2a8e1bc.o": {
+      "size": 49320,
+      "sha256": "f60a51f05d91df40a572ffe9e9c2df5f65803caf8b39a06d825ea4400c3bb6a1"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_ea313760ba67acd5000faf33911395ef.o": {
+      "size": 49320,
+      "sha256": "f02d116ae1779aebd1261741f3092537e4cd804ee5617e8c7862e5682d80c2c0"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_e0ef9825ca3278ff9552c4181fd68e7a.json": {
+      "size": 2795,
+      "sha256": "5c7b222155e89210cbee912452cf4d604727a15036f1f05d7741442fbf497f00"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_38627996bef60898472c534750522f9a.o": {
+      "size": 49320,
+      "sha256": "cf71aebb9e9f6f8142f5e365a72e5ed11b63bc4a456c2c1c1c4717b7a6f3c938"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_988d42ef3c0b4c5fdbbd011ef34f5549.json": {
+      "size": 2795,
+      "sha256": "67b3c1569e85c9330243e62170e2bd2cb4b0bf6b64a5c41c22a1dd5a915e565d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_ea313760ba67acd5000faf33911395ef.json": {
+      "size": 2816,
+      "sha256": "9d36092a8dc69e804095ee5d65658876782a6125f34e13303950321095f2ea52"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_3e72bf83664ea4d8e3f199080a4bb8ff.json": {
+      "size": 2801,
+      "sha256": "72da3183963ac22dda429365281e88cb59f7c9137ea6cf14dfb3e50020ac9fbe"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_3e72bf83664ea4d8e3f199080a4bb8ff.o": {
+      "size": 49320,
+      "sha256": "7297ba9d071e49e03ac78801bfaa057ee42f3c25a6f83005e8941c6e98e60cde"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_9410d3eeffdc7af5c09baeba9ba2e992.o": {
+      "size": 49320,
+      "sha256": "86846e8c109a6c6039b00ed2132d414c8f012b790a1b86411865882efe312e74"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_5eb3b1047a65f27b6755cf7c3b39618a.o": {
+      "size": 49320,
+      "sha256": "879cab4919dc0f51c9007f991141478e41f21994af317ba898fd054600b3f7e2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_4601e4c82b60f31f18761080c39f22c5.json": {
+      "size": 2795,
+      "sha256": "4464eac9e41964d46438c4325b9797d69df02ab210ec4dd6cfc53597a846b0a7"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_0be86e3b56504af1b118b0d1a2a8e1bc.json": {
+      "size": 2801,
+      "sha256": "9ce6d0b0fa1c5262163792e1e29e23e9d309e96710029c7c24a617736a93a37f"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_e0ef9825ca3278ff9552c4181fd68e7a.o": {
+      "size": 49320,
+      "sha256": "bab2e619e91b3718d819c3d9eab76ee82626f6bd894509065514b27aabd04697"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_4601e4c82b60f31f18761080c39f22c5.o": {
+      "size": 49320,
+      "sha256": "79c1972e1780608e329dd6d694da379496f1e4aa5f9573efbabbc64a897e8f1d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_0b353e2a7a77673d01a76aaedc99244b.o": {
+      "size": 49320,
+      "sha256": "7b2b3017bacf27bc1f601bab95ae66c7ced0e37151a5c0e34dc21caa1d5f3dd2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_988d42ef3c0b4c5fdbbd011ef34f5549.o": {
+      "size": 49320,
+      "sha256": "27e01d55f24b3cbb9b24b5d7f4021748bf3adaec5cf4b365635cd18b6dc1889b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_9410d3eeffdc7af5c09baeba9ba2e992.json": {
+      "size": 2795,
+      "sha256": "f5cc607c12a1de2c18f0d5ad56d09243da339227c161831f5cd6fb236576cfbc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_aae10e4ab9a16dc4ad137da13094931d.o": {
+      "size": 49320,
+      "sha256": "cabe335b9739eb81050a0ff7486da3b529173bac378089199eab7de43d00e13b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_38627996bef60898472c534750522f9a.json": {
+      "size": 2795,
+      "sha256": "5577b89764322c0e9ba79d68f8478e74a675a5bf346051e6ea75faabce641cef"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_a26c1a31bc6e830d0cebd713347b08b4.json": {
+      "size": 2804,
+      "sha256": "bf3cc587db7366da155750c97b943c271a02254fbc7ebdebbed014119a63554c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_88c022917a975ea96376419907f42954.json": {
+      "size": 2804,
+      "sha256": "1298f485d83b8715b2229f0d3885a17d1d0db2f1d39225bd673da9a7100a8f35"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/scatter_nd_update_sk/ScatterNdUpdateSk_3b70bd1dfff14ea76aa6465d526da019.json": {
+      "size": 2816,
+      "sha256": "1de673d3935e05e6d597adde6cd7ebc5f01fcf0b59ace07aeb05bddb9b8603df"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/sparse_flash_mla/SparseFlashMla_3c28573c57336785d951119c50c861fa.json": {
+      "size": 7350,
+      "sha256": "f97e154770a7961dbe4891c10425bedbfe23c7fb32bde21479748c96cf3c3d11"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/sparse_flash_mla/SparseFlashMla_3c28573c57336785d951119c50c861fa.o": {
+      "size": 190352,
+      "sha256": "0b8140ef0f4a206f9fc125819c447a6bf4e1152469b91ac545dcd4afcd181dec"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_pre/HcPre_6c9f0fa710253eff38b1c0e6be6a67be_relocatable.json": {
+      "size": 4601,
+      "sha256": "9ed5ff1808334d31527d5cdb4eddb46a62fb790009fbd3c29948772872a7a411"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_pre/HcPre_6c9f0fa710253eff38b1c0e6be6a67be_relocatable.o": {
+      "size": 34184,
+      "sha256": "d277ea25b2c16f206c572f465ce2c8513008374abb3005520376006cb6296f21"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_pre/HcPre_6c9f0fa710253eff38b1c0e6be6a67be.json": {
+      "size": 3656,
+      "sha256": "3ecd3f9d2eec7156fd242e300ed775360568c21a63174080b8bd199a9ea466b8"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_pre/HcPre_6c9f0fa710253eff38b1c0e6be6a67be.o": {
+      "size": 35576,
+      "sha256": "62c68ae38cd9444c182f751816bb4f6e80268b55e4a61711c79dace5f25ae59d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/vllm_ascend_quant_lightning_indexer_v2/VllmAscendQuantLightningIndexerV2_a62e5e790e85f062badac26da8b8fd96.o": {
+      "size": 177048,
+      "sha256": "4b2bcb5ce480d46731a252164bfb0916d6e1188241d63dbca671fc2be7043775"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/vllm_ascend_quant_lightning_indexer_v2/VllmAscendQuantLightningIndexerV2_a62e5e790e85f062badac26da8b8fd96.json": {
+      "size": 6901,
+      "sha256": "a299c7e127aef39fe38dbd4692a605e0c2ebd770cc71f3a45d7919e8aeb5329c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d2fe6614722b27afa6f8d964c215447e.o": {
+      "size": 14256,
+      "sha256": "961dd49ab68b17a7028103cad3055deb8dcd7d4ef8f06f3b528a61d82680211a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_be2dcafbf0c8af390bf57177141bf669.o": {
+      "size": 14256,
+      "sha256": "3b97baa97d4430f5701f18068523b5cfbe8bac657eabe1fcada77a6d9c4887a0"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_f8d6568802bb9bf815c79fd66277cb55_relocatable.json": {
+      "size": 3164,
+      "sha256": "4e1a471ab9a203d39b7b15c047c97deded77a9fb5d26a67c6f85c4d15da8a2ac"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e4c4ea08fc7875f3275751adc399868d_relocatable.json": {
+      "size": 3149,
+      "sha256": "4ddbd6437bc448a35d162fe556300342c00aea2aa37518d82e2e432a7641e387"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d980ed89966470aa6bbdc62419309139_relocatable.o": {
+      "size": 11536,
+      "sha256": "e33412fc351af4768acb175b7744719e5f9c98385397f9c19207590ef87cbc8e"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e2220bcfb1da2706e99e1c9e5e9ab203.o": {
+      "size": 14256,
+      "sha256": "121fd622f04050e54b75ce29179611415494a99b57775bcc7e2f757a2e128896"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d2fe6614722b27afa6f8d964c215447e.json": {
+      "size": 2427,
+      "sha256": "56c80b5f26868314fa905898afc20d5a1aa903093ba45d22035ba8d92ed4cc9c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d7d8f653fdae4af65c2dc961400185bd_relocatable.json": {
+      "size": 3149,
+      "sha256": "fe643711ba5906256aa8b4e38dc4bafc95bdfb8251ff4d415c8ed972ba898489"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d7d8f653fdae4af65c2dc961400185bd.json": {
+      "size": 2412,
+      "sha256": "1797f54c2547b6a92819b2e1ecc3c383187ae8fc7d191ea892f53b3d0e37f73b"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_dffc3b13070cacc52a1006b48c22063b_relocatable.o": {
+      "size": 13544,
+      "sha256": "09a44d46b20c0baa86f989d1c6334a7f8f396cbc38ab58642d653aa795ee4731"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_2e5303ac4dede76effa18248fd20ec57.json": {
+      "size": 2422,
+      "sha256": "ba767aa994ce89dcfbceb9676cdcdadbdf317c53b045acdf7687ca7c35823cd2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e2220bcfb1da2706e99e1c9e5e9ab203_relocatable.json": {
+      "size": 3174,
+      "sha256": "2e318b64a61e73f8e3bda1963c7e3a0cc04f1c1e92d4c3d25118c308a53ff820"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_2e5303ac4dede76effa18248fd20ec57.o": {
+      "size": 14256,
+      "sha256": "e98f817a87beacb687040ffd3986084429689e84a285c2bbe9ef5c6ca4d7fd69"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e4c4ea08fc7875f3275751adc399868d_relocatable.o": {
+      "size": 14344,
+      "sha256": "89bdf4b469dec0af8873ed45f4813efabdd1ca5781155a11e1cc12613a971ae6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d7d8f653fdae4af65c2dc961400185bd_relocatable.o": {
+      "size": 12208,
+      "sha256": "a11c084289a776131c8e03ccdd764d437690724ac6a2079ce8a011470df1be63"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_f8d6568802bb9bf815c79fd66277cb55.o": {
+      "size": 14256,
+      "sha256": "a314bf9571775f30ceea22efeeb6e2968702424975a36a24d682329423d0f608"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_f8d6568802bb9bf815c79fd66277cb55_relocatable.o": {
+      "size": 14344,
+      "sha256": "1c36406cccd500f5cee3a0a57c5554db5859d9e3dbb662b217563d1186baf050"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_be2dcafbf0c8af390bf57177141bf669.json": {
+      "size": 2422,
+      "sha256": "ee69b81b296342ed3af4c3ddaf6d87ddb06a126726b3430a2fc14702b02a601a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d2fe6614722b27afa6f8d964c215447e_relocatable.json": {
+      "size": 3164,
+      "sha256": "956f9708af7623715e5ad0a30d82b9bae6d9b08af00ee6b115f1d2b283ba8afc"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d980ed89966470aa6bbdc62419309139.json": {
+      "size": 2412,
+      "sha256": "5714ad56ca9cfb36be081967aa949d8417f66b293d0c73d55033d988955c848d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d2fe6614722b27afa6f8d964c215447e_relocatable.o": {
+      "size": 13544,
+      "sha256": "dbd8d5ba8d93c244c89d272523cfe02086bf98110fe2d9afcdef2241c2a47bec"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_f8d6568802bb9bf815c79fd66277cb55.json": {
+      "size": 2427,
+      "sha256": "817ce9406ad7f741334f823b6f5c934b0890f73a37a6a55b2d6c7732df610cf4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_dffc3b13070cacc52a1006b48c22063b_relocatable.json": {
+      "size": 3149,
+      "sha256": "594f83f76dcd31e3da1b6c310dfd6d650f7edb33bbeab9c3c92cacd7a7751ae4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_2e5303ac4dede76effa18248fd20ec57_relocatable.json": {
+      "size": 3159,
+      "sha256": "b754e83df131574d1ccd450e580f303985a3ac6ac4b074f09cb2372180552f76"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e4c4ea08fc7875f3275751adc399868d.o": {
+      "size": 14256,
+      "sha256": "ccb786c59d6a288e2bea16f6f59d51713bdb9c225156bac5af1c360c197f2cd7"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d980ed89966470aa6bbdc62419309139_relocatable.json": {
+      "size": 3149,
+      "sha256": "d10e839ec70471c956e8bc00b7d395d95db56c9b5eabaf153f3c5122ebbe233d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_2e5303ac4dede76effa18248fd20ec57_relocatable.o": {
+      "size": 14344,
+      "sha256": "b2a6b4989595b40a54f35719bfa9db49163c17e6bfa3c460bfc09f0edb372438"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_dffc3b13070cacc52a1006b48c22063b.json": {
+      "size": 2412,
+      "sha256": "3f80bba92c6d9fb3c2835fb488335bde47c4cc6ba07a01e061d1d30181084e18"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_be2dcafbf0c8af390bf57177141bf669_relocatable.o": {
+      "size": 12208,
+      "sha256": "dce094ab1e4c084ec6e43ffbb2ea437e7b5e5911dd8b71a2ca7fead39ce19ae2"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d7d8f653fdae4af65c2dc961400185bd.o": {
+      "size": 14256,
+      "sha256": "a7adeee68a8f5979d9246d1aa188c0c235773b9b98165ae833faecbc47c66b6c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_be2dcafbf0c8af390bf57177141bf669_relocatable.json": {
+      "size": 3159,
+      "sha256": "4721dbd2283b54425ed055d6669582b1653c0dda52bd074333e41d51f33b871c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e4c4ea08fc7875f3275751adc399868d.json": {
+      "size": 2412,
+      "sha256": "57e7c800f76480d371ab4b03ecae214fcf498407df48cc6807fbc77ff626a1e4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e2220bcfb1da2706e99e1c9e5e9ab203.json": {
+      "size": 2437,
+      "sha256": "09c6be3ceba55ba6c299c751bbfca8022eac74d6c27481a522dcefcf51e68a05"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_dffc3b13070cacc52a1006b48c22063b.o": {
+      "size": 14256,
+      "sha256": "38c253db54ae030fc4343e76cb822d9f9659c829247fa1bf19627c3cb3724ba4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_e2220bcfb1da2706e99e1c9e5e9ab203_relocatable.o": {
+      "size": 14344,
+      "sha256": "84d68cdda584ac64b5e45421a3b23fcc682e48109ea98598e8fc758392e5ac5c"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_impl/ai_core/tbe/kernel/ascend910b/hc_post/HcPost_d980ed89966470aa6bbdc62419309139.o": {
+      "size": 14256,
+      "sha256": "f2fec3c779d41fb99f567e8a608342569301de7c7e06933e12fe80ee83850935"
+    },
+    "envs/v41-ops/vendors/custom_transformer/bin/set_env.bash": {
+      "size": 224,
+      "sha256": "5b82dbeff14ae4920d745106b074a2c5133ae78d45c47f31c6cefe186d99d33a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/lib/libcust_opapi.so": {
+      "size": 304824,
+      "sha256": "8253cf7d3d73b775b5457ed48df174e6a4063df27aef111a457f5cee6817d8b4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_ops_transformer_custom.h": {
+      "size": 1010,
+      "sha256": "eedd15fc8462388aaa5fb185c3272efef769b666bccdcbc31c5065240c7e8db7"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_sparse_flash_mla_metadata.h": {
+      "size": 2019,
+      "sha256": "14ac058e6c71ff2d29564c9712b93c219aca0bfa8127f9fb19d6220568d1f1ff"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_vllm_ascend_quant_lightning_indexer_v2.h": {
+      "size": 2902,
+      "sha256": "940c2c1900464df4d5376f7485cc4d01ad8d81e319324caa93a4d6003632ca7d"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_scatter_nd_update_sk.h": {
+      "size": 3078,
+      "sha256": "b0a55c27d00d0972752c2e87957663f266d40a39132cfbe44f040be6bb7ce10a"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_hc_pre.h": {
+      "size": 1535,
+      "sha256": "c31774ff277ea3119ce92b0f3cfc14eca6468624e2f7367fafce359d994464e9"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_sparse_flash_mla.h": {
+      "size": 2937,
+      "sha256": "e25a9e9d5119481a4522b4687522aac025b30207ef84e72a4810bc8d828e38c8"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_quant_lightning_indexer_v2_metadata.h": {
+      "size": 1787,
+      "sha256": "509ee64805ce8a902e4916e491619b187e574209e23f4e6c7f53f7b567334fc3"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_api/include/aclnnop/aclnn_hc_post.h": {
+      "size": 1113,
+      "sha256": "eb01d5ba50b35e4a2b5bd20c00957ba4dca626efc20fc68e5ceb373d9a27c23e"
+    },
+    "envs/v41-ops/vendors/custom_transformer/scripts/uninstall.sh": {
+      "size": 2490,
+      "sha256": "0a51de43b9deca84f5d5d5b02e9f1e894468349abe371b4838601f33267d19e4"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so": {
+      "size": 284688,
+      "sha256": "225ce33527f418afe632013a214829c95cebfdcff39f723d06bb02ebaf1cf2ac"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/inc/hc_pre_proto.h": {
+      "size": 707,
+      "sha256": "8f7131d5828e37a13c43fe740e4c0e758e37495a72deddef554d3f0b807caff6"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/inc/scatter_nd_update_sk_proto.h": {
+      "size": 484,
+      "sha256": "5d0ff0fa8dfd70449b96d7cdad940eb2f7fa4c21133f6b53f2be3fe941f0aa38"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/inc/sparse_flash_mla_proto.h": {
+      "size": 1694,
+      "sha256": "78e496259a84541ef0f05392ecc54a534b6aafbdfbd1bd91ad67e0e7242cb652"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/inc/vllm_ascend_quant_lightning_indexer_v2_proto.h": {
+      "size": 1649,
+      "sha256": "47264eaa5a331f73e38343fbc1e87c595724019a2d2e626b7cc6c8d1a0a5b591"
+    },
+    "envs/v41-ops/vendors/custom_transformer/op_proto/inc/hc_post_proto.h": {
+      "size": 397,
+      "sha256": "5997c22f04ea7227d5af999c7504591cec0ad65646ccfe34d94b1f322c2cd956"
+    }
+  },
+  "api_artifacts": {
+    "lib/python3.12/site-packages/deepseek_recipe/py.typed": {
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "lib/python3.12/site-packages/deepseek_recipe/_native.abi3.so": {
+      "size": 20651425,
+      "sha256": "958e1562acfb484e6b834f8b2e6430b2b31af44a17afd32668b13a49527cd421"
+    },
+    "lib/python3.12/site-packages/deepseek_recipe/_native.pyi": {
+      "size": 40062,
+      "sha256": "e24cb343288b736a0cfadbada954fa0272f4393ae27222adee8ed080aa2b0e92"
+    },
+    "lib/python3.12/site-packages/deepseek_recipe/__init__.py": {
+      "size": 2733,
+      "sha256": "af06cc19cc216a6db2b8459c1a5a88d513dbd83e258090665880327abc0c73f3"
+    }
+  }
+}

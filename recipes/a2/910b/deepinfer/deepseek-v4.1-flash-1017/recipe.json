@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "id": "a2-910b8-deepinfer-dsv41flash1017-w8a8",
+  "engine": "deepinfer",
+  "hardware": {
+    "generation": "A2",
+    "model": "910B1",
+    "architecture": "linux/aarch64",
+    "cards": 8,
+    "hbm_gib_per_card": 64
+  },
+  "model": {
+    "repo": "Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8",
+    "revision": "12b85455a58c7df345c1abc43934624a76bac576",
+    "source": "https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-1017-w8a8",
+    "manifest": "model-files.json",
+    "served_name": "deepseek-v4.1-flash-1017",
+    "precision": "ModelSlim W8A8_DYNAMIC mixed precision; independent MTP embedding and FP32 MTP output head"
+  },
+  "source": {
+    "repository": "https://github.com/ai-v5/deepinfer_ascend",
+    "commit": "07e5002c08bce137ab2a86a5a1fc8bb652729ad6",
+    "patch": "patches/deepinfer/a2-910b-modelslim-w8a8.patch",
+    "patch_sha256": "0e3dad0ffedb2fb9729e9710c9878045ccbea64e27b68d03725942e4c7392b44",
+    "manifest": "source-files.json"
+  },
+  "operators": {
+    "repository": "https://github.com/vllm-project/vllm-ascend",
+    "commit": "5f828ad638ee4f9b12db87f9d5481f29076d37f9",
+    "soc_version": "ascend910b1"
+  },
+  "image": {
+    "historical_runtime_id": "sha256:4d5b79f6f4075934b3676c8b4aa5c2bd429244b92e013b42d50dd166e713d343",
+    "registry_published": false,
+    "rebuild_requires_revalidation": true,
+    "os": "Ubuntu 22.04.5 LTS",
+    "glibc": "2.35"
+  },
+  "runtime_lock": "runtime-lock.json",
+  "env": {
+    "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True,pinned_reserve_segment_size_mb:64",
+    "DEEPINFER_ENFORCE_EAGER": "1",
+    "DEEPINFER_DFLASH_ENFORCE_EAGER": "1",
+    "DEEPINFER_DISABLE_SYNC_GUARD": "1",
+    "DEEPINFER_ENABLE_MTP_VARLEN": "1",
+    "DEEPINFER_SAMPLER_FORCE_TOPK": "0",
+    "DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS": "0",
+    "DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL": "0",
+    "DEEPINFER_REARRANGE_AFTER_PREFILL_IN_NORMAL_ENGINE": "0",
+    "DEEPINFER_PREFILL_STORE_EXTRA_STATE": "1",
+    "DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE": "mask",
+    "DEEPINFER_YOCO_PREFILL_KEEP_TOKENS": "256",
+    "DEEPINFER_NUM_STATE_SLOTS_RATIO": "2",
+    "DEEPINFER_HF_MODEL_DIR": "/model",
+    "DEEPINFER_JIT_CACHE_DIR": "/workspace/cache/jit",
+    "HF_HOME": "/workspace/cache/hf",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HCCL_EXEC_TIMEOUT": "1800",
+    "OMP_NUM_THREADS": "8",
+    "HOME": "/workspace/home",
+    "XDG_CACHE_HOME": "/workspace/cache/xdg",
+    "TMPDIR": "/workspace/tmp",
+    "TILELANG_CACHE_DIR": "/workspace/cache/jit/tilelang",
+    "TORCH_EXTENSIONS_DIR": "/workspace/cache/torch-extensions",
+    "DEEPINFER_ACCELERATOR": "ascend",
+    "DEEPINFER_ZERO_OVERHEAD_SCHEDULING": "0",
+    "DEEPINFER_USE_NEXTN_DECODE": "5",
+    "ASCEND_CUSTOM_OPP_PATH": "/workspace/envs/v41-ops/vendors/custom_transformer",
+    "DEEPINFER_910B_OP_LIBRARY": "/workspace/build/vllm-bindings-lib/vllm_ascend_C.cpython-312-aarch64-linux-gnu.so",
+    "DEEPINFER_LOGGING_INTERVAL_STEP": "1"
+  },
+  "library_paths": [
+    "envs/v41-ops/vendors/custom_transformer/op_api/lib",
+    "build/vllm-bindings-lib",
+    "envs/gcc13/lib",
+    "envs/python-site/z3/lib"
+  ],
+  "server": {
+    "max_model_len": 262144,
+    "max_output_tokens": 32768,
+    "max_images_per_request": 1,
+    "max_num_batched_tokens": 2048,
+    "max_num_seqs": 1,
+    "gpu_memory_utilization": 0.75,
+    "prefill_any_interval": 1,
+    "eplb_interval": 0,
+    "dspark": true
+  },
+  "validation": {
+    "native_eight_rank_generation_mtp_and_prefix_consistency": "PENDING_REVALIDATION_AFTER_PREFILL_OPTIMIZATION",
+    "api_json_fixed32_sse_prefix_and_overflow": "PASS_CURRENT_SOURCE_SHORT_REQUEST_SCOPE",
+    "model_file_contents": "PASS_ALL_152_SHA256",
+    "public_launcher_start": "PASS_ACTUAL_START_EIGHT_WORKERS_AND_REAL_API_QUERIES",
+    "total_context_tokens": 262144,
+    "context_capacity": "HISTORICAL_CONFIGURED_NOT_VALIDATED_NO_ACTIVE_CAPACITY_TEST",
+    "vision_inference": "NOT_VALIDATED",
+    "performance_data": "PRIVATE_NOT_STORED_HERE",
+    "public_launcher_artifact_check": "PASS_READ_ONLY_SOURCE_LIBRARIES_AND_PACKAGE_IDENTITY_NO_MODEL_START",
+    "prefill_component": "PASS_SIX_NATIVE_SCORE_AND_TOPK_EQUIVALENCE_CASES_NOT_FULL_MODEL_ACCEPTANCE",
+    "native_api_mtp_acceptance": "PASS_POSITIVE_NATIVE_STEP_WINDOW_COUNTERS_DURING_ACTUAL_FIXED32_STREAM"
+  },
+  "api_requirements": "requirements-api.lock",
+  "tested_software": {
+    "host_driver": "26.0.rc1",
+    "host_cann": "9.0",
+    "container_cann": "9.1.0",
+    "python": "3.12.13",
+    "gcc": "13.4.0",
+    "scope": "Observed software combination; changes require separate validation"
+  }
+}

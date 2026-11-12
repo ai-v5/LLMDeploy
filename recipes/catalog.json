@@ -25,9 +25,23 @@
     },
     {
       "generation": "A2",
-      "status": "planned-not-validated",
-      "hardware_model": null,
-      "engines": []
+      "status": "candidate-native-text-validation-not-full-context",
+      "hardware_model": "910B1",
+      "engines": [
+        {
+          "engine": "deepinfer",
+          "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017/recipe.json",
+          "guide": "docs/deployments/a2/910b/deepinfer.md",
+          "path_note": "Historical single-host compatibility profile with CPU expert offload; not the current resident-expert deployment."
+        },
+        {
+          "engine": "deepinfer",
+          "profile": "two-host-ep16-resident",
+          "recipe": "recipes/a2/910b/deepinfer/deepseek-v4.1-flash-1017-ep16/recipe.json",
+          "guide": "docs/deployments/a2/910b/deepinfer.md",
+          "path_note": "Native EP16 model source passed 16-worker start, short MTP/cache and identical frozen4K cold/cache checks. The public entry has only been identity checked, not restarted. Previous-source32K is historical only; configured context is not capacity validation."
+        }
+      ]
     },
     {
       "generation": "A3",
