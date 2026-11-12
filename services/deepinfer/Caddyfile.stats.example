@@ -1,0 +1,19 @@
+# Example only: both ingress aliases pass through one local statistics proxy.
+# Configure exposure/TLS separately and preserve the existing authenticated gateway.
+:19000, :19003 {
+	bind 127.0.0.1
+	request_body {
+		max_size 64MB
+	}
+	reverse_proxy 127.0.0.1:19882 127.0.0.1:19010 {
+		# Keep the original authenticated gateway available if the collector is
+		# marked unhealthy; requests on the fallback are not accounted.
+		lb_policy first
+		fail_duration 2s
+		lb_try_duration 6s
+		lb_try_interval 20ms
+		# Override any client-supplied value with Caddy's direct peer address.
+		header_up X-LLMDeploy-Client-IP {remote_host}
+		flush_interval 10ms
+	}
+}
