@@ -1,5 +1,19 @@
 # 停止后的空闲恢复
 
+## 普通模型的空闲恢复
+
+`deploy_recovery.ordinary_recovery` 只恢复固定 ID、名称、镜像和配置指纹的原容器，不停止或杀死模型。首次布防必须观察到该容器在运行，既有的已停止容器不会自动认领；机器重启后只有已认领的运行意图才进入新的恢复窗口。观察到 Docker 对目标的 stop、kill 或销毁时保持停止，随后人工重新启动形成新运行代际才重新布防。普通退出码为零且不属于机器重启时也保持停止；仅 Docker 守护进程重启导致的正常退出不作为机器重启处理。
+
+非零退出和机器重启以尽力判断处理。宿主机直接发出的信号可能与程序异常具有相同退出码；事件缓冲可能丢失记录，重启前后的墙钟可能变化，因此无法保证所有人工停服都被识别。控制历史不完整时，核对目标稳定性并清空旧采样，再从头观察；发现明确的控制操作则保持停止。观察器重启会清空空闲采样，采样间隔超过 150 秒也会重计；较短的采样间隙仍可能漏掉短任务。
+
+退出后至少两小时的观察窗需要逐次确认八卡状态、无 NPU 进程、没有其他工作容器及没有受监控的设备句柄。忙、未知、设备布局变化或采样失败都会重置窗口；启动前再次核对目标、控制事件和当前资源。重置后的计时先写入状态文件再请求启动，失败后重新等待。采样不能替代所有使用者共同遵守的资源租约：最终检查与启动之间仍可能有其他任务进入。
+
+本模块要求 Docker 服务 active 且 `docker.socket` inactive；状态不满足时不连接、不启动模型。服务和 socket 检查与连接之间仍有竞争。若 Docker 启动依赖 socket，重启后必须先确保 daemon 的连接方式和 socket 状态符合要求，否则恢复保持等待。恢复请求成功或容器处于 running 只表示启动命令或进程状态，推理健康与网关就绪必须另行核验。
+
+配置沿用固定身份字段 `container_id`、`container_name`、`image_id`、`spec_sha256`、`docker`、`npu_smi`、`state_file` 和可选的 `non_workload_containers`，并要求 `device_patterns` 列出机器实际需要检查的设备路径模式与数量。每项为 `{"pattern": "/dev/...", "count": 设备数}`；至少覆盖八个 `/dev/davinci[0-7]` 和 `/dev/davinci_manager`，同时包含现场实际使用的其他设备类型。可选 `non_workload_processes` 只用于操作者确认可以共存的 root 系统服务，逐项固定 `service`、`exe_path`、`exe_sha256`、`cmdline_sha256`、`environ_sha256`；仅扫描前后均核验到精确 MainPID、进程代际、控制组及各项指纹的持有者可跳过。缺项、数量不符、权限不足、身份变化或其他持有者均阻止启动。机器专属配置和实际路径不提交到本仓。
+
+安装时须一同复制 `deploy_recovery/__init__.py`、`watchdog.py`、`deepinfer.py`、`device_holders.py` 和 `ordinary_recovery.py`，并按实际路径填写 `llmdeploy-ordinary-recovery.service`；配置、状态目录和 service 均使用任务专属名称，禁止覆盖现有部署。服务使用 `PartOf=docker.service`，不附带停止模型的钩子。启用后检查状态文件、服务进程、目标容器及推理健康；没有执行真实故障和完整两小时恢复时须明确标为未验证。
+
 ## DeepInfer 共享机器让机恢复
 
 `deploy_recovery.deepinfer` 用于 DeepInfer 共享机器。目标容器使用 `restart=no`；宿主机的 `llmdeploy-deepinfer-recovery.service` 观察容器退出和宿主机重启后的退出状态，只对固定 ID、镜像和配置的原容器执行 start，不停止或杀死其他任务。当前正在运行的模型无需重启即可切换此策略。
