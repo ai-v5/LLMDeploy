@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover a pinned ordinary model after sampled NPU idleness
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/llmdeploy-ordinary-recovery
+ExecStart=/usr/bin/python3 -B -m deploy_recovery.ordinary_recovery --config /etc/llmdeploy-ordinary-recovery.json
+Restart=always
+RestartSec=60
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target docker.service

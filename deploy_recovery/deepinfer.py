@@ -72,8 +72,9 @@ def target_fingerprint(config):
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def inspect_target(config):
-    rows = json.loads(docker_command(config, ['inspect', '--type', 'container', config['container_id']]))
+def inspect_target(config, *, docker=None):
+    docker = docker or docker_command
+    rows = json.loads(docker(config, ['inspect', '--type', 'container', config['container_id']]))
     if len(rows) != 1:
         raise ValueError('TARGET_CHANGED')
     row = rows[0]
@@ -85,8 +86,9 @@ def inspect_target(config):
     return row['State']
 
 
-def docker_events(config, since, until):
-    text = docker_command(config, ['events', '--since', str(since), '--until', str(until),
+def docker_events(config, since, until, *, docker=None):
+    docker = docker or docker_command
+    text = docker(config, ['events', '--since', str(since), '--until', str(until),
                                    '--filter', 'container=' + config['container_id'], '--format', '{{json .}}'])
     events = []
     for line in text.splitlines():
@@ -102,8 +104,8 @@ def npu_observation(config):
         return 'UNKNOWN'
 
 
-def load_deepinfer_config(path):
-    config = load_config(path, optional_fields=('non_workload_containers',))
+def load_deepinfer_config(path, *, extra_fields=()):
+    config = load_config(path, optional_fields=('non_workload_containers', *extra_fields))
     exemptions = config.get('non_workload_containers', [])
     if not isinstance(exemptions, list):
         raise ValueError('INVALID_INFRASTRUCTURE')
@@ -120,14 +122,15 @@ def load_deepinfer_config(path):
     return config
 
 
-def machine_observation(config):
+def machine_observation(config, *, docker=None):
     """Do not share a machine with another running workload container."""
     observation = npu_observation(config)
     if observation != 'IDLE':
         return observation
     try:
         allowed = {row['container_id']: row['image_id'] for row in config.get('non_workload_containers', [])}
-        running = docker_command(config, ['ps', '--no-trunc', '--format', '{{.ID}}']).splitlines()
+        docker = docker or docker_command
+        running = docker(config, ['ps', '--no-trunc', '--format', '{{.ID}}']).splitlines()
         for container_id in running:
             if not re.fullmatch('[0-9a-f]{64}', container_id):
                 return 'UNKNOWN'
@@ -135,7 +138,7 @@ def machine_observation(config):
                 continue
             if container_id not in allowed:
                 return 'BUSY'
-            image = docker_command(config, ['inspect', '--type', 'container', '--format',
+            image = docker(config, ['inspect', '--type', 'container', '--format',
                                             '{{.Image}}', container_id]).strip()
             if image != allowed[container_id]:
                 return 'BUSY'
@@ -144,7 +147,7 @@ def machine_observation(config):
         return 'UNKNOWN'
 
 
-def control_history_complete(config, previous, cursor, until):
+def control_history_complete(config, previous, cursor, until, *, docker=None):
     """Accept an observer gap only when the Docker event history is bounded."""
     try:
         last_check = previous['last_check']
@@ -160,7 +163,8 @@ def control_history_complete(config, previous, cursor, until):
         started = daemon_start()
         if started <= 0 or started > last_check:
             return False
-        output = docker_command(config, ['events', '--since', str(cursor - 1), '--until', str(until),
+        docker = docker or docker_command
+        output = docker(config, ['events', '--since', str(cursor - 1), '--until', str(until),
                                          '--format', '{{.TimeNano}}']).splitlines()
         if len(output) >= 256 or not all(re.fullmatch(r'\d+', line) for line in output):
             return False
