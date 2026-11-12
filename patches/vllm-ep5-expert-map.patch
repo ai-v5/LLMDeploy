@@ -1,0 +1,22 @@
+--- a/vllm/model_executor/layers/fused_moe/expert_map_manager.py
++++ b/vllm/model_executor/layers/fused_moe/expert_map_manager.py
+@@ -447,7 +447,18 @@ class ExpertMapManager:
+         ) = determine_expert_map(
+             ep_size=self.ep_size,
+             ep_rank=self.ep_rank,
+-            global_num_experts=self.global_num_experts,
++            # Only physical slots are padded; router and checkpoint retain real IDs.
++            # EP5 uses 385 slots for 384 main experts and 130 for 128 draft experts.
++            global_num_experts=(
++                ((self.global_num_experts + self.ep_size - 1) // self.ep_size) * self.ep_size
++                if self.use_ep
++                and ((self.ep_size == 5 and self.global_num_experts in (128, 384))
++                     or (self.ep_size == 6 and self.global_num_experts == 128))
++                and self._placement_strategy == "linear"
++                and self.num_fused_shared_experts == 0
++                and not self.rocm_aiter_enabled
++                else self.global_num_experts
++            ),
+             expert_placement_strategy=self._placement_strategy,
+             num_fused_shared_experts=self.num_fused_shared_experts,
+             return_expert_mask=self.rocm_aiter_enabled,

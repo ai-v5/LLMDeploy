@@ -9,6 +9,14 @@ REPO=Path(__file__).resolve().parents[1]
 
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 
+def manifest_for_profile(profile):
+    assert profile in ('eight-card','five-card'),'UNKNOWN_PATCH_PROFILE'
+    manifest=json.loads((REPO/'patches/manifest.json').read_text(encoding='utf-8'))
+    if profile=='five-card':
+        extra=json.loads((REPO/'patches/manifest-ep5.json').read_text(encoding='utf-8'))
+        manifest['patches']+=extra['patches']
+    return manifest
+
 def apply(root,manifest):
     operations=[]
     for row in manifest['patches']:
@@ -29,5 +37,6 @@ def apply(root,manifest):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--root',type=Path,default=Path('/vllm-workspace'))
-    args=p.parse_args();m=json.loads((REPO/'patches/manifest.json').read_text(encoding='utf-8'))
+    p.add_argument('--profile',choices=['eight-card','five-card'],default='eight-card')
+    args=p.parse_args();m=manifest_for_profile(args.profile)
     print(json.dumps({'state':'PASS_PATCHES','applied':apply(args.root,m)}))

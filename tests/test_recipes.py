@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
@@ -54,6 +55,30 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(len(m['patches']),2)
         for p in m['patches']:
             self.assertEqual(hashlib.sha256((ROOT/'patches'/p['patch']).read_bytes()).hexdigest(),p['patch_sha256'])
+
+    def test_five_card_profile_adds_a_frozen_patch_without_changing_default(self):
+        default=apply_patches.manifest_for_profile('eight-card')
+        five=apply_patches.manifest_for_profile('five-card')
+        self.assertEqual(five['patches'][:-1],default['patches'])
+        extra=five['patches'][-1]
+        self.assertEqual(extra['id'],'five-card-expert-map')
+        self.assertEqual(hashlib.sha256((ROOT/'patches'/extra['patch']).read_bytes()).hexdigest(),extra['patch_sha256'])
+
+    def test_patch_preflight_checks_all_sources_before_any_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); tree=root/'sources'/'vllm'; tree.mkdir(parents=True)
+            first=tree/'first.py'; first.write_bytes(b'before\n')
+            (tree/'second.py').write_bytes(b'unexpected\n')
+            patch_dir=root/'patches'; patch_dir.mkdir()
+            patch_file=patch_dir/'first.patch'
+            patch_file.write_bytes(b'--- a/first.py\n+++ b/first.py\n@@ -1 +1 @@\n-before\n+after\n')
+            digest=lambda b:hashlib.sha256(b).hexdigest()
+            row={'tree':'vllm','path':'first.py','before_sha256':digest(b'before\n'),
+                 'after_sha256':digest(b'after\n'),'patch':'first.patch','patch_sha256':digest(patch_file.read_bytes())}
+            extra={**row,'path':'second.py','before_sha256':digest(b'expected\n')}
+            with patch.object(apply_patches,'REPO',root), self.assertRaisesRegex(AssertionError,'SOURCE_VERSION_MISMATCH'):
+                apply_patches.apply(root/'sources',{'patches':[row,extra]})
+            self.assertEqual(first.read_bytes(),b'before\n')
 
     def test_patch_refuses_wrong_source_before_writing(self):
         m=json.loads((ROOT/'patches/manifest.json').read_text())
