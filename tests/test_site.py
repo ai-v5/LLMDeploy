@@ -13,7 +13,7 @@ from scripts.build_site import ROOT, build, pages, slug, verification_files
 class Document(HTMLParser):
     def __init__(self, text):
         super().__init__()
-        self.links, self.ids, self.meta = [], set(), {}
+        self.links, self.ids, self.meta, self.scripts = [], set(), {}, []
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
@@ -22,6 +22,8 @@ class Document(HTMLParser):
             self.ids.add(attrs['id'])
         if 'href' in attrs:
             self.links.append(attrs['href'])
+        if tag == 'script' and 'src' in attrs:
+            self.scripts.append(attrs['src'])
         if tag == 'meta' and 'name' in attrs:
             self.meta[attrs['name']] = attrs.get('content')
 
@@ -78,9 +80,12 @@ class SiteTests(unittest.TestCase):
             output = Path(tmp) / 'site'
             self.assertEqual(build(output), len(config['pages']))
             documents = {p['output']: Document((output / p['output']).read_text(encoding='utf-8')) for p in config['pages']}
-            expected = set(documents) | {'assets/style.css', 'assets/home.css', 'sitemap.xml', 'robots.txt', '.nojekyll'} | set(config.get('google_verification_files', []))
+            expected = set(documents) | {'assets/style.css', 'assets/home.css', 'assets/analytics.js', 'sitemap.xml', 'robots.txt', '.nojekyll'} | set(config.get('google_verification_files', []))
             self.assertEqual({p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}, expected)
             for name, document in documents.items():
+                self.assertTrue({'analytics-consent', 'analytics-accept', 'analytics-reject', 'analytics-settings', 'analytics-storage-warning'} <= document.ids)
+                self.assertEqual(len(document.scripts), 1)
+                self.assertEqual((output / name).parent.joinpath(document.scripts[0]).resolve(), (output / 'assets/analytics.js').resolve())
                 self.assertTrue(document.meta['description'])
                 self.assertNotIn('google-site-verification', document.meta)
                 for link in document.links:
