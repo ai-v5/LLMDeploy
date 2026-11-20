@@ -103,7 +103,7 @@ def build(output, root=ROOT):
     # Require a new directory so no stale files or private inputs survive.
     output.mkdir(parents=True, exist_ok=False)
     (output / 'assets').mkdir()
-    for asset in ('style.css', 'home.css'):
+    for asset in ('style.css', 'home.css', 'analytics.js'):
         (output / 'assets' / asset).write_bytes((root / 'site' / asset).read_bytes())
     for name, raw in verification_assets.items():
         (output / name).write_bytes(raw)
@@ -128,14 +128,20 @@ def build(output, root=ROOT):
 <div class="document-source">本文源于仓库文档 · <a href="{config['repository']}/blob/{config['branch']}/{page['source']}">查看 Markdown 源文件</a><br>仅分享已使用经验；新环境与新工件需重新验证。敏感信息不提供。</div></main></div>
 <footer>LLMDeploy · 原创内容 AGPL-3.0-only，上游保留原许可 · 不提供生产、性能或兼容性保证</footer>'''
         home_style = '<link rel="stylesheet" href="assets/home.css">' if landing else ''
+        analytics_path = posixpath.relpath('assets/analytics.js', posixpath.dirname(page['output']) or '.')
         document = f'''<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>#analytics-consent:not([hidden]){{position:fixed;z-index:1000;bottom:0;left:0;right:0;padding:1rem;background:white;color:#222;box-shadow:0 -2px 12px #0003}}#analytics-consent p{{margin:0 0 .5rem}}#analytics-consent button,#analytics-settings{{cursor:pointer}}</style>
+<script src="{analytics_path}" defer></script>
 <title>{html.escape(page['title'])}</title><meta name="description" content="{html.escape(page['description'], quote=True)}">
 <link rel="canonical" href="{canonical}"><meta property="og:type" content="website"><meta property="og:locale" content="zh_CN">
 <meta property="og:title" content="{html.escape(page['title'], quote=True)}"><meta property="og:url" content="{canonical}">
 <meta property="og:description" content="{html.escape(page['description'], quote=True)}">{meta}
 <link rel="stylesheet" href="{posixpath.relpath('assets/style.css', posixpath.dirname(page['output']) or '.')}">{home_style}<link rel="sitemap" type="application/xml" href="{config['url']}sitemap.xml"></head>
-<body class="{'landing' if landing else 'document'}"><a class="skip" href="#content">跳到正文</a>{content}</body></html>
+<body class="{'landing' if landing else 'document'}"><a class="skip" href="#content">跳到正文</a>{content}
+<div><button type="button" id="analytics-settings">统计设置</button></div>
+<div id="analytics-consent" role="region" aria-label="访问统计设置" hidden><p>经您允许，本站使用 Google Analytics 统计页面访问和互动，可能使用 Cookie 并处理页面地址、设备信息与近似地区。拒绝后不加载统计代码。<a href="https://policies.google.com/privacy">Google 隐私权政策</a>。可随时通过“统计设置”更改选择。</p><p id="analytics-storage-warning" hidden>浏览器未能保存您的选择。本页已停止统计；请检查浏览器存储设置，清除此网站的本地存储，并关闭其他已打开的站点标签页后重新选择。</p><button type="button" id="analytics-accept">允许统计</button> <button type="button" id="analytics-reject">拒绝统计</button></div>
+</body></html>
 '''
         path = output / page['output']
         path.parent.mkdir(parents=True, exist_ok=True)
