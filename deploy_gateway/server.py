@@ -5,7 +5,6 @@ Client Authorization is consumed here and never forwarded to the model.
 """
 import argparse
 import hashlib
-import hmac
 from http.client import HTTPConnection, HTTPException, IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -18,6 +17,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from .auth import authorized
 from .routing import Busy, SessionRouter, Unavailable, affinity_key, prefix_rank
 
 HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -141,18 +141,7 @@ class Gateway(ThreadingHTTPServer):
         super().server_close()
 
     def authorized(self, value):
-        data = json.loads(self.key_store.read_text())
-        if data.get('version') != 1 or not isinstance(data.get('records'), dict):
-            raise ValueError('Unsupported key store')
-        digest = hashlib.sha256(value.encode()).hexdigest()
-        accepted = False
-        for record in data['records'].values():
-            expected = record['sha256']
-            if not re.fullmatch(r'[0-9a-f]{64}', expected) or not isinstance(record['active'], bool):
-                raise ValueError('Invalid key record')
-            matches = hmac.compare_digest(digest, expected)
-            accepted = accepted or (matches and record['active'])
-        return accepted
+        return authorized(self.key_store, value)
 
     def context_route(self, headers):
         values = headers.get_all('x-model-context-window', [])
